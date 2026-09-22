@@ -36,6 +36,7 @@ keychain setup
 keychain sync
 keychain list
 keychain show ID_OR_UNIQUE_PREFIX
+keychain show ID_OR_UNIQUE_PREFIX --json
 keychain totp ID_OR_UNIQUE_PREFIX
 ```
 
@@ -69,6 +70,11 @@ The current pre-release state layout intentionally has no compatibility migratio
 always available with `keychain logout --forget-device`, even when an obsolete Octagon state file
 cannot be decoded. This also removes the software security root and anisette machine data, so run
 `keychain anisette setup` before signing in again.
+
+`show` displays the current TOTP code and remaining validity alongside the password when one is
+configured. `show --json` emits the same secret-bearing result as one compact JSON object for
+structured consumers. The narrower `totp` command emits only the current code and remains the safer
+choice for scripts that do not need the password.
 
 The Apple ID password is read from the terminal only when a fresh Apple authentication is needed.
 It is never saved. The device passcode, 2FA code, PET, and decrypted transport keys are also never

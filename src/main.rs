@@ -62,7 +62,12 @@ enum Command {
     /// List locally cached credentials without revealing passwords.
     List { query: Option<String> },
     /// Reveal one locally cached credential.
-    Show { id: String },
+    Show {
+        id: String,
+        /// Emit one JSON object, including the password and current TOTP code.
+        #[arg(long)]
+        json: bool,
+    },
     /// Generate the current verification code for one credential.
     Totp { id: String },
     /// Show local authentication and vault status.
@@ -128,7 +133,7 @@ fn run(cli: Cli) -> Result<()> {
             command_sync(&paths, config, &backend, &store)
         }
         Command::List { query } => command_list(query.as_deref(), &store),
-        Command::Show { id } => command_show(&id, &store),
+        Command::Show { id, json } => command_show(&id, json, &store),
         Command::Totp { id } => command_totp(&id, &store),
         Command::Status => command_status(&paths, &config, &backend, &store),
         Command::Logout { forget_device } => {
@@ -580,9 +585,44 @@ fn command_list(query: Option<&str>, store: &StateStore<'_>) -> Result<()> {
     Ok(())
 }
 
-fn command_show(id: &str, store: &StateStore<'_>) -> Result<()> {
+fn command_show(id: &str, json: bool, store: &StateStore<'_>) -> Result<()> {
     let vault = require_vault(store)?;
     let item = find_credential(&vault.credentials, id)?;
+    let now = unix_now().max(0) as u64;
+    let totp = if item.totp_uri.is_empty() {
+        None
+    } else {
+        Some(
+            keychain::totp::generate(&item.totp_uri, now).ok_or_else(|| {
+                Error::InvalidData("credential has an invalid TOTP configuration".into())
+            })?,
+        )
+    };
+    if json {
+        let totp = totp.as_ref().map(|totp| {
+            serde_json::json!({
+                "code": totp.code,
+                "expires_at": totp.expires,
+                "period": totp.period,
+                "remaining_seconds": totp.expires.saturating_sub(now),
+            })
+        });
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "schema_version": 1,
+                "kind": "login",
+                "id": item.id,
+                "title": item.title,
+                "domain": item.domain,
+                "username": item.username,
+                "password": item.password,
+                "notes": item.notes,
+                "totp": totp,
+            }))?
+        );
+        return Ok(());
+    }
     println!("id: {}", item.id);
     println!("title: {}", credential::printable(&item.title));
     println!("domain: {}", credential::printable(&item.domain));
@@ -591,8 +631,12 @@ fn command_show(id: &str, store: &StateStore<'_>) -> Result<()> {
     if !item.notes.is_empty() {
         println!("notes: {}", credential::printable(&item.notes));
     }
-    if !item.totp_uri.is_empty() {
-        println!("totp: configured");
+    if let Some(totp) = totp {
+        println!(
+            "totp: {} ({}s remaining)",
+            totp.code,
+            totp.expires.saturating_sub(now)
+        );
     }
     Ok(())
 }
@@ -1045,6 +1089,20 @@ mod tests {
                 assert_eq!(bottle.as_deref(), Some("com.apple.icdp.record.test"));
             }
             command => panic!("expected setup command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn show_accepts_json_output() {
+        let cli = Cli::try_parse_from(["keychain", "show", "record-id", "--json"])
+            .unwrap_or_else(|error| panic!("parse show: {error}"));
+
+        match cli.command {
+            Command::Show { id, json } => {
+                assert_eq!(id, "record-id");
+                assert!(json);
+            }
+            command => panic!("expected show command, got {command:?}"),
         }
     }
 }
