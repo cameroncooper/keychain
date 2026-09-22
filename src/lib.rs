@@ -3,6 +3,7 @@ pub mod config;
 pub mod credential;
 pub mod error;
 pub mod model;
+pub mod passkey;
 pub mod paths;
 pub mod proto;
 mod secret;

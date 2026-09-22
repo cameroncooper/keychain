@@ -7,6 +7,8 @@ use base64::engine::general_purpose::STANDARD as B64;
 use chacha20poly1305::aead::{Aead, KeyInit, Payload};
 use chacha20poly1305::{XChaCha20Poly1305, XNonce};
 use hkdf::Hkdf;
+use p256::SecretKey as P256SecretKey;
+use p256::ecdsa::{Signature as P256Signature, SigningKey as P256SigningKey};
 use p384::ecdh::diffie_hellman;
 use p384::ecdsa::{
     Signature, SigningKey,
@@ -21,7 +23,7 @@ use sha2::{Digest, Sha256, Sha384};
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
-use super::{BackendCapabilities, KeyRef, KeyUsage, Purpose, SecurityBackend};
+use super::{BackendCapabilities, KeyAlgorithm, KeyRef, KeyUsage, Purpose, SecurityBackend};
 use crate::paths::{AppPaths, atomic_write_private, create_private_exclusive, read_bounded};
 use crate::{Error, Result};
 
@@ -34,6 +36,9 @@ const HEADER_FIXED: usize = 4 + 1 + 1 + 1 + NONCE_LEN;
 #[derive(Serialize, Deserialize)]
 struct KeyRecord {
     usage: KeyUsage,
+    /// Absent in key databases written before passkey support; those keys were all P-384.
+    #[serde(default)]
+    algorithm: KeyAlgorithm,
     scalar_b64: String,
 }
 
@@ -175,7 +180,7 @@ impl SoftwareFileBackend {
         atomic_write_private(&self.paths.keys_file(), &envelope)
     }
 
-    fn key_secret(&self, key: &KeyRef, usage: Option<KeyUsage>) -> Result<SecretKey> {
+    fn key_secret_p384(&self, key: &KeyRef, usage: Option<KeyUsage>) -> Result<SecretKey> {
         if key.backend_id != BACKEND_ID {
             return Err(Error::Security(format!(
                 "key {} belongs to backend {}",
@@ -187,6 +192,9 @@ impl SoftwareFileBackend {
                 return Err(Error::Security("key usage mismatch".into()));
             }
         }
+        if key.algorithm != KeyAlgorithm::P384 {
+            return Err(Error::Security("key algorithm mismatch".into()));
+        }
         let _guard = self
             .keys_lock
             .lock()
@@ -196,8 +204,8 @@ impl SoftwareFileBackend {
             .keys
             .get(&key.key_id)
             .ok_or_else(|| Error::Security(format!("key {} does not exist", key.key_id)))?;
-        if record.usage != key.usage {
-            return Err(Error::Security("stored key usage mismatch".into()));
+        if record.usage != key.usage || record.algorithm != key.algorithm {
+            return Err(Error::Security("stored key metadata mismatch".into()));
         }
         let mut scalar = Zeroizing::new(
             B64.decode(&record.scalar_b64)
@@ -209,7 +217,44 @@ impl SoftwareFileBackend {
         Ok(secret)
     }
 
-    fn insert_secret(&self, usage: KeyUsage, secret: &SecretKey) -> Result<KeyRef> {
+    fn key_secret_p256(&self, key: &KeyRef, usage: Option<KeyUsage>) -> Result<P256SecretKey> {
+        if key.backend_id != BACKEND_ID {
+            return Err(Error::Security(format!(
+                "key {} belongs to backend {}",
+                key.key_id, key.backend_id
+            )));
+        }
+        if let Some(expected) = usage {
+            if key.usage != expected {
+                return Err(Error::Security("key usage mismatch".into()));
+            }
+        }
+        if key.algorithm != KeyAlgorithm::P256 {
+            return Err(Error::Security("key algorithm mismatch".into()));
+        }
+        let _guard = self
+            .keys_lock
+            .lock()
+            .map_err(|_| Error::Security("software key database lock poisoned".into()))?;
+        let db = self.load_keys()?;
+        let record = db
+            .keys
+            .get(&key.key_id)
+            .ok_or_else(|| Error::Security(format!("key {} does not exist", key.key_id)))?;
+        if record.usage != key.usage || record.algorithm != key.algorithm {
+            return Err(Error::Security("stored key metadata mismatch".into()));
+        }
+        let mut scalar = Zeroizing::new(
+            B64.decode(&record.scalar_b64)
+                .map_err(|_| Error::InvalidData("invalid software key encoding".into()))?,
+        );
+        let secret = P256SecretKey::from_slice(&scalar)
+            .map_err(|_| Error::InvalidData("invalid P-256 private scalar".into()))?;
+        scalar.zeroize();
+        Ok(secret)
+    }
+
+    fn insert_p384_secret(&self, usage: KeyUsage, secret: &SecretKey) -> Result<KeyRef> {
         let _guard = self
             .keys_lock
             .lock()
@@ -221,6 +266,7 @@ impl SoftwareFileBackend {
             key_id.clone(),
             KeyRecord {
                 usage,
+                algorithm: KeyAlgorithm::P384,
                 scalar_b64: B64.encode(scalar.as_slice()),
             },
         );
@@ -230,12 +276,57 @@ impl SoftwareFileBackend {
             backend_id: BACKEND_ID.into(),
             key_id,
             usage,
+            algorithm: KeyAlgorithm::P384,
+        })
+    }
+
+    fn insert_p256_secret(&self, usage: KeyUsage, secret: &P256SecretKey) -> Result<KeyRef> {
+        let _guard = self
+            .keys_lock
+            .lock()
+            .map_err(|_| Error::Security("software key database lock poisoned".into()))?;
+        let mut db = self.load_keys()?;
+        let public = secret.public_key().to_encoded_point(false);
+        let key_id = format!(
+            "webauthn-p256-{}",
+            hex::encode(Sha256::digest(public.as_bytes()))
+        );
+        let mut scalar = Zeroizing::new(secret.to_bytes().to_vec());
+        if let Some(existing) = db.keys.get(&key_id) {
+            let existing_scalar = B64
+                .decode(&existing.scalar_b64)
+                .map_err(|_| Error::InvalidData("invalid software key encoding".into()))?;
+            if existing.usage != usage
+                || existing.algorithm != KeyAlgorithm::P256
+                || existing_scalar != scalar.as_slice()
+            {
+                return Err(Error::Security(
+                    "a different key already uses the imported passkey identifier".into(),
+                ));
+            }
+        } else {
+            db.keys.insert(
+                key_id.clone(),
+                KeyRecord {
+                    usage,
+                    algorithm: KeyAlgorithm::P256,
+                    scalar_b64: B64.encode(scalar.as_slice()),
+                },
+            );
+            self.save_keys(&db)?;
+        }
+        scalar.zeroize();
+        Ok(KeyRef {
+            backend_id: BACKEND_ID.into(),
+            key_id,
+            usage,
+            algorithm: KeyAlgorithm::P256,
         })
     }
 
     #[cfg(test)]
     pub(crate) fn export_private_x963_for_test(&self, key: &KeyRef) -> Result<Zeroizing<Vec<u8>>> {
-        let secret = self.key_secret(key, None)?;
+        let secret = self.key_secret_p384(key, None)?;
         let mut out = Zeroizing::new(
             secret
                 .public_key()
@@ -261,6 +352,8 @@ impl SecurityBackend for SoftwareFileBackend {
             sign_p384_sha256: true,
             sign_p384_sha384: true,
             ecdh_p384: true,
+            import_p256: true,
+            sign_p256_sha256: true,
         }
     }
 
@@ -311,7 +404,7 @@ impl SecurityBackend for SoftwareFileBackend {
     }
 
     fn generate_p384(&self, usage: KeyUsage) -> Result<KeyRef> {
-        self.insert_secret(usage, &SecretKey::random(&mut OsRng))
+        self.insert_p384_secret(usage, &SecretKey::random(&mut OsRng))
     }
 
     fn import_p384_x963(&self, usage: KeyUsage, private_x963: &[u8]) -> Result<KeyRef> {
@@ -327,35 +420,73 @@ impl SecurityBackend for SoftwareFileBackend {
                 "P-384 private scalar does not match its public point".into(),
             ));
         }
-        self.insert_secret(usage, &secret)
+        self.insert_p384_secret(usage, &secret)
+    }
+
+    fn import_p256_x963(&self, usage: KeyUsage, private_x963: &[u8]) -> Result<KeyRef> {
+        if usage != KeyUsage::WebAuthnSigning {
+            return Err(Error::Security(
+                "P-256 imports are restricted to WebAuthn signing".into(),
+            ));
+        }
+        if private_x963.len() != 97 || private_x963.first() != Some(&4) {
+            return Err(Error::InvalidData(
+                "P-256 private X9.63 data must be 97 bytes".into(),
+            ));
+        }
+        let secret = P256SecretKey::from_slice(&private_x963[65..])
+            .map_err(|_| Error::InvalidData("invalid P-256 private scalar".into()))?;
+        if secret.public_key().to_encoded_point(false).as_bytes() != &private_x963[..65] {
+            return Err(Error::InvalidData(
+                "P-256 private scalar does not match its public point".into(),
+            ));
+        }
+        self.insert_p256_secret(usage, &secret)
     }
 
     fn public_x963(&self, key: &KeyRef) -> Result<Vec<u8>> {
-        Ok(self
-            .key_secret(key, None)?
-            .public_key()
-            .to_encoded_point(false)
-            .as_bytes()
-            .to_vec())
+        match key.algorithm {
+            KeyAlgorithm::P384 => Ok(self
+                .key_secret_p384(key, None)?
+                .public_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec()),
+            KeyAlgorithm::P256 => Ok(self
+                .key_secret_p256(key, None)?
+                .public_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec()),
+        }
     }
 
     fn public_spki(&self, key: &KeyRef) -> Result<Vec<u8>> {
-        self.key_secret(key, None)?
-            .public_key()
-            .to_public_key_der()
-            .map(|doc| doc.as_bytes().to_vec())
-            .map_err(|e| Error::Security(format!("could not encode P-384 SPKI: {e}")))
+        match key.algorithm {
+            KeyAlgorithm::P384 => self
+                .key_secret_p384(key, None)?
+                .public_key()
+                .to_public_key_der()
+                .map(|doc| doc.as_bytes().to_vec())
+                .map_err(|e| Error::Security(format!("could not encode P-384 SPKI: {e}"))),
+            KeyAlgorithm::P256 => self
+                .key_secret_p256(key, None)?
+                .public_key()
+                .to_public_key_der()
+                .map(|doc| doc.as_bytes().to_vec())
+                .map_err(|e| Error::Security(format!("could not encode P-256 SPKI: {e}"))),
+        }
     }
 
     fn sign_p384_sha384(&self, key: &KeyRef, message: &[u8]) -> Result<Vec<u8>> {
-        let secret = self.key_secret(key, Some(KeyUsage::Signing))?;
+        let secret = self.key_secret_p384(key, Some(KeyUsage::Signing))?;
         let signing = SigningKey::from(secret);
         let signature: Signature = signing.sign(message);
         Ok(signature.to_der().as_bytes().to_vec())
     }
 
     fn sign_p384_sha256(&self, key: &KeyRef, message: &[u8]) -> Result<Vec<u8>> {
-        let secret = self.key_secret(key, Some(KeyUsage::Signing))?;
+        let secret = self.key_secret_p384(key, Some(KeyUsage::Signing))?;
         let signing = SigningKey::from(secret);
         let digest = Sha256::digest(message);
         let signature: Signature = signing
@@ -364,8 +495,15 @@ impl SecurityBackend for SoftwareFileBackend {
         Ok(signature.to_der().as_bytes().to_vec())
     }
 
+    fn sign_p256_sha256(&self, key: &KeyRef, message: &[u8]) -> Result<Vec<u8>> {
+        let secret = self.key_secret_p256(key, Some(KeyUsage::WebAuthnSigning))?;
+        let signing = P256SigningKey::from(secret);
+        let signature: P256Signature = signing.sign(message);
+        Ok(signature.to_der().as_bytes().to_vec())
+    }
+
     fn ecdh_p384(&self, key: &KeyRef, peer_x963: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-        let secret = self.key_secret(key, Some(KeyUsage::Agreement))?;
+        let secret = self.key_secret_p384(key, Some(KeyUsage::Agreement))?;
         let encoded = EncodedPoint::from_bytes(peer_x963)
             .map_err(|_| Error::InvalidData("invalid P-384 peer point".into()))?;
         let peer = PublicKey::from_sec1_bytes(encoded.as_bytes())
@@ -399,6 +537,7 @@ impl SecurityBackend for SoftwareFileBackend {
 mod tests {
     use std::os::unix::fs::PermissionsExt;
 
+    use p256::ecdsa::{Signature as P256Signature, VerifyingKey as P256VerifyingKey};
     use p384::ecdsa::{
         Signature, VerifyingKey,
         signature::{Verifier, hazmat::PrehashVerifier},
@@ -450,7 +589,7 @@ mod tests {
             .sign_p384_sha384(&signing, b"hello")
             .unwrap_or_else(|e| panic!("sign: {e}"));
         let public = backend
-            .key_secret(&signing, None)
+            .key_secret_p384(&signing, None)
             .unwrap_or_else(|e| panic!("key: {e}"));
         let verify = VerifyingKey::from(public.public_key());
         let sig = Signature::from_der(&sig).unwrap_or_else(|e| panic!("signature: {e}"));
@@ -486,6 +625,35 @@ mod tests {
                 .ecdh_p384(&b, &a_pub)
                 .unwrap_or_else(|e| panic!("ecdh: {e}"))
         );
+    }
+
+    #[test]
+    fn software_p256_import_is_idempotent_and_usage_bound() {
+        let (_dir, backend) = backend();
+        let secret = P256SecretKey::from_slice(&[9_u8; 32])
+            .unwrap_or_else(|error| panic!("P-256 key: {error}"));
+        let mut x963 = secret
+            .public_key()
+            .to_encoded_point(false)
+            .as_bytes()
+            .to_vec();
+        x963.extend_from_slice(&secret.to_bytes());
+        let first = backend
+            .import_p256_x963(KeyUsage::WebAuthnSigning, &x963)
+            .unwrap_or_else(|error| panic!("first import: {error}"));
+        let second = backend
+            .import_p256_x963(KeyUsage::WebAuthnSigning, &x963)
+            .unwrap_or_else(|error| panic!("second import: {error}"));
+        assert_eq!(first, second);
+        assert!(backend.import_p256_x963(KeyUsage::Signing, &x963).is_err());
+
+        let signature = backend
+            .sign_p256_sha256(&first, b"WebAuthn assertion")
+            .unwrap_or_else(|error| panic!("sign: {error}"));
+        let signature = P256Signature::from_der(&signature)
+            .unwrap_or_else(|error| panic!("signature: {error}"));
+        let verifying = P256VerifyingKey::from(secret.public_key());
+        assert!(verifying.verify(b"WebAuthn assertion", &signature).is_ok());
     }
 
     #[test]

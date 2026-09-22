@@ -183,10 +183,49 @@ impl Credential {
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Zeroize, ZeroizeOnDrop)]
+pub struct PasskeyCredential {
+    /// The CKKS item UUID. This is our stable local selector.
+    pub id: String,
+    pub rp_id: String,
+    /// Base64url without padding, matching WebAuthn's JSON representation.
+    pub credential_id: String,
+    /// Base64url without padding. This is account metadata, not private key material.
+    pub user_handle: String,
+    pub username: String,
+    pub display_name: String,
+    #[zeroize(skip)]
+    pub created_at: f64,
+    #[zeroize(skip)]
+    pub modified_at: f64,
+    /// The private key is held by the selected security backend, never in the vault record.
+    #[zeroize(skip)]
+    pub signing_key: KeyRef,
+}
+
+impl fmt::Debug for PasskeyCredential {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PasskeyCredential")
+            .field("id", &self.id)
+            .field("rp_id", &self.rp_id)
+            .field("username", &self.username)
+            .field("display_name", &self.display_name)
+            .field("created_at", &self.created_at)
+            .field("modified_at", &self.modified_at)
+            .field("credential_id", &"[REDACTED]")
+            .field("user_handle", &"[REDACTED]")
+            .finish()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct VaultState {
     pub schema_version: u32,
     pub synced_at: i64,
     pub credentials: Vec<Credential>,
+    /// Added compatibly to schema 1; older vaults deserialize as an empty collection.
+    #[serde(default)]
+    pub passkeys: Vec<PasskeyCredential>,
 }
 
 impl fmt::Debug for VaultState {
@@ -196,6 +235,7 @@ impl fmt::Debug for VaultState {
             .field("schema_version", &self.schema_version)
             .field("synced_at", &self.synced_at)
             .field("credential_count", &self.credentials.len())
+            .field("passkey_count", &self.passkeys.len())
             .finish()
     }
 }
@@ -213,6 +253,7 @@ mod tests {
                 backend_id: "software-file-v1".into(),
                 key_id: "key".into(),
                 usage: crate::security::KeyUsage::Agreement,
+                algorithm: crate::security::KeyAlgorithm::P384,
             },
         };
         let encoded = serde_json::to_value(&state)
@@ -232,5 +273,21 @@ mod tests {
     fn pre_cleanup_octagon_shape_is_rejected() {
         let old = r#"{"joined":true,"sponsor":null}"#;
         assert!(serde_json::from_str::<OctagonTrustState>(old).is_err());
+    }
+
+    #[test]
+    fn pre_passkey_key_references_default_to_p384() {
+        let encoded = r#"{"backend_id":"software-file-v1","key_id":"old","usage":"signing"}"#;
+        let key: KeyRef = serde_json::from_str(encoded)
+            .unwrap_or_else(|error| panic!("old key reference: {error}"));
+        assert_eq!(key.algorithm, crate::security::KeyAlgorithm::P384);
+    }
+
+    #[test]
+    fn pre_passkey_vault_defaults_to_an_empty_passkey_collection() {
+        let encoded = r#"{"schema_version":1,"synced_at":123,"credentials":[]}"#;
+        let vault: VaultState =
+            serde_json::from_str(encoded).unwrap_or_else(|error| panic!("old vault: {error}"));
+        assert!(vault.passkeys.is_empty());
     }
 }

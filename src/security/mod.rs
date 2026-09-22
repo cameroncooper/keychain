@@ -12,6 +12,15 @@ pub use software::SoftwareFileBackend;
 pub enum KeyUsage {
     Signing,
     Agreement,
+    WebAuthnSigning,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum KeyAlgorithm {
+    #[default]
+    P384,
+    P256,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -19,6 +28,9 @@ pub struct KeyRef {
     pub backend_id: String,
     pub key_id: String,
     pub usage: KeyUsage,
+    /// Absent in state written before passkey support; those keys were all P-384.
+    #[serde(default)]
+    pub algorithm: KeyAlgorithm,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +76,8 @@ pub struct BackendCapabilities {
     pub sign_p384_sha256: bool,
     pub sign_p384_sha384: bool,
     pub ecdh_p384: bool,
+    pub import_p256: bool,
+    pub sign_p256_sha256: bool,
 }
 
 pub trait SecurityBackend: Send + Sync {
@@ -73,10 +87,12 @@ pub trait SecurityBackend: Send + Sync {
     fn open(&self, purpose: Purpose, envelope: &[u8]) -> Result<Zeroizing<Vec<u8>>>;
     fn generate_p384(&self, usage: KeyUsage) -> Result<KeyRef>;
     fn import_p384_x963(&self, usage: KeyUsage, private_x963: &[u8]) -> Result<KeyRef>;
+    fn import_p256_x963(&self, usage: KeyUsage, private_x963: &[u8]) -> Result<KeyRef>;
     fn public_x963(&self, key: &KeyRef) -> Result<Vec<u8>>;
     fn public_spki(&self, key: &KeyRef) -> Result<Vec<u8>>;
     fn sign_p384_sha256(&self, key: &KeyRef, message: &[u8]) -> Result<Vec<u8>>;
     fn sign_p384_sha384(&self, key: &KeyRef, message: &[u8]) -> Result<Vec<u8>>;
+    fn sign_p256_sha256(&self, key: &KeyRef, message: &[u8]) -> Result<Vec<u8>>;
     fn ecdh_p384(&self, key: &KeyRef, peer_x963: &[u8]) -> Result<Zeroizing<Vec<u8>>>;
     fn destroy_key(&self, key: &KeyRef) -> Result<()>;
 }

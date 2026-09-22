@@ -482,7 +482,7 @@ impl<'a> OctagonClient<'a> {
             .entry("synckey".into())
             .or_default()
             .extend(view_sync_keys);
-        Ok(pipeline::build_credentials(&records, tlks))
+        pipeline::build_credentials(&records, tlks)
     }
 
     fn fetch_recoverable_tlks(&self, state: &OctagonState) -> Result<RecoveredKeys> {

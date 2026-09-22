@@ -14,6 +14,7 @@ aes-siv = "0.7"
 base64 = "0.22"
 cbc = "0.1"
 chacha20poly1305 = "0.10"
+ciborium = "0.2"
 clap = { version = "4.5", features = ["derive"] }
 data-encoding = "2"
 flate2 = "1"
@@ -25,6 +26,7 @@ libc = "0.2"
 num-bigint = { version = "0.4", features = ["rand"] }
 num-traits = "0.2"
 p384 = { version = "0.13", features = ["ecdh", "ecdsa", "pkcs8"] }
+p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
 pbkdf2 = "0.12"
 plist = "1.7"
 rand = "0.8"

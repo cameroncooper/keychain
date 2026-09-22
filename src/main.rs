@@ -9,8 +9,10 @@ use keychain::apple::{anisette, auth, cloudkit, escrow, octagon};
 use keychain::config::Config;
 use keychain::credential;
 use keychain::model::{
-    AccountState, Credential, DeviceIdentity, OctagonState, OctagonTrustState, VaultState,
+    AccountState, Credential, DeviceIdentity, OctagonState, OctagonTrustState, PasskeyCredential,
+    VaultState,
 };
+use keychain::passkey;
 use keychain::paths::{AppPaths, StateLock};
 use keychain::security::{SecurityBackend, SoftwareFileBackend};
 use keychain::store::StateStore;
@@ -59,8 +61,12 @@ enum Command {
     },
     /// Download and decrypt the latest password snapshot.
     Sync,
-    /// List locally cached credentials without revealing passwords.
-    List { query: Option<String> },
+    /// List locally cached logins and passkeys without revealing secrets.
+    List {
+        query: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Reveal one locally cached credential.
     Show {
         id: String,
@@ -70,6 +76,11 @@ enum Command {
     },
     /// Generate the current verification code for one credential.
     Totp { id: String },
+    /// Inspect or exercise locally cached passkeys.
+    Passkey {
+        #[command(subcommand)]
+        command: PasskeyCommand,
+    },
     /// Show local authentication and vault status.
     Status,
     /// Remove local account, trust, and vault state.
@@ -77,6 +88,18 @@ enum Command {
         /// Also remove the stable Apple-facing identity and anisette machine data.
         #[arg(long)]
         forget_device: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PasskeyCommand {
+    /// Produce a diagnostic WebAuthn assertion after an interactive approval.
+    Assert {
+        id: String,
+        #[arg(long)]
+        challenge: String,
+        #[arg(long)]
+        origin: String,
     },
 }
 
@@ -132,9 +155,10 @@ fn run(cli: Cli) -> Result<()> {
             let _lock = StateLock::acquire(&paths)?;
             command_sync(&paths, config, &backend, &store)
         }
-        Command::List { query } => command_list(query.as_deref(), &store),
+        Command::List { query, json } => command_list(query.as_deref(), json, &store),
         Command::Show { id, json } => command_show(&id, json, &store),
         Command::Totp { id } => command_totp(&id, &store),
+        Command::Passkey { command } => command_passkey(command, &backend, &store),
         Command::Status => command_status(&paths, &config, &backend, &store),
         Command::Logout { forget_device } => {
             let _lock = StateLock::acquire(&paths)?;
@@ -558,28 +582,77 @@ fn command_sync(
     eprintln!("Fetching and decrypting Passwords and Manatee zones…");
     let projection = client.sync_credentials(&state)?;
     let count = projection.credentials.len();
-    let ignored_passkeys = projection.ignored_passkeys;
+    let passkeys = projection
+        .passkeys
+        .into_iter()
+        .map(|passkey| passkey.import(backend))
+        .collect::<Result<Vec<_>>>()?;
+    let passkey_count = passkeys.len();
     store.save_vault(&VaultState {
         schema_version: 1,
         synced_at: unix_now(),
         credentials: projection.credentials,
+        passkeys,
     })?;
     println!("synced {count} credential(s)");
-    if ignored_passkeys > 0 {
-        println!("ignored {ignored_passkeys} passkey record(s): passkeys are not supported");
-    }
+    println!("synced {passkey_count} passkey(s)");
     Ok(())
 }
 
-fn command_list(query: Option<&str>, store: &StateStore<'_>) -> Result<()> {
+fn command_list(query: Option<&str>, json: bool, store: &StateStore<'_>) -> Result<()> {
     let vault = require_vault(store)?;
-    for item in credential::search(&vault.credentials, query.unwrap_or_default()) {
+    let query = query.unwrap_or_default();
+    let mut items: Vec<_> = credential::search(&vault.credentials, query)
+        .into_iter()
+        .map(VaultItem::Login)
+        .chain(
+            passkey::search(&vault.passkeys, query)
+                .into_iter()
+                .map(VaultItem::Passkey),
+        )
+        .collect();
+    items.sort_by(|a, b| {
+        b.recency()
+            .total_cmp(&a.recency())
+            .then_with(|| a.site().cmp(b.site()))
+            .then_with(|| a.username().cmp(b.username()))
+    });
+    if json {
+        let mut output = Vec::with_capacity(items.len());
+        for item in items {
+            output.push(match item {
+                VaultItem::Login(item) => serde_json::json!({
+                    "schema_version": 1,
+                    "kind": "login",
+                    "id": item.id,
+                    "title": item.title,
+                    "domain": item.domain,
+                    "username": item.username,
+                    "totp": !item.totp_uri.is_empty(),
+                }),
+                VaultItem::Passkey(item) => serde_json::json!({
+                    "schema_version": 1,
+                    "kind": "passkey",
+                    "id": item.id,
+                    "rp_id": item.rp_id,
+                    "username": item.username,
+                    "display_name": item.display_name,
+                    "credential_fingerprint": passkey::credential_fingerprint(item)?,
+                    "algorithm": "ES256",
+                }),
+            });
+        }
+        println!("{}", serde_json::to_string(&output)?);
+        return Ok(());
+    }
+    for item in items {
         println!(
-            "{}\t{}\t{}\t{}",
-            short_id(&item.id),
-            credential::printable(&item.domain),
-            credential::printable(&item.username),
-            credential::printable(&item.title)
+            "{}\t{}\t{}\t{}\t{}",
+            short_id(item.id()),
+            item.kind(),
+            credential::printable(item.site()),
+            credential::printable(item.username()),
+            credential::printable(item.title()),
         );
     }
     Ok(())
@@ -587,7 +660,13 @@ fn command_list(query: Option<&str>, store: &StateStore<'_>) -> Result<()> {
 
 fn command_show(id: &str, json: bool, store: &StateStore<'_>) -> Result<()> {
     let vault = require_vault(store)?;
-    let item = find_credential(&vault.credentials, id)?;
+    match find_vault_item(&vault, id)? {
+        VaultItem::Login(item) => command_show_login(item, json),
+        VaultItem::Passkey(item) => command_show_passkey(item, json),
+    }
+}
+
+fn command_show_login(item: &Credential, json: bool) -> Result<()> {
     let now = unix_now().max(0) as u64;
     let totp = if item.totp_uri.is_empty() {
         None
@@ -641,12 +720,81 @@ fn command_show(id: &str, json: bool, store: &StateStore<'_>) -> Result<()> {
     Ok(())
 }
 
+fn command_show_passkey(item: &PasskeyCredential, json: bool) -> Result<()> {
+    let fingerprint = passkey::credential_fingerprint(item)?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({
+                "schema_version": 1,
+                "kind": "passkey",
+                "id": item.id,
+                "rp_id": item.rp_id,
+                "username": item.username,
+                "display_name": item.display_name,
+                "credential_fingerprint": fingerprint,
+                "algorithm": "ES256",
+            }))?
+        );
+        return Ok(());
+    }
+    println!("id: {}", item.id);
+    println!("kind: passkey");
+    println!("relying party: {}", credential::printable(&item.rp_id));
+    println!("username: {}", credential::printable(&item.username));
+    if !item.display_name.is_empty() {
+        println!(
+            "display name: {}",
+            credential::printable(&item.display_name)
+        );
+    }
+    println!("algorithm: ES256");
+    println!("credential fingerprint: {fingerprint}");
+    Ok(())
+}
+
 fn command_totp(id: &str, store: &StateStore<'_>) -> Result<()> {
     let vault = require_vault(store)?;
     let item = find_credential(&vault.credentials, id)?;
     let code = keychain::totp::generate(&item.totp_uri, unix_now() as u64)
         .ok_or_else(|| Error::InvalidData("credential has no usable TOTP configuration".into()))?;
     println!("{}", code.code);
+    Ok(())
+}
+
+fn command_passkey(
+    command: PasskeyCommand,
+    backend: &dyn SecurityBackend,
+    store: &StateStore<'_>,
+) -> Result<()> {
+    match command {
+        PasskeyCommand::Assert {
+            id,
+            challenge,
+            origin,
+        } => command_passkey_assert(&id, &challenge, &origin, backend, store),
+    }
+}
+
+fn command_passkey_assert(
+    id: &str,
+    challenge: &str,
+    origin: &str,
+    backend: &dyn SecurityBackend,
+    store: &StateStore<'_>,
+) -> Result<()> {
+    let vault = require_vault(store)?;
+    let item = find_passkey(&vault.passkeys, id)?;
+    eprintln!("Passkey sign-in requested");
+    eprintln!("relying party: {}", credential::printable(&item.rp_id));
+    eprintln!("origin: {}", credential::printable(origin));
+    eprintln!("account: {}", credential::printable(&item.username));
+    let answer = prompt_line("Approve this sign-in? [y/N]: ")?;
+    if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+        return Err(Error::Refused("passkey sign-in was not approved".into()));
+    }
+    let assertion = passkey::assertion_for_origin(item, challenge, origin, backend)?;
+    println!("{}", serde_json::to_string(&assertion)?);
     Ok(())
 }
 
@@ -708,7 +856,8 @@ fn command_status(
     }
     match store.load_vault()? {
         Some(vault) => {
-            println!("vault entries: {}", vault.credentials.len());
+            println!("vault credentials: {}", vault.credentials.len());
+            println!("vault passkeys: {}", vault.passkeys.len());
             println!("last sync: {}", vault.synced_at);
         }
         None => println!("vault: empty"),
@@ -722,6 +871,20 @@ fn command_logout(
     backend: &dyn SecurityBackend,
     store: &StateStore<'_>,
 ) -> Result<()> {
+    match store.load_vault() {
+        Ok(Some(vault)) => {
+            for passkey in &vault.passkeys {
+                let _ = backend.destroy_key(&passkey.signing_key);
+            }
+        }
+        Ok(None) => {}
+        Err(error) if forget_device => {
+            eprintln!(
+                "warning: vault state could not be decoded ({error}); performing the requested full local reset"
+            );
+        }
+        Err(error) => return Err(error),
+    }
     match store.load_octagon() {
         Ok(Some(octagon)) => destroy_octagon_keys(backend, &octagon),
         Ok(None) => {}
@@ -917,6 +1080,80 @@ fn prompt_bottle_choice(
     }
 }
 
+#[derive(Clone, Copy)]
+enum VaultItem<'a> {
+    Login(&'a Credential),
+    Passkey(&'a PasskeyCredential),
+}
+
+impl<'a> VaultItem<'a> {
+    fn id(self) -> &'a str {
+        match self {
+            Self::Login(item) => &item.id,
+            Self::Passkey(item) => &item.id,
+        }
+    }
+
+    fn kind(self) -> &'static str {
+        match self {
+            Self::Login(_) => "login",
+            Self::Passkey(_) => "passkey",
+        }
+    }
+
+    fn site(self) -> &'a str {
+        match self {
+            Self::Login(item) => &item.domain,
+            Self::Passkey(item) => &item.rp_id,
+        }
+    }
+
+    fn username(self) -> &'a str {
+        match self {
+            Self::Login(item) => &item.username,
+            Self::Passkey(item) => &item.username,
+        }
+    }
+
+    fn title(self) -> &'a str {
+        match self {
+            Self::Login(item) => &item.title,
+            Self::Passkey(item) => &item.display_name,
+        }
+    }
+
+    fn recency(self) -> f64 {
+        match self {
+            Self::Login(item) => item.recency(),
+            Self::Passkey(item) if item.modified_at > 0.0 => item.modified_at,
+            Self::Passkey(item) => item.created_at,
+        }
+    }
+}
+
+fn find_vault_item<'a>(vault: &'a VaultState, id: &str) -> Result<VaultItem<'a>> {
+    let matches: Vec<_> = vault
+        .credentials
+        .iter()
+        .filter(|item| item.id == id || item.id.starts_with(id))
+        .map(VaultItem::Login)
+        .chain(
+            vault
+                .passkeys
+                .iter()
+                .filter(|item| item.id == id || item.id.starts_with(id))
+                .map(VaultItem::Passkey),
+        )
+        .collect();
+    match matches.as_slice() {
+        [item] => Ok(*item),
+        [] => Err(Error::Config(format!("no vault item matches {id}"))),
+        _ => Err(Error::Config(format!(
+            "vault item id prefix {id} is ambiguous"
+        ))),
+    }
+}
+
 fn find_credential<'a>(credentials: &'a [Credential], id: &str) -> Result<&'a Credential> {
     let matches: Vec<_> = credentials
         .iter()
@@ -927,6 +1164,20 @@ fn find_credential<'a>(credentials: &'a [Credential], id: &str) -> Result<&'a Cr
         [] => Err(Error::Config(format!("no credential matches {id}"))),
         _ => Err(Error::Config(format!(
             "credential id prefix {id} is ambiguous"
+        ))),
+    }
+}
+
+fn find_passkey<'a>(passkeys: &'a [PasskeyCredential], id: &str) -> Result<&'a PasskeyCredential> {
+    let matches: Vec<_> = passkeys
+        .iter()
+        .filter(|passkey| passkey.id == id || passkey.id.starts_with(id))
+        .collect();
+    match matches.as_slice() {
+        [item] => Ok(*item),
+        [] => Err(Error::Config(format!("no passkey matches {id}"))),
+        _ => Err(Error::Config(format!(
+            "passkey id prefix {id} is ambiguous"
         ))),
     }
 }
@@ -1104,5 +1355,19 @@ mod tests {
             }
             command => panic!("expected show command, got {command:?}"),
         }
+    }
+
+    #[test]
+    fn general_list_owns_inventory_and_passkey_has_no_list_subcommand() {
+        let cli = Cli::try_parse_from(["keychain", "list", "webauthn.io", "--json"])
+            .unwrap_or_else(|error| panic!("parse list: {error}"));
+        match cli.command {
+            Command::List { query, json } => {
+                assert_eq!(query.as_deref(), Some("webauthn.io"));
+                assert!(json);
+            }
+            command => panic!("expected list command, got {command:?}"),
+        }
+        assert!(Cli::try_parse_from(["keychain", "passkey", "list"]).is_err());
     }
 }

@@ -109,6 +109,7 @@ mod tests {
             schema_version: 1,
             synced_at: 123,
             credentials: Vec::new(),
+            passkeys: Vec::new(),
         };
         store
             .save_vault(&vault)
@@ -125,6 +126,7 @@ mod tests {
                 schema_version: 2,
                 synced_at: 456,
                 credentials: Vec::new(),
+                passkeys: Vec::new(),
             })
             .unwrap_or_else(|error| panic!("save: {error}"));
         assert!(matches!(store.load_vault(), Err(Error::InvalidData(_))));

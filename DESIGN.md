@@ -1,6 +1,6 @@
 # Keychain: design and architecture
 
-Status: Rust MVP implemented; offline verified; live login, join, and ADP sync validated
+Status: Rust MVP implemented; live login, join, ADP sync, and WebAuthn assertion validated
 Target: Asahi Linux on Apple silicon
 Implementation language: Rust
 Primary interface: `keychain` CLI
@@ -9,7 +9,8 @@ Primary interface: `keychain` CLI
 
 `keychain` will be a small, read-oriented Linux client for Apple Passwords. It will authenticate
 as a stable Apple device, join Octagon trust through an explicitly confirmed escrow recovery,
-download CKKS records, decrypt password items locally, and keep an encrypted offline snapshot.
+download CKKS records, decrypt password and passkey items locally, and keep an encrypted offline
+snapshot.
 
 The implementation is a single Rust package with a library and one CLI binary. It does not require
 an always-running `keychain` daemon. Anisette is an authentication dependency behind a provider
@@ -27,9 +28,9 @@ port. Python is not a runtime dependency of the new utility.
 
 ## Goals
 
-- Provide `setup`, `login`, `join`, `sync`, `list`, `show`, `totp`, `status`, and `logout`
-  operations.
-- Read Apple Passwords and their TOTP metadata into an encrypted local snapshot.
+- Provide `setup`, `login`, `join`, `sync`, `list`, `show`, `totp`, `passkey`, `status`, and
+  `logout` operations.
+- Read Apple Passwords, TOTP metadata, and passkeys into an encrypted local snapshot.
 - Keep credentials, tokens, and private keys encrypted at rest.
 - Use the Apple SEP when available without coupling protocol code to a particular driver API.
 - Work without a continuously running application container or network listener.
@@ -40,12 +41,13 @@ port. Python is not a runtime dependency of the new utility.
 ## Non-goals for the first release
 
 - Creating, editing, or deleting Apple Passwords.
-- Syncing passkeys, payment cards, or arbitrary keychain subsystem records.
+- Creating or updating passkeys, payment cards, or arbitrary keychain subsystem records.
 - Becoming a general-purpose replacement for macOS Keychain or Linux Secret Service.
 - Perfectly reproducing all internal macOS `securityd` behavior.
 - Eliminating anisette before a reliable local provider exists.
 - Running unattended background sync. It can be added later with a systemd timer.
-- Browser autofill. The existing extension can be adapted after the CLI and vault are stable.
+- Transparent browser autofill and WebAuthn brokering. The existing extension can be adapted after
+  the CLI, vault, and assertion core are stable.
 
 ## Trust and mutation boundary
 
@@ -74,7 +76,7 @@ The project should be precise about what it changes.
 |                                                               |
 |  CLI -> workflow/state machine -> Apple protocol clients      |
 |                                  -> CKKS decode/decrypt        |
-|                                  -> credential projection      |
+|                                  -> typed vault projection     |
 |                                                               |
 |  managed anisette helper <--- process/provider boundary       |
 |  security backend <---------- software today / SEP later      |
@@ -88,7 +90,7 @@ There are three independent concerns:
 
 1. Apple protocol interoperability: authentication, CloudKit, Octagon, escrow, and CKKS.
 2. Local secret protection: encrypting persistent state and controlling access to it.
-3. User interfaces: CLI first, browser native messaging later.
+3. User interfaces: CLI first, browser broker/native messaging later.
 
 Keeping these separate allows the Rust port to proceed while the SEP driver evolves.
 
@@ -118,12 +120,13 @@ keychain/
       pipeline.rs           TLK, class-key, and item unwrap pipeline
     config.rs               versioned configuration
     credential.rs           password/sidecar classification and TOTP
+    passkey.rs              Apple passkey parsing and WebAuthn assertion signing
     model.rs                versioned persistent state
     paths.rs                XDG paths, locking, private atomic files
     proto.rs                bounded protobuf encoding/decoding
     security/
       mod.rs                SecurityBackend trait and opaque key references
-      software.rs           encrypted software P-384 key store and envelopes
+      software.rs           encrypted software P-384/P-256 key store and envelopes
     secret.rs               recursive zeroization for decrypted plist values
     store.rs                encrypted account/vault repository
     totp.rs                 RFC 6238 generation
@@ -142,9 +145,10 @@ keychain login                   authenticate and persist reusable session state
 keychain bottles                 list recoverable devices; never spend an escrow attempt
 keychain join [--bottle <label>] choose a recovery device and explicitly join; may spend one attempt
 keychain sync                    fetch and atomically replace the local snapshot
-keychain list [query]            list matching entries without secrets by default
+keychain list [query] [--json]   list matching logins and passkeys without secrets
 keychain show <entry>            explicitly reveal one locally cached credential
 keychain totp <entry>            generate a current code locally
+keychain passkey assert ...      interactively approve and emit a diagnostic WebAuthn assertion
 keychain status                  show local lifecycle and token state
 keychain logout                  remove local session and vault
 keychain logout --forget-device  full local cryptographic reset, including device and anisette data
@@ -238,9 +242,12 @@ The Rust port preserves the current proven sequence:
    item     --AES-256-SIV + authenticated data--> plist
    ```
 
-11. Classify records using their access group, combine password-manager sidecars (including their
-    site arrays), count and discard unsupported passkeys, and atomically commit a new credential
-    snapshot.
+11. Classify records using their access group and combine password-manager sidecars (including
+    their site arrays). Strictly decode `com.apple.webkit.webauthn` records, verify each 97-byte
+    P-256 private representation against its public point, and import it into the security backend.
+12. Atomically commit one encrypted typed snapshot containing logins, TOTP configuration, passkey
+    metadata, and opaque passkey `KeyRef`s. Raw passkey private scalars exist only during import and
+    are never stored in the vault record.
 
 All HTTPS requests verify certificates. The implementation does not emit raw headers, request
 bodies, decrypted plists, or cryptographic material to logs.
@@ -293,7 +300,7 @@ Use XDG locations according to their meaning:
 ```text
 $XDG_CONFIG_HOME/keychain/config.toml       non-secret settings
 $XDG_STATE_HOME/keychain/software.key       software backend root key (raw, mode 0600)
-$XDG_STATE_HOME/keychain/keys.enc           encrypted P-384 private-key database
+$XDG_STATE_HOME/keychain/keys.enc           encrypted P-384/P-256 private-key database
 $XDG_STATE_HOME/keychain/account.enc        auth tokens; never the Apple password
 $XDG_STATE_HOME/keychain/octagon.enc        peer identity and sponsor recovery material
 $XDG_STATE_HOME/keychain/vault.enc          projected credential snapshot
@@ -340,15 +347,22 @@ pub trait SecurityBackend: Send + Sync {
     fn open(&self, purpose: Purpose, envelope: &[u8]) -> Result<SecretBytes>;
     fn generate_p384(&self, usage: KeyUsage) -> Result<KeyRef>;
     fn import_p384_x963(&self, usage: KeyUsage, private: &[u8]) -> Result<KeyRef>;
+    fn import_p256_x963(&self, usage: KeyUsage, private: &[u8]) -> Result<KeyRef>;
     fn public_spki(&self, key: &KeyRef) -> Result<Vec<u8>>;
     fn sign_p384_sha256(&self, key: &KeyRef, message: &[u8]) -> Result<Vec<u8>>;
     fn sign_p384_sha384(&self, key: &KeyRef, message: &[u8]) -> Result<Vec<u8>>;
+    fn sign_p256_sha256(&self, key: &KeyRef, message: &[u8]) -> Result<Vec<u8>>;
     fn ecdh_p384(&self, key: &KeyRef, peer_x963: &[u8]) -> Result<SecretBytes>;
 }
 ```
 
 The first SEP milestone is sealed root-key storage. It provides meaningful protection at rest and
 works even if Octagon needs software representations of some keys.
+
+Synced passkeys add a separate capability: import an Apple-exported P-256 key and perform
+ECDSA/SHA-256 without exporting it again. The software backend implements that boundary now. A SEP
+backend can adopt passkey keys independently of Octagon once persistent P-256 import and signing
+are reliable; the vault's opaque `KeyRef` does not change.
 
 Direct SEP-native Octagon keys require all of the following before use:
 
@@ -376,6 +390,17 @@ new peer and performs a new, explicit trust join.
 No daemon is required for the CLI MVP. Add `keychaind` only if the SEP device must be owned by a
 privileged broker, if a browser integration needs an authorization boundary, or if keeping an
 unsealed root out of short-lived clients provides a measurable benefit.
+
+For browser WebAuthn, origin context must come from a trusted browser/authenticator API, never from
+a page content script or arbitrary native message. A CTAP adapter receives the browser-generated
+`clientDataHash`; a browser proxy adapter must securely construct `clientDataJSON` from
+browser-authoritative context. The broker accepts the hash, RP ID, allow-list, and
+user-verification requirement, selects only a matching credential, and returns authenticator data
+plus a DER ES256 signature. The software backend may assert user presence after an explicit local
+approval, but it must refuse a request that requires user verification until a real PIN, PAM,
+Touch ID, or SEP-backed verifier exists. A Chromium WebAuthentication Proxy extension and a
+browser-independent CTAP2/`uhid` authenticator are adapter options over the same narrow assertion
+core; choose after a small compatibility probe.
 
 If added, it should be systemd socket-activated rather than continuously running:
 
@@ -405,9 +430,10 @@ gain is non-exportability and policy enforcement in the SEP, not the mere existe
 - Pin minimum supported TLS behavior through the HTTP client and expose no `--insecure` production
   option.
 
-The locked implementation uses `p384`, `sha2`, `hkdf`, `aes-gcm`, `aes-siv`,
-`chacha20poly1305`, `zeroize`, `plist`, `serde`, `reqwest` with rustls, and a small bounded
-protobuf codec. Dependencies are implementation choices, not part of the wire-format contract.
+The locked implementation uses `p384`, `p256`, `sha2`, `hkdf`, `aes-gcm`, `aes-siv`,
+`chacha20poly1305`, `zeroize`, `plist`, `ciborium`, `serde`, `reqwest` with rustls, and a small
+bounded protobuf codec. Dependencies are implementation choices, not part of the wire-format
+contract.
 
 ## Testing strategy
 
@@ -460,7 +486,19 @@ Exit criterion: a live login succeeds with TLS verification and no Python runtim
 Exit criterion: a manually confirmed join and subsequent sync produce the same password set as the
 Python implementation without modifying password records.
 
-### Phase 4: SEP backend
+### Phase 4: passkey read and assertion core — implemented and live-validated
+
+- Decode bounded Apple WebAuthn records and validate their P-256 private/public representation.
+- Import passkey keys through a dedicated backend usage and store only opaque references in the
+  encrypted typed vault.
+- Implement RP/origin-bound ES256 assertions, honest UP/UV flags, safe inventory, and interactive
+  diagnostic signing.
+- Validate a synced passkey against a live relying party without exposing key material.
+
+Exit criterion: a passkey synced from Apple successfully authenticates to webauthn.io. This is
+complete; transparent browser transport remains Phase 6.
+
+### Phase 5: SEP backend
 
 - Stabilize a small driver ABI and implement capability discovery.
 - Add SEP-sealed root protection first.
@@ -471,10 +509,11 @@ Python implementation without modifying password records.
 Exit criterion: copied encrypted state is unusable off-device, reboot/suspend do not lose keys, and
 driver failure is safe and diagnosable.
 
-### Phase 5: convenience integrations
+### Phase 6: convenience integrations
 
 - Add a systemd user timer for opt-in periodic sync.
-- Port the browser native host and adapt the extension.
+- Add a narrow browser broker and adapt the extension. Probe Chromium WebAuthentication Proxy and
+  CTAP2/`uhid` before choosing the first transport.
 - Add Hide My Email as a separate optional protocol module.
 
 ## MVP acceptance criteria
@@ -487,6 +526,8 @@ driver failure is safe and diagnosable.
   warning and confirmation.
 - `keychain sync` implements read-only download and decryption of web passwords and TOTP metadata;
   password creation and website updates have been live-validated.
+- Synced Apple passkeys remain behind opaque backend references, and an ES256 assertion has been
+  accepted by webauthn.io without claiming unavailable local user verification.
 - No secret is written unencrypted or emitted through normal logs.
 - Loss or corruption of a new sync cannot destroy the last valid vault.
 - SEP is not required by the current build; protocol code depends only on backend capabilities.
@@ -504,9 +545,11 @@ These should be answered with small probes before they become architectural comm
    the logged-in user access?
 4. Does the chosen anisette helper preserve the same machine identity reliably across upgrades?
 5. Which Apple Passwords views are necessary for the minimum useful sync on the target account?
-6. Is a single encrypted snapshot sufficient for the browser use case, or is an encrypted indexed
-   database worth the added complexity later?
+6. Should the first browser passkey adapter use Chromium's WebAuthentication Proxy API or a
+   browser-independent CTAP2 device over Linux `uhid`?
+7. When should locally imported passkey keys absent from a later Apple snapshot be garbage
+   collected, and what grace period best protects against incomplete sync pages?
 
 The implemented defaults are: one CLI process, managed loopback/on-demand anisette, a software-file
-root key until SEP is available, no Apple-password saving, no background daemon, and a read-only
-password snapshot.
+root key until SEP is available, no Apple-password saving, no background daemon, and one encrypted
+typed snapshot for passwords, TOTP configuration, and passkey metadata.

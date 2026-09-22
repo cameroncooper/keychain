@@ -330,7 +330,7 @@ pub fn decrypt_items(
 pub fn build_credentials(
     records_by_type: &BTreeMap<String, Vec<Record>>,
     tlks: BTreeMap<String, Zeroizing<Vec<u8>>>,
-) -> credential::Projection {
+) -> Result<credential::Projection> {
     let class_keys = unwrap_class_keys(
         records_by_type
             .get("synckey")

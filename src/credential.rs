@@ -5,18 +5,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use data_encoding::BASE32_NOPAD;
 use plist::{Dictionary, Value};
 
+use crate::Result;
 use crate::apple::pipeline::DecryptedItem;
 use crate::model::Credential;
+use crate::passkey::{self, RecoveredPasskey};
 use crate::secret::zeroize_plist_dictionary;
 
 const APPLE_EPOCH: f64 = 978_307_200.0;
 const SIDECAR_PREFIX: &str = "com.apple.password-manager";
 const SIDECAR_LABEL_PREFIX: &str = "password manager metadata:";
-const PASSKEY_ACCESS_GROUP: &str = "com.apple.webkit.webauthn";
 
 pub struct Projection {
     pub credentials: Vec<Credential>,
-    pub ignored_passkeys: usize,
+    pub passkeys: Vec<RecoveredPasskey>,
 }
 
 pub fn normalize_host(value: &str) -> String {
@@ -88,7 +89,7 @@ fn text(fields: &Dictionary, names: &[&str]) -> String {
 
 fn payload(fields: &Dictionary, access_group: &str) -> Payload {
     let forced_sidecar = access_group.starts_with(SIDECAR_PREFIX);
-    if access_group == PASSKEY_ACCESS_GROUP
+    if access_group == passkey::ACCESS_GROUP
         || access_group == "com.apple.safari.credit-cards"
         || (access_group.starts_with("com.apple.")
             && !access_group.starts_with(SIDECAR_PREFIX)
@@ -337,7 +338,7 @@ pub fn totp_uri_from_sidecar(value: Option<&Value>) -> String {
     uri.to_string()
 }
 
-pub fn from_items(items: &[DecryptedItem]) -> Projection {
+pub fn from_items(items: &[DecryptedItem]) -> Result<Projection> {
     struct Login {
         id: String,
         key: (String, String),
@@ -346,6 +347,13 @@ pub fn from_items(items: &[DecryptedItem]) -> Projection {
         password: String,
         title: String,
         modified_at: f64,
+    }
+
+    let mut passkeys = Vec::new();
+    for item in items {
+        if let Some(passkey) = passkey::from_item(&item.record_id, &item.fields)? {
+            passkeys.push(passkey);
+        }
     }
 
     let mut logins = Vec::new();
@@ -430,13 +438,10 @@ pub fn from_items(items: &[DecryptedItem]) -> Projection {
     for sidecar in sidecars.values_mut() {
         zeroize_plist_dictionary(sidecar);
     }
-    Projection {
+    Ok(Projection {
         credentials,
-        ignored_passkeys: items
-            .iter()
-            .filter(|item| text(&item.fields, &["agrp"]) == PASSKEY_ACCESS_GROUP)
-            .count(),
-    }
+        passkeys,
+    })
 }
 
 #[cfg(test)]
@@ -521,7 +526,8 @@ mod tests {
             Value::Data(bplist(Value::Dictionary(sidecar_payload))),
         );
 
-        let projection = from_items(&[item("login-id", login), item("sidecar-id", sidecar)]);
+        let projection = from_items(&[item("login-id", login), item("sidecar-id", sidecar)])
+            .unwrap_or_else(|error| panic!("projection: {error}"));
         let credentials = projection.credentials;
         assert_eq!(credentials.len(), 1);
         let credential = &credentials[0];
@@ -539,7 +545,7 @@ mod tests {
     }
 
     #[test]
-    fn only_login_records_reach_the_vault() {
+    fn only_login_records_reach_the_password_projection() {
         let mut login = Dictionary::new();
         login.insert("agrp".into(), Value::String("com.apple.cfnetwork".into()));
         login.insert("srvr".into(), Value::String("ex.com".into()));
@@ -583,13 +589,15 @@ mod tests {
 
         let projection = from_items(&[
             item("login", login),
-            item("passkey", passkey),
             item("card", card),
             item("malformed-sidecar", malformed_sidecar),
-        ]);
+        ])
+        .unwrap_or_else(|error| panic!("projection: {error}"));
         let credentials = projection.credentials;
         assert_eq!(credentials.len(), 1);
         assert_eq!(credentials[0].password, "real");
-        assert_eq!(projection.ignored_passkeys, 1);
+        assert!(projection.passkeys.is_empty());
+
+        assert!(from_items(&[item("passkey", passkey)]).is_err());
     }
 }

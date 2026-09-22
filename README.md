@@ -2,13 +2,14 @@
 
 `keychain` is an experimental, read-only Rust CLI for accessing Apple Passwords from Linux. It
 implements native Apple authentication, an explicitly guarded Octagon trust join, CKKS download
-and decryption, local search, password display, and TOTP generation. Python and a persistent
-container are not runtime dependencies.
+and decryption, local search, password display, TOTP generation, and read-only use of synced
+passkeys. Python and a persistent container are not runtime dependencies.
 
 This is an unofficial reverse-engineering project and is not affiliated with Apple. The protocol
 implementation has comprehensive offline tests; login, Octagon join, and read-only password sync
-have been validated against a live account with Advanced Data Protection enabled. Migrating
-preexisting TLKs during a join has not yet been exercised against a nonempty account.
+have been validated against a live account with Advanced Data Protection enabled. Apple passkey
+decoding and ES256 assertions have been live-validated with a successful webauthn.io authentication.
+Migrating preexisting TLKs during a join has not yet been exercised against a nonempty account.
 `join` mutates the Octagon trust graph and escrow recovery has a server-enforced attempt limit. Read
 the warning before using it.
 
@@ -35,6 +36,7 @@ keychain anisette setup --helper /absolute/path/to/anisette-v3-server
 keychain setup
 keychain sync
 keychain list
+keychain list --json
 keychain show ID_OR_UNIQUE_PREFIX
 keychain show ID_OR_UNIQUE_PREFIX --json
 keychain totp ID_OR_UNIQUE_PREFIX
@@ -82,6 +84,20 @@ persisted. The account state retains only the reusable `mmeAuthToken` and `cloud
 the Passwords flow, not the generic GSA token set. `show` intentionally writes a requested password
 to stdout; `totp` intentionally writes a requested code.
 
+`sync` recognizes Apple WebAuthn records, validates the embedded P-256 private scalar against its
+public point, imports the key into the configured security backend, and stores only an opaque key
+reference with passkey metadata in the encrypted vault. The general `list` command includes logins
+and passkeys with an explicit `kind`; it never prints the raw passkey credential ID or user handle.
+Its JSON output includes only a short SHA-256 credential fingerprint. `show` accepts either kind of
+ID and reveals only passkey metadata for a passkey.
+
+For protocol testing, `passkey assert` accepts a unique passkey ID prefix, base64url challenge,
+and HTTPS origin. It displays the relying party, origin, and account, requires an interactive
+default-no approval, and emits a WebAuthn assertion JSON object. It binds the origin to the stored
+RP ID and deliberately does not claim user verification. This is a diagnostic/integration surface,
+not yet transparent browser support; ordinary websites invoke WebAuthn through the browser and
+will require the planned browser adapter.
+
 ## Local security model
 
 The initial implementation uses the explicitly chosen software backend:
@@ -90,7 +106,8 @@ The initial implementation uses the explicitly chosen software backend:
 - purpose-separated keys derived with HKDF-SHA-384;
 - XChaCha20-Poly1305 authenticated encryption for account, device, Octagon, key database, and vault
   state;
-- opaque references to P-384 keys stored in the encrypted key database;
+- opaque references to P-384 Octagon keys and P-256 passkey keys stored in the encrypted key
+  database;
 - `0700` directories and `0600` files, atomic replacement, schema checks, bounded reads, and refusal
   to follow state-file symlinks.
 
@@ -109,11 +126,10 @@ need persistent P-384 signing, public-key export, ECDH, and imported recovered-k
 
 ## Current scope
 
-- Included: Apple Passwords login records and password-manager sidecars, including TOTP metadata.
-- Excluded: writes to password records, passkeys, payment cards, Hide My Email, browser integration,
-  background sync, and a daemon.
-- `sync` reports how many passkey records were classified and ignored without adding their key
-  material to the local password vault.
+- Included: Apple Passwords login records, password-manager sidecars and TOTP metadata, plus
+  synced ES256 passkeys and explicit WebAuthn assertion signing.
+- Excluded: writes to Apple records, passkey creation, payment cards, Hide My Email, transparent
+  browser integration, background sync, and a daemon.
 - Network TLS verification is always enabled; there is no insecure switch.
 
 See [DESIGN.md](DESIGN.md) for the architecture, protocol boundary, and SEP integration plan.
