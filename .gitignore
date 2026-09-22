@@ -1,0 +1,10 @@
+# Rust build output
+/target/
+
+# Never commit local credentials or captured state
+/.env
+/config/
+/state/
+*.enc
+master.key
+software.key
