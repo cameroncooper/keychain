@@ -6,8 +6,9 @@ and decryption, local search, password display, and TOTP generation. Python and 
 container are not runtime dependencies.
 
 This is an unofficial reverse-engineering project and is not affiliated with Apple. The protocol
-implementation has comprehensive offline tests and its core login and Octagon join have been
-validated against a live Apple account. The self-addressed TLK migration remains newly implemented.
+implementation has comprehensive offline tests; login, Octagon join, and read-only password sync
+have been validated against a live account with Advanced Data Protection enabled. Migrating
+preexisting TLKs during a join has not yet been exercised against a nonempty account.
 `join` mutates the Octagon trust graph and escrow recovery has a server-enforced attempt limit. Read
 the warning before using it.
 

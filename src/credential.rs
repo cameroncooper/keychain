@@ -250,6 +250,29 @@ fn sidecar_text(value: Option<&Value>) -> String {
     }
 }
 
+fn sidecar_primary_site(value: Option<&Value>) -> String {
+    let Some(Value::Array(sites)) = value else {
+        return String::new();
+    };
+    sites
+        .iter()
+        .filter_map(Value::as_dictionary)
+        .find_map(|site| {
+            let value = sidecar_text(site.get("s"));
+            if value.is_empty() {
+                None
+            } else {
+                let normalized = normalize_host(&value);
+                Some(if normalized.is_empty() {
+                    value
+                } else {
+                    normalized
+                })
+            }
+        })
+        .unwrap_or_default()
+}
+
 pub fn totp_uri_from_sidecar(value: Option<&Value>) -> String {
     let Some(Value::Dictionary(block)) = value else {
         return String::new();
@@ -337,7 +360,7 @@ pub fn from_items(items: &[DecryptedItem]) -> Vec<Credential> {
             Payload::Sidecar(mut values) => {
                 if !domain.is_empty() || !username.is_empty() {
                     let sidecar = sidecars.entry(key).or_default();
-                    for name in ["notes", "title", "ctxt", "totp"] {
+                    for name in ["notes", "title", "ctxt", "totp", "s_as"] {
                         if let Some(value) = values.get(name) {
                             sidecar.insert(name.into(), value.clone());
                         }
@@ -376,9 +399,14 @@ pub fn from_items(items: &[DecryptedItem]) -> Vec<Credential> {
         .map(|login| {
             let sidecar = sidecars.get(&login.key);
             let sidecar_title = sidecar_text(sidecar.and_then(|value| value.get("title")));
+            let sidecar_site = sidecar_primary_site(sidecar.and_then(|value| value.get("s_as")));
             Credential {
                 id: login.id,
-                domain: login.domain,
+                domain: if sidecar_site.is_empty() {
+                    login.domain
+                } else {
+                    sidecar_site
+                },
                 username: login.username,
                 password: login.password,
                 title: if sidecar_title.is_empty() {
@@ -460,6 +488,13 @@ mod tests {
         sidecar_payload.insert("notes".into(), Value::Data(b"my note".to_vec()));
         sidecar_payload.insert("title".into(), Value::Data(b"My Bank".to_vec()));
         sidecar_payload.insert("ctxt".into(), Value::Dictionary(contexts));
+        sidecar_payload.insert(
+            "s_as".into(),
+            Value::Array(vec![Value::Dictionary(Dictionary::from_iter([(
+                "s".to_owned(),
+                Value::Data(b"https://www.example.com/login".to_vec()),
+            )]))]),
+        );
         sidecar_payload.insert("s_hi".into(), Value::String("old-password".into()));
         sidecar_payload.insert("supportsPasskey".into(), Value::Boolean(true));
         let mut sidecar = Dictionary::new();
@@ -478,6 +513,7 @@ mod tests {
         assert_eq!(credentials.len(), 1);
         let credential = &credentials[0];
         assert_eq!(credential.password, "hunter2");
+        assert_eq!(credential.domain, "example.com");
         assert_eq!(credential.notes, "my note");
         assert_eq!(credential.title, "My Bank");
         assert_eq!(credential.last_used, 750_000_000.0 + APPLE_EPOCH);

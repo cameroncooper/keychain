@@ -1,6 +1,6 @@
 # Keychain: design and architecture
 
-Status: Rust MVP implemented; offline verified, live-account validation pending
+Status: Rust MVP implemented; offline verified; live login, join, and ADP sync validated
 Target: Asahi Linux on Apple silicon
 Implementation language: Rust
 Primary interface: `keychain` CLI
@@ -238,8 +238,8 @@ The Rust port preserves the current proven sequence:
    item     --AES-256-SIV + authenticated data--> plist
    ```
 
-11. Classify records using their access group, combine password-manager sidecars, discard
-    unsupported records, and atomically commit a new credential snapshot.
+11. Classify records using their access group, combine password-manager sidecars (including their
+    site arrays), discard unsupported records, and atomically commit a new credential snapshot.
 
 All HTTPS requests verify certificates. The implementation does not emit raw headers, request
 bodies, decrypted plists, or cryptographic material to logs.
@@ -254,8 +254,9 @@ does not give Passwords a different server-decryption path.
 Consequently, Apple Account authentication and 2FA are necessary but not sufficient in either
 mode. The Linux identity must still recover or receive the key hierarchy through Octagon trust,
 then decrypt CKKS records locally. Authorizing iCloud.com is not an alternative: Apple explicitly
-does not release iCloud Keychain service keys to a web session. Live validation must cover an ADP
-account because Apple may apply stricter trusted-device eligibility policy, but that changes
+does not release iCloud Keychain service keys to a web session. The implemented login, trust join,
+new-record sync, and record-update sync have been validated with ADP enabled. Apple may still apply
+stricter trusted-device eligibility policy to other account configurations, but that changes
 interoperability testing rather than the cryptographic design.
 
 References: [Apple iCloud data security overview](https://support.apple.com/102651) and
@@ -438,7 +439,7 @@ logs.
 
 Exit criterion: Rust produces the same offline results as Python for all sanitized fixtures.
 
-### Phase 2: authentication and transport — implemented, live validation pending
+### Phase 2: authentication and transport — implemented and live-validated
 
 - Implement the anisette provider interface and managed loopback helper.
 - Port device identity, GrandSlam/GSA, `loginDelegates`, account settings, `ckAppInit`, CKCode, and
@@ -447,7 +448,7 @@ Exit criterion: Rust produces the same offline results as Python for all sanitiz
 
 Exit criterion: a live login succeeds with TLS verification and no Python runtime.
 
-### Phase 3: guarded Octagon join and sync — implemented; core join live-validated
+### Phase 3: guarded Octagon join and sync — implemented; core join and ADP sync live-validated
 
 - Port bottle listing, escrow SRP, voucher construction, `joinWithVoucher`, authenticated
   recoverable TLKShares, self-addressed TLK sharing and sponsor retirement, and the complete decrypt
@@ -477,14 +478,14 @@ driver failure is safe and diagnosable.
 
 ## MVP acceptance criteria
 
-- `keychain login` and authenticated-session reuse are implemented without Python; live validation
-  remains. Expired account credentials require another interactive login because the Apple password
+- `keychain login` and authenticated-session reuse are implemented and live-validated without
+  Python. Expired account credentials require another interactive login because the Apple password
   is never stored.
 - The only required long-lived identity is data, not a continuously running container or process.
 - Neither `keychain setup` nor `keychain join` can spend an escrow attempt without an interactive
   warning and confirmation.
 - `keychain sync` implements read-only download and decryption of web passwords and TOTP metadata;
-  live validation remains.
+  password creation and website updates have been live-validated.
 - No secret is written unencrypted or emitted through normal logs.
 - Loss or corruption of a new sync cannot destroy the last valid vault.
 - SEP is not required by the current build; protocol code depends only on backend capabilities.
