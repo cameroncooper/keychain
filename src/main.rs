@@ -551,14 +551,18 @@ fn command_sync(
     validate_account_binding(&account, &state)?;
     let client = octagon::OctagonClient::new(&account, &device, &anisette, backend)?;
     eprintln!("Fetching and decrypting Passwords and Manatee zones…");
-    let credentials = client.sync_credentials(&state)?;
-    let count = credentials.len();
+    let projection = client.sync_credentials(&state)?;
+    let count = projection.credentials.len();
+    let ignored_passkeys = projection.ignored_passkeys;
     store.save_vault(&VaultState {
         schema_version: 1,
         synced_at: unix_now(),
-        credentials,
+        credentials: projection.credentials,
     })?;
     println!("synced {count} credential(s)");
+    if ignored_passkeys > 0 {
+        println!("ignored {ignored_passkeys} passkey record(s): passkeys are not supported");
+    }
     Ok(())
 }
 

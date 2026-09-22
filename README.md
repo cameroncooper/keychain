@@ -106,6 +106,8 @@ need persistent P-384 signing, public-key export, ECDH, and imported recovered-k
 - Included: Apple Passwords login records and password-manager sidecars, including TOTP metadata.
 - Excluded: writes to password records, passkeys, payment cards, Hide My Email, browser integration,
   background sync, and a daemon.
+- `sync` reports how many passkey records were classified and ignored without adding their key
+  material to the local password vault.
 - Network TLS verification is always enabled; there is no insecure switch.
 
 See [DESIGN.md](DESIGN.md) for the architecture, protocol boundary, and SEP integration plan.

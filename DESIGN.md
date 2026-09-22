@@ -239,7 +239,8 @@ The Rust port preserves the current proven sequence:
    ```
 
 11. Classify records using their access group, combine password-manager sidecars (including their
-    site arrays), discard unsupported records, and atomically commit a new credential snapshot.
+    site arrays), count and discard unsupported passkeys, and atomically commit a new credential
+    snapshot.
 
 All HTTPS requests verify certificates. The implementation does not emit raw headers, request
 bodies, decrypted plists, or cryptographic material to logs.

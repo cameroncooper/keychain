@@ -17,7 +17,6 @@ use super::crypto::{aes_siv_unwrap, decrypt_item, ecies_decrypt};
 use super::cuttlefish::tlkshare_signing_data;
 use super::nska;
 use crate::credential;
-use crate::model::Credential;
 use crate::proto::{decode_fields, first_bytes, first_string};
 use crate::secret::zeroize_plist_dictionary;
 use crate::security::{KeyRef, SecurityBackend};
@@ -331,7 +330,7 @@ pub fn decrypt_items(
 pub fn build_credentials(
     records_by_type: &BTreeMap<String, Vec<Record>>,
     tlks: BTreeMap<String, Zeroizing<Vec<u8>>>,
-) -> Vec<Credential> {
+) -> credential::Projection {
     let class_keys = unwrap_class_keys(
         records_by_type
             .get("synckey")

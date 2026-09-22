@@ -23,8 +23,9 @@ use super::octagon_keys::{
     build_dynamic_info, build_permanent_info, build_stable_info, prefixed_data, tphash_sha256,
 };
 use super::pipeline;
+use crate::credential;
 use crate::model::{
-    AccountState, Credential, DeviceIdentity, OctagonState, OctagonTrustState, SignedInfoState,
+    AccountState, DeviceIdentity, OctagonState, OctagonTrustState, SignedInfoState,
 };
 use crate::proto::{Value, Writer, decode_fields, first_bytes, first_string, first_u64};
 use crate::security::{KeyRef, SecurityBackend};
@@ -465,7 +466,7 @@ impl<'a> OctagonClient<'a> {
         ))
     }
 
-    pub fn sync_credentials(&self, state: &OctagonState) -> Result<Vec<Credential>> {
+    pub fn sync_credentials(&self, state: &OctagonState) -> Result<credential::Projection> {
         if !state.trust_state.is_joined() {
             return Err(Error::Config(
                 "this device has not joined Octagon; run `keychain join`".into(),
