@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Keychain Passkeys",
+  "version": "0.1.0",
+  "description": "Use passkeys synced from Apple Passwords through the local keychain utility.",
+  "minimum_chrome_version": "115",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAvR22q/urMzsVeyaAlndmP8LYm4vac1w7WyqZXv712iAhJCT3M+P8tCe7O/mSAaiGGpyYy40TuJF/8Qo5zCRlU5alQM9TP0zN24bcpwXxGxGJkPR5yNhql+QEGchf0eOLFn4C5y1+i9f1E6g9rtirF/Qq2pJzHLeCnwMdrYKmoL1+hbCooBxbnShL484BdleGazmpe+NAwXxMP5G4NkPT9j4jPnbhZd6bewSf5t9U+WssgpobH8CEHGKeH0Nfbh/oLkuQ7wHwjecoKH7VGlYxSG74YRkDrrlnU3LxmKDrPkBSevcGLV/jQcwxsNQf9Q9kBzydNwvYov+HnUdUJ9lfmQIDAQAB",
+  "permissions": [
+    "nativeMessaging",
+    "storage",
+    "webAuthenticationProxy"
+  ],
+  "background": {
+    "service_worker": "service-worker.js"
+  },
+  "action": {
+    "default_title": "Keychain Passkeys"
+  }
+}

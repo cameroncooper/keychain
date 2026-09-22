@@ -1,0 +1,144 @@
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+  background: Canvas;
+  color: CanvasText;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  padding: 28px;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  color: #666;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+h1 {
+  margin: 0 0 16px;
+  font-size: 28px;
+}
+
+.site {
+  margin: 0;
+  font-size: 19px;
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.origin {
+  min-height: 20px;
+  margin: 4px 0 24px;
+  color: #666;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+fieldset {
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+legend {
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.account {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 8px 0;
+  padding: 12px;
+  border: 1px solid #9997;
+  border-radius: 10px;
+  cursor: pointer;
+}
+
+.account input {
+  margin-top: 4px;
+}
+
+.account-name,
+.account-detail {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.account-name {
+  font-weight: 650;
+}
+
+.account-detail {
+  margin-top: 2px;
+  color: #666;
+  font-size: 13px;
+}
+
+.notice {
+  margin: 20px 0 0;
+  color: #666;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.error {
+  min-height: 20px;
+  margin: 12px 0 0;
+  color: #b42318;
+  font-size: 13px;
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+button {
+  min-width: 96px;
+  padding: 9px 14px;
+  border: 1px solid #7778;
+  border-radius: 8px;
+  font: inherit;
+  cursor: pointer;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.primary {
+  border-color: #1769e0;
+  background: #1769e0;
+  color: white;
+}
+
+.secondary {
+  background: transparent;
+  color: inherit;
+}
+
+@media (prefers-color-scheme: dark) {
+  .eyebrow,
+  .origin,
+  .account-detail,
+  .notice {
+    color: #aaa;
+  }
+
+  .error {
+    color: #ff8a80;
+  }
+}

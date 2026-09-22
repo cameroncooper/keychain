@@ -1,6 +1,6 @@
 # Keychain: design and architecture
 
-Status: Rust MVP implemented; live login, join, ADP sync, and WebAuthn assertion validated
+Status: Rust MVP implemented; live login, join, ADP sync, and Chromium WebAuthn validated
 Target: Asahi Linux on Apple silicon
 Implementation language: Rust
 Primary interface: `keychain` CLI
@@ -12,10 +12,10 @@ as a stable Apple device, join Octagon trust through an explicitly confirmed esc
 download CKKS records, decrypt password and passkey items locally, and keep an encrypted offline
 snapshot.
 
-The implementation is a single Rust package with a library and one CLI binary. It does not require
-an always-running `keychain` daemon. Anisette is an authentication dependency behind a provider
-interface and is supplied by a managed, on-demand native helper. A persistent Docker container is
-therefore not an architectural requirement.
+The implementation is a single Rust package with a library, one CLI binary, and a one-shot Chromium
+native-messaging host. It does not require an always-running `keychain` daemon. Anisette is an
+authentication dependency behind a provider interface and is supplied by a managed, on-demand
+native helper. A persistent Docker container is therefore not an architectural requirement.
 
 Secure Enclave support is behind the `SecurityBackend` interface. The implemented MVP uses the
 explicitly chosen software-file backend: a random mode-`0600` root key protects tokens, Octagon
@@ -46,8 +46,7 @@ port. Python is not a runtime dependency of the new utility.
 - Perfectly reproducing all internal macOS `securityd` behavior.
 - Eliminating anisette before a reliable local provider exists.
 - Running unattended background sync. It can be added later with a systemd timer.
-- Transparent browser autofill and WebAuthn brokering. The existing extension can be adapted after
-  the CLI, vault, and assertion core are stable.
+- Password and TOTP browser autofill, passkey creation, and browser-independent CTAP transport.
 
 ## Trust and mutation boundary
 
@@ -66,31 +65,29 @@ The project should be precise about what it changes.
 ## System shape
 
 ```text
-                         Apple services
-              GSA / setup / CloudKit / Cuttlefish / CKKS
-                                ^
-                                | HTTPS with TLS verification
-                                |
-+-------------------------------+-------------------------------+
-|                         keychain process                       |
-|                                                               |
-|  CLI -> workflow/state machine -> Apple protocol clients      |
-|                                  -> CKKS decode/decrypt        |
-|                                  -> typed vault projection     |
-|                                                               |
-|  managed anisette helper <--- process/provider boundary       |
-|  security backend <---------- software today / SEP later      |
-+---------------------+---------------------+-------------------+
-                      |                     |
-             encrypted state files    native anisette helper
-             + software root key      (only while command runs)
+ Chromium -> MV3 extension -> one-shot browser host --+
+                                                       |
+ CLI --------------------------------------------------+
+                                                       v
++------------------------------------------------------+
+|                   shared keychain library             |
+|                                                       |
+|  workflow/state machine -> Apple protocol clients ----+----> Apple services
+|                         -> CKKS decode/decrypt         |      (verified HTTPS)
+|                         -> typed vault projection      |
+|  browser request validation -> assertion signing      |
+|  security backend <---------- software / future SEP   |
++----------------------+----------------+---------------+
+                       |                |
+              encrypted state     managed anisette helper
+              + software root     (only during network commands)
 ```
 
 There are three independent concerns:
 
 1. Apple protocol interoperability: authentication, CloudKit, Octagon, escrow, and CKKS.
 2. Local secret protection: encrypting persistent state and controlling access to it.
-3. User interfaces: CLI first, browser broker/native messaging later.
+3. User interfaces: the CLI and a narrow Chromium native-messaging adapter.
 
 Keeping these separate allows the Rust port to proceed while the SEP driver evolves.
 
@@ -100,12 +97,16 @@ Start with one package. Split crates only when an actual process or reuse bounda
 
 ```text
 keychain/
+  browser/chromium/          unpacked MV3 WebAuthentication Proxy extension
   Cargo.toml
   Cargo.lock
   DESIGN.md
   src/
     main.rs                 CLI parsing and exit codes
+    bin/
+      keychain-browser-host.rs  bounded one-request native-messaging process
     lib.rs
+    browser.rs              Chromium request validation, selection, and signing boundary
     apple/
       auth.rs               GrandSlam/GSA SRP, tokens, device identity
       anisette.rs           managed on-demand helper and provider boundary
@@ -392,15 +393,25 @@ privileged broker, if a browser integration needs an authorization boundary, or 
 unsealed root out of short-lived clients provides a measurable benefit.
 
 For browser WebAuthn, origin context must come from a trusted browser/authenticator API, never from
-a page content script or arbitrary native message. A CTAP adapter receives the browser-generated
-`clientDataHash`; a browser proxy adapter must securely construct `clientDataJSON` from
-browser-authoritative context. The broker accepts the hash, RP ID, allow-list, and
-user-verification requirement, selects only a matching credential, and returns authenticator data
-plus a DER ES256 signature. The software backend may assert user presence after an explicit local
-approval, but it must refuse a request that requires user verification until a real PIN, PAM,
-Touch ID, or SEP-backed verifier exists. A Chromium WebAuthentication Proxy extension and a
-browser-independent CTAP2/`uhid` authenticator are adapter options over the same narrow assertion
-core; choose after a small compatibility probe.
+a page content script or an origin string invented by the extension. The implemented Chromium
+WebAuthentication Proxy path receives a request only after Chromium validates the caller and RP ID;
+Chromium then injects `extensions.remoteDesktopClientOverride` with the caller origin and ancestor
+relationship. The native host requires that field, rejects cross-origin frames, reconstructs
+`clientDataJSON`, checks the allow-list, and returns authenticator data plus a DER ES256 signature.
+
+The extension has no content script. It first launches the native host in inspect mode, stores the
+request in extension session storage, and opens a local approval window containing only the RP,
+origin, and matching account labels. On approval it consumes that pending UI state and launches a
+fresh one-shot host in assert mode; the host revalidates the entire request before signing. Native
+messages and all attacker-controlled collections are bounded. The stable extension ID is the only
+origin permitted by Chromium's native-host manifest.
+
+The software backend asserts user presence after explicit local approval, but refuses a request
+that requires user verification until a real PIN, PAM, Touch ID, or SEP-backed verifier exists. The
+approval is not a security boundary against same-user malware while software key material remains
+readable by that user. A future SEP backend can require verified authorization inside its signing
+operation without changing the browser protocol. A browser-independent CTAP2/`uhid` authenticator
+can remain a later adapter over the same assertion core.
 
 If added, it should be systemd socket-activated rather than continuously running:
 
@@ -496,7 +507,7 @@ Python implementation without modifying password records.
 - Validate a synced passkey against a live relying party without exposing key material.
 
 Exit criterion: a passkey synced from Apple successfully authenticates to webauthn.io. This is
-complete; transparent browser transport remains Phase 6.
+complete; browser transport is tracked separately in Phase 6.
 
 ### Phase 5: SEP backend
 
@@ -509,11 +520,13 @@ complete; transparent browser transport remains Phase 6.
 Exit criterion: copied encrypted state is unusable off-device, reboot/suspend do not lose keys, and
 driver failure is safe and diagnosable.
 
-### Phase 6: convenience integrations
+### Phase 6: convenience integrations — Chromium passkey adapter live-validated
 
 - Add a systemd user timer for opt-in periodic sync.
-- Add a narrow browser broker and adapt the extension. Probe Chromium WebAuthentication Proxy and
-  CTAP2/`uhid` before choosing the first transport.
+- Maintain the bounded, live-validated Chromium WebAuthentication Proxy extension and one-shot
+  native host.
+- Consider CTAP2/`uhid` only if another browser needs a transport independent of Chromium's API.
+- Add password and TOTP autofill behind a separately reviewed browser protocol.
 - Add Hide My Email as a separate optional protocol module.
 
 ## MVP acceptance criteria
@@ -528,6 +541,8 @@ driver failure is safe and diagnosable.
   password creation and website updates have been live-validated.
 - Synced Apple passkeys remain behind opaque backend references, and an ES256 assertion has been
   accepted by webauthn.io without claiming unavailable local user verification.
+- Chromium has authenticated to webauthn.io through the one-shot native host after explicit local
+  approval, with no content script or persistent broker.
 - No secret is written unencrypted or emitted through normal logs.
 - Loss or corruption of a new sync cannot destroy the last valid vault.
 - SEP is not required by the current build; protocol code depends only on backend capabilities.
@@ -545,9 +560,7 @@ These should be answered with small probes before they become architectural comm
    the logged-in user access?
 4. Does the chosen anisette helper preserve the same machine identity reliably across upgrades?
 5. Which Apple Passwords views are necessary for the minimum useful sync on the target account?
-6. Should the first browser passkey adapter use Chromium's WebAuthentication Proxy API or a
-   browser-independent CTAP2 device over Linux `uhid`?
-7. When should locally imported passkey keys absent from a later Apple snapshot be garbage
+6. When should locally imported passkey keys absent from a later Apple snapshot be garbage
    collected, and what grace period best protects against incomplete sync pages?
 
 The implemented defaults are: one CLI process, managed loopback/on-demand anisette, a software-file

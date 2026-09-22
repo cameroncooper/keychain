@@ -3,13 +3,15 @@
 `keychain` is an experimental, read-only Rust CLI for accessing Apple Passwords from Linux. It
 implements native Apple authentication, an explicitly guarded Octagon trust join, CKKS download
 and decryption, local search, password display, TOTP generation, and read-only use of synced
-passkeys. Python and a persistent container are not runtime dependencies.
+passkeys. An optional Chromium extension provides explicitly approved browser assertions. Python
+and a persistent container are not runtime dependencies.
 
 This is an unofficial reverse-engineering project and is not affiliated with Apple. The protocol
 implementation has comprehensive offline tests; login, Octagon join, and read-only password sync
 have been validated against a live account with Advanced Data Protection enabled. Apple passkey
-decoding and ES256 assertions have been live-validated with a successful webauthn.io authentication.
-Migrating preexisting TLKs during a join has not yet been exercised against a nonempty account.
+decoding, ES256 assertions, and the Chromium adapter have been live-validated with successful
+webauthn.io authentications. Migrating preexisting TLKs during a join has not yet been exercised
+against a nonempty account.
 `join` mutates the Octagon trust graph and escrow recovery has a server-enforced attempt limit. Read
 the warning before using it.
 
@@ -22,7 +24,8 @@ cargo build --release
 ./target/release/keychain --help
 ```
 
-The release binary is self-contained apart from an anisette helper. The current integration expects
+This builds the CLI and the one-shot `keychain-browser-host` native-messaging binary. The CLI is
+self-contained apart from an anisette helper. The current integration expects
 a native `anisette-v3-server`-compatible executable with `--host`, `--port`, `--adi-path`, and
 `--skip-server-startup` options. The CLI never downloads or installs that executable.
 
@@ -95,8 +98,46 @@ For protocol testing, `passkey assert` accepts a unique passkey ID prefix, base6
 and HTTPS origin. It displays the relying party, origin, and account, requires an interactive
 default-no approval, and emits a WebAuthn assertion JSON object. It binds the origin to the stored
 RP ID and deliberately does not claim user verification. This is a diagnostic/integration surface,
-not yet transparent browser support; ordinary websites invoke WebAuthn through the browser and
-will require the planned browser adapter.
+not the normal browser path.
+
+## Chromium passkeys
+
+Chromium 115 or newer can use synced passkeys through the extension in `browser/chromium`. Build
+the release binaries and install the native-messaging manifest:
+
+```sh
+cargo build --release
+./browser/chromium/install-host.sh
+```
+
+Then open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select the
+absolute `browser/chromium` directory from this checkout. The manifest contains a fixed public key,
+so its extension ID is stable: `lcadeibeloholafalbgoehpbhnplmojh`. Verify that this matches the ID
+shown by Chromium. The toolbar badge reads `ON` while passkey proxying is enabled; clicking the
+extension icon toggles it.
+
+For each `navigator.credentials.get()` request, Chromium supplies its validated caller origin and
+RP ID to the extension. A one-shot native host first returns only matching account labels. The
+extension opens a separate local approval window, and only after approval launches a second
+one-shot host to revalidate the complete request and sign it. The extension has no content script,
+network permission, password access, or long-running native process.
+
+There are deliberate initial limits:
+
+- Passkey authentication is supported; passkey creation is not.
+- Cross-origin iframe requests and requested WebAuthn extensions are refused.
+- `userVerification: required` is refused. The approval window establishes user presence, but the
+  software backend cannot honestly claim device user verification. A future SEP/PAM/Touch ID
+  verifier can add that capability behind the existing boundary.
+- Chromium's WebAuthentication Proxy replaces its normal authenticator handling while the badge is
+  `ON`. Requests with no matching synced passkey fail instead of falling back to a hardware key.
+  Click the icon to show `OFF` before using Chromium's normal authenticators.
+
+The adapter relies on Chromium's documented
+[`webAuthenticationProxy`](https://developer.chrome.com/docs/extensions/reference/api/webAuthenticationProxy)
+API. The native host also requires Chromium's injected
+`extensions.remoteDesktopClientOverride` value, rechecks exact HTTPS origin/RP binding and the
+credential allow-list, and caps all messages and credential collections before parsing or signing.
 
 ## Local security model
 
@@ -116,8 +157,10 @@ The default state location is `~/.local/state/keychain`; non-secret configuratio
 
 This protects files copied from disk, but it is not equivalent to SEP protection: a process running
 as the same Linux user can read both the root key and encrypted files. It also does not provide a
-local user-presence prompt before `show`. Avoid backups or synchronization of `software.key`, and
-protect the Linux account and disk accordingly.
+local user-presence prompt before `show`. The browser approval window prevents accidental signing,
+but under the software backend another process running as the same user can still invoke the native
+binary and read the software key. Avoid backups or synchronization of `software.key`, and protect
+the Linux account and disk accordingly.
 
 All protocol and workflow code uses the `SecurityBackend` interface. A future SEP implementation
 can replace the backend without changing Apple authentication, Octagon, CKKS, or CLI logic. The
@@ -127,9 +170,9 @@ need persistent P-384 signing, public-key export, ECDH, and imported recovered-k
 ## Current scope
 
 - Included: Apple Passwords login records, password-manager sidecars and TOTP metadata, plus
-  synced ES256 passkeys and explicit WebAuthn assertion signing.
-- Excluded: writes to Apple records, passkey creation, payment cards, Hide My Email, transparent
-  browser integration, background sync, and a daemon.
+  synced ES256 passkeys, explicit WebAuthn assertion signing, and an opt-in Chromium adapter.
+- Excluded: writes to Apple records, passkey creation, password/TOTP browser autofill, payment
+  cards, Hide My Email, background sync, other browser transports, and a daemon.
 - Network TLS verification is always enabled; there is no insecure switch.
 
 See [DESIGN.md](DESIGN.md) for the architecture, protocol boundary, and SEP integration plan.

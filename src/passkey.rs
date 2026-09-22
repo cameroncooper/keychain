@@ -193,6 +193,7 @@ pub struct WebAuthnAssertion {
     pub raw_id: String,
     #[serde(rename = "type")]
     pub credential_type: &'static str,
+    pub authenticator_attachment: &'static str,
     pub response: AssertionResponse,
     pub client_extension_results: serde_json::Value,
 }
@@ -235,6 +236,7 @@ pub fn assertion_for_origin(
         id: passkey.credential_id.clone(),
         raw_id: passkey.credential_id.clone(),
         credential_type: "public-key",
+        authenticator_attachment: "platform",
         response: AssertionResponse {
             client_data_json: URL_SAFE_NO_PAD.encode(client_data),
             authenticator_data: URL_SAFE_NO_PAD.encode(assertion.authenticator_data),
@@ -245,7 +247,7 @@ pub fn assertion_for_origin(
     })
 }
 
-fn validate_origin_for_rp(origin: &str, rp_id: &str) -> Result<String> {
+pub(crate) fn validate_origin_for_rp(origin: &str, rp_id: &str) -> Result<String> {
     let url = url::Url::parse(origin)
         .map_err(|_| Error::InvalidData("WebAuthn origin is not a valid URL".into()))?;
     if url.scheme() != "https"
@@ -410,7 +412,7 @@ fn required_data(fields: &Dictionary, record_id: &str, name: &str) -> Result<Vec
         .ok_or_else(|| invalid(record_id, format!("missing or invalid {name}")))
 }
 
-fn normalize_rp_id(value: &str) -> std::result::Result<String, String> {
+pub(crate) fn normalize_rp_id(value: &str) -> std::result::Result<String, String> {
     let value = value.trim().trim_end_matches('.').to_ascii_lowercase();
     if value.is_empty() || value.len() > 253 || value.contains(['/', ':']) {
         return Err("relying-party ID is not a host".into());
@@ -569,6 +571,7 @@ mod tests {
             id: "id".into(),
             raw_id: "id".into(),
             credential_type: "public-key",
+            authenticator_attachment: "platform",
             response: AssertionResponse {
                 client_data_json: "client".into(),
                 authenticator_data: "authenticator".into(),
@@ -584,5 +587,11 @@ mod tests {
             .unwrap_or_else(|| panic!("response object"));
         assert!(response.contains_key("clientDataJSON"));
         assert!(!response.contains_key("clientDataJson"));
+        assert_eq!(
+            value
+                .get("authenticatorAttachment")
+                .and_then(serde_json::Value::as_str),
+            Some("platform")
+        );
     }
 }

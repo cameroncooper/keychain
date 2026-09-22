@@ -1,4 +1,5 @@
 pub mod apple;
+pub mod browser;
 pub mod config;
 pub mod credential;
 pub mod error;
