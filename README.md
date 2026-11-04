@@ -176,3 +176,6 @@ need persistent P-384 signing, public-key export, ECDH, and imported recovered-k
 - Network TLS verification is always enabled; there is no insecure switch.
 
 See [DESIGN.md](DESIGN.md) for the architecture, protocol boundary, and SEP integration plan.
+
+See [SEP-INTEGRATION.md](SEP-INTEGRATION.md) for the proven biometric signing mechanism, backend integration guidance,
+and the remaining requirements for SEP-protected keys and passkeys.
