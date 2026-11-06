@@ -42,6 +42,95 @@ fn device() -> DeviceConfig {
         name: "Test".into(),
     }
 }
+
+#[test]
+fn worker_checks_raw_request_scope_and_canonical_create_cas_before_http() -> Result<()> {
+    let original = fixture()?;
+    let device = device();
+    let save = AtomicSave::new(
+        &device,
+        Uuid::new_v4(),
+        &original.zone,
+        &original.item,
+        &original.pointer,
+    )?;
+    let binding = Binding {
+        owner: 1001,
+        account_fingerprint: format!("SHA256:{}", B64.encode([1; 32])),
+        peer_id: format!("SHA256:{}", B64.encode([2; 32])),
+        transaction: Uuid::parse_str(&save.item.name).map_err(|_| invalid("test transaction"))?,
+        request_sha256: "ab".repeat(32),
+        zone: save.zone.clone(),
+    };
+    AtomicSave::validate_prepared(&device, &binding, &save.body)?;
+    for case in 0..4 {
+        let mut scope = binding.clone();
+        let mut device = device.clone();
+        match case {
+            0 => scope.zone.owner = "other-owner".into(),
+            1 => scope.zone.name = "Manatee".into(),
+            2 => scope.transaction = Uuid::new_v4(),
+            _ => device.device_uuid = Uuid::new_v4().to_string(),
+        }
+        assert!(AtomicSave::validate_prepared(&device, &scope, &save.body).is_err());
+    }
+    let messages = undelimit(&save.body)?;
+    let first = decode_fields(messages[0])?;
+    let second = decode_fields(messages[1])?;
+    let create = decode_fields(required_bytes(&first, SAVE)?)?;
+    let wrong_mode = Writer::new()
+        .message(1, required_bytes(&create, 1)?)
+        .bool(2, true)
+        .uint64(6, 3)
+        .finish();
+    let first_wrong = Writer::new()
+        .message(1, required_bytes(&first, 1)?)
+        .message(2, required_bytes(&first, 2)?)
+        .message(SAVE, &wrong_mode)
+        .finish();
+    assert!(
+        AtomicSave::validate_prepared(
+            &device,
+            &binding,
+            &frame(&[first_wrong, messages[1].to_vec()])
+        )
+        .is_err()
+    );
+    let extra = Writer::new()
+        .message(2, required_bytes(&second, 2)?)
+        .message(SAVE, required_bytes(&second, SAVE)?)
+        .bool(999, true)
+        .finish();
+    assert!(
+        AtomicSave::validate_prepared(&device, &binding, &frame(&[messages[0].to_vec(), extra]))
+            .is_err()
+    );
+
+    let zone = ckks::record_zone_identifier(&binding.zone.name, &binding.zone.owner);
+    for cursor in [None, Some(b"cursor".as_slice())] {
+        validate_worker_fetch(
+            &binding,
+            &ckks::build_retrieve_changes_request(&zone, cursor, 500),
+        )?;
+    }
+    for body in [
+        ckks::build_retrieve_changes_request(
+            &ckks::record_zone_identifier("Manatee", &binding.zone.owner),
+            None,
+            500,
+        ),
+        ckks::build_retrieve_changes_request(&zone, None, 501),
+        ckks::build_retrieve_changes_request(&zone, Some(&vec![0; 16385]), 500),
+        Writer::new()
+            .message(2, &zone)
+            .uint64(4, 500)
+            .bool(999, true)
+            .finish(),
+    ] {
+        assert!(validate_worker_fetch(&binding, &body).is_err());
+    }
+    Ok(())
+}
 fn frame(messages: &[Vec<u8>]) -> Vec<u8> {
     let mut body = Vec::new();
     for message in messages {

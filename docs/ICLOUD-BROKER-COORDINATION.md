@@ -65,22 +65,23 @@ changed selected key/expired-operation refusal. These tests simulate biometric
 completion; they do not prove one-fingerprint behavior on hardware or browser
 acceptance. The journal factory/resume behavior has an additional offline test.
 
-The production network boundary remains unfinished. The `UploadIo` supplied to
-this coordinator is a trusted internal dependency, not an untrusted client RPC.
-Directly using AppleUploadIo inside the privileged process would violate the
-agreed separation. The installed broker retains AF_UNIX-only restrictions.
-Owner-supplied snapshots or success booleans cannot replace trusted transport
-results. A production bridge must authenticate the worker independently of
-ordinary owner/browser clients, freeze its account/peer/request scope, bound all
-messages and forward only ciphertext/public metadata out of the broker.
-Start and authenticate that worker before capture; the broker must not fork or
-exec with the selected scalar live.
+The [network-worker transport](APPLE-NETWORK-WORKER.md) now supplies a separate-UID,
+scope/step-bound, bounded and cancellable socket implementation of UploadIo.
+Raw CloudKit messages cross this boundary; roots stay local to the broker and
+reply validation/fetch verification still run there. The worker independently
+checks canonical request scope before HTTP. A disposable different-UID process
+test verifies the real kernel peer checks and handshake. The production worker
+service/account bootstrap and browser connection remain unfinished. The UploadIo
+supplied to this coordinator is still a trusted internal dependency, not an owner
+RPC. Direct AppleUploadIo inside the privileged broker remains prohibited; its
+installed AF_UNIX-only restrictions are retained. Start/authenticate the worker
+before capture; never fork/exec with the selected scalar live.
 
-The current guards cannot interrupt an arbitrary blocking trait implementation.
-The bridge must poll cancellation and the monotonic deadline while awaiting IO,
-close the worker channel on cancel/expiry, and return promptly so the scalar is
-wiped. A late Apple response remains an uncertain journaled attempt, with no
-automatic replay. Worker responses need request/step correlation and strict
-framing; no deserialize shortcut may construct VerifiedUpload from client JSON.
-This transport, remaining library/scratch memory review, scoped live Apple tests, real biometric creation
+The coordinator's outer guards cannot interrupt an arbitrary blocking trait
+implementation. WorkerUploadIo performs cancellation/deadline checks during
+partial reads/writes and permanently closes on failure. Production must bind its
+guard to the same operation/session; a late response remains uncertain, with no
+automatic replay. No deserialize shortcut constructs VerifiedUpload.
+Production service/bootstrap integration, remaining library/scratch memory review,
+scoped live Apple tests, real biometric creation
 and browser/other-device validation remain gates before enabling iCloud creation.

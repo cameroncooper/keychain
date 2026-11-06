@@ -80,7 +80,7 @@ impl Snapshot {
         }
         Self::fetch_with(zone, tlks, |request| transport.fetch_records(request))
     }
-    fn fetch_with(
+    pub(crate) fn fetch_with(
         zone: ZoneIdentity,
         tlks: Vec<RecoveredTlk>,
         mut read: impl FnMut(&[u8]) -> Result<Vec<u8>>,

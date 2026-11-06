@@ -10,3 +10,5 @@ pub mod nska;
 pub mod octagon;
 pub mod octagon_keys;
 pub mod pipeline;
+
+pub mod worker;

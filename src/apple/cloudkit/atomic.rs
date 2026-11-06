@@ -75,16 +75,34 @@ impl UploadIo for AppleUploadIo<'_, '_> {
             record,
             unchanged_pointer,
         )?;
+        save.parse_response(&self.send_prepared_save(&save.body)?)
+    }
+}
+
+impl AppleUploadIo<'_, '_> {
+    pub(crate) fn worker_binding(&self) -> &Binding {
+        &self.binding
+    }
+    pub(crate) fn fetch_page(&self, body: &[u8]) -> Result<Vec<u8>> {
+        validate_worker_fetch(&self.binding, body)?;
+        self.transport.fetch_records(body)
+    }
+    /// Only an authenticated broker channel may supply this prepared stream.
+    pub(crate) fn send_prepared_save(&self, body: &[u8]) -> Result<Vec<u8>> {
+        if body.is_empty() || body.len() > MAX_SAVE_BODY {
+            return Err(invalid("prepared save stream exceeds bounds"));
+        }
+        AtomicSave::validate_prepared(&self.transport.device, &self.binding, body)?;
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder
-            .write_all(&save.body)
+            .write_all(body)
             .map_err(|e| Error::io("CloudKit save compression", e))?;
-        let body = encoder
+        let compressed = encoder
             .finish()
             .map_err(|e| Error::io("CloudKit save compression", e))?;
         let headers = self.transport.headers(SECURITYD_BUNDLE, None)?;
         let response = apply_headers(self.client.post(SAVE_URL), &headers)?
-            .body(body)
+            .body(compressed)
             .send()?;
         let status = response.status();
         if status == reqwest::StatusCode::UNAUTHORIZED {
@@ -98,12 +116,12 @@ impl UploadIo for AppleUploadIo<'_, '_> {
             )));
         }
         let bytes = response_bytes(response)?;
-        save.parse_response(&maybe_gunzip(&bytes)?)
+        maybe_gunzip(&bytes)
     }
 }
 
-struct AtomicSave {
-    body: Vec<u8>,
+pub(crate) struct AtomicSave {
+    pub(crate) body: Vec<u8>,
     operations: [Uuid; 2],
     zone: ZoneIdentity,
     item: Record,
@@ -115,14 +133,27 @@ struct SaveReply {
     record: Option<Record>,
 }
 impl AtomicSave {
-    fn new(
+    pub(crate) fn new(
         device: &DeviceConfig,
         attempt: Uuid,
         zone: &ZoneIdentity,
         item: &Record,
         pointer: &Record,
     ) -> Result<Self> {
+        Self::with_operations(device, [attempt, Uuid::new_v4()], zone, item, pointer)
+    }
+
+    fn with_operations(
+        device: &DeviceConfig,
+        operations: [Uuid; 2],
+        zone: &ZoneIdentity,
+        item: &Record,
+        pointer: &Record,
+    ) -> Result<Self> {
+        let [attempt, compare_id] = operations;
         if attempt.get_version_num() != 4
+            || compare_id.get_version_num() != 4
+            || attempt == compare_id
             || zone.name != "Passwords"
             || zone.owner.is_empty()
             || zone.owner.len() > 512
@@ -186,10 +217,6 @@ impl AtomicSave {
             .string(4, tag)
             .uint64(6, 1)
             .finish(); // FAIL_IF_OUTDATED, never OVERRIDE=3
-        let operations = [attempt, Uuid::new_v4()];
-        if operations[0] == operations[1] {
-            return Err(invalid("duplicate save operation IDs"));
-        }
         // Same framed stream and ZONE isolation, with a header only on its first
         // request and an explicit final marker. Group 26 is an operation label.
         let mut header = build_header(device, CUTTLEFISH_CONTAINER, SECURITYD_BUNDLE);
@@ -224,7 +251,40 @@ impl AtomicSave {
         })
     }
 
-    fn parse_response(&self, body: &[u8]) -> Result<SaveOutcome> {
+    /// The worker independently restricts raw broker requests to this exact
+    /// create/CAS shape, device, item UUID and zone. Re-encoding also detects
+    /// fields/duplicates which the historical record reader would ignore.
+    fn validate_prepared(device: &DeviceConfig, binding: &Binding, body: &[u8]) -> Result<()> {
+        binding.validate()?;
+        let messages = undelimit(body)?;
+        if messages.len() != 2 {
+            return Err(invalid("worker save must contain exactly two operations"));
+        }
+        let mut operations = [Uuid::nil(); 2];
+        let mut records = Vec::with_capacity(2);
+        for (index, message) in messages.iter().enumerate() {
+            let envelope = decode_fields(message)?;
+            let operation = decode_fields(required_bytes(&envelope, 2)?)?;
+            operations[index] = Uuid::parse_str(&required_string(&operation, 1)?)
+                .map_err(|_| invalid("worker operation UUID"))?;
+            let save = decode_fields(required_bytes(&envelope, SAVE)?)?;
+            records.push(ckks::parse_record(required_bytes(&save, 1)?)?);
+        }
+        if records[0].name != binding.transaction.to_string() {
+            return Err(invalid("worker save item differs from transaction"));
+        }
+        records[0].server = None;
+        let expected =
+            Self::with_operations(device, operations, &binding.zone, &records[0], &records[1])?;
+        if body != expected.body {
+            return Err(invalid(
+                "worker save differs from canonical scoped create/CAS request",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn parse_response(&self, body: &[u8]) -> Result<SaveOutcome> {
         let messages = undelimit(body)?;
         if messages.len() != 2 {
             return Err(invalid(
@@ -331,6 +391,22 @@ impl AtomicSave {
             "save outcome is incomplete, mixed or indeterminate; reconcile before retrying",
         ))
     }
+}
+
+fn validate_worker_fetch(binding: &Binding, body: &[u8]) -> Result<()> {
+    let fields = decode_fields(body)?;
+    let cursor = optional_bytes(&fields, 1)?;
+    if cursor.is_some_and(|cursor| cursor.len() > 16 * 1024)
+        || body
+            != ckks::build_retrieve_changes_request(
+                &ckks::record_zone_identifier(&binding.zone.name, &binding.zone.owner),
+                cursor,
+                500,
+            )
+    {
+        return Err(invalid("worker fetch differs from the fixed zone request"));
+    }
+    Ok(())
 }
 
 fn validate_pointer_reference(raw: &[u8], zone: &ZoneIdentity, parent: &str) -> Result<()> {
