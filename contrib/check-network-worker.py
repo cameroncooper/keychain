@@ -92,7 +92,8 @@ http.server.HTTPServer((a.host,a.port),Handler).serve_forever()
         scope_hash = "SHA256:" + base64.b64encode(hashlib.sha256(b"synthetic-adsid").digest()).decode()
         peer = "SHA256:" + base64.b64encode(bytes([2]) * 32).decode()
         machine = dict(version=1, host_uuid="01" * 16,
-                       identity=dict(device_id=str(uuid.uuid4()), local_user_uuid=str(uuid.uuid4())),
+                       # ADI provisioning uses a macOS UDID; CloudKit app scope below remains a UUID.
+                       identity=dict(device_id="00006000-0A1B2C3D4E5F6071", local_user_uuid=uuid.uuid4().hex),
                        store_export_b64="synthetic-only")
         seed = json.dumps(dict(version=1, phase="ready", machine_json=json.dumps(machine)))
         credential = dict(version=1, owner=1001, adsid="synthetic-adsid", peer_id=peer,

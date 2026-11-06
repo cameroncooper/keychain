@@ -59,8 +59,8 @@ is an administrative operation, separate from browser credential requests:
 ```sh
 set -o pipefail
 /usr/libexec/keychain/keychain-network-worker export |
-  sudo systemd-creds encrypt --with-key=host --name=network-account \
-    - /etc/keychain/network-account.cred.new
+  sudo -n sh -c 'umask 077; exec systemd-creds encrypt --with-key=host \
+    --name=network-account - /etc/keychain/network-account.cred.new'
 ```
 
 Only proceed if BOTH sides succeed. Do not publish an empty/failed export or
@@ -115,14 +115,38 @@ sudo python3 contrib/check-network-worker.py \
 It verifies scope rejection before backend construction, kernel worker identity,
 handshake and idle socket cleanup. Unit tests cover selective export, malformed
 credentials and seed persistence/refusal. These checks have passed; they do not
-prove live Apple token acceptance or upload atomicity. Real credentials have not
-been exported/applied during implementation.
+prove live Apple token acceptance or upload atomicity. Those checks used only
+synthetic credentials; later real-candidate staging is recorded below.
 
 The broker's separate [agreement-key enrollment and authenticated root bootstrap](../docs/BROKER-ACCOUNT-BOOTSTRAP.md)
 now exist. The broker/worker packages are intentionally separate and neither has
-been applied to the real account. The fixed-unit worker-start/connect path and
+been applied to the production account. The fixed-unit worker-start/connect path and
 coordinator/browser wiring are connected behind the default-off
 `--allow-synced-creation` broker flag. Owner-supplied snapshots, roots and uploaded
 flags are refused. Fresh authentication, account bootstrap, remaining memory
 review, scoped live Apple tests and biometric/browser tests are still required
 before enabling the iCloud choice. The installer never adds this flag.
+
+
+## ADI identity interoperability and local candidate validation
+
+The pinned helper also uses macOS UDIDs (`8 hex digits-16 hex digits`) as ADI
+provisioning identifiers. These are distinct from the app's CloudKit UUID. A
+real-profile local export exposed that the worker incorrectly required a UUID
+for both. The worker now accepts nonzero UUIDs or that precise UDID format;
+malformed/arbitrary identifiers still fail. Existing UUID seed markers are byte-
+identical. UDIDs use a distinct typed digest input, so they cannot alias UUID
+identities. Mutable OTP store updates still do not replace a seeded identity.
+
+Eight worker tests passed, including the existing-marker golden value, UDID
+credential round trip, strict CloudKit UUID scope, malformed/zero rejection and
+refusal to replace a seeded UDID. The separate-UID/systemd startup check now uses
+a synthetic UDID with a distinct UUID for CloudKit; credential delivery, kernel
+peer identity, wrong-scope refusal, handshake and idle exit passed with a fake
+loopback helper and no Apple/SEP IO. The release worker and strict Clippy passed.
+
+Root-only encrypted candidates from the real profile now exist and pass local
+format/identity checks. They remain unapplied; see
+[BROKER-ACCOUNT-BOOTSTRAP.md](../docs/BROKER-ACCOUNT-BOOTSTRAP.md#local-bootstrap-candidates--2026-11-06).
+No ADI identity or account key was regenerated. This is not evidence of token
+acceptance, live share recovery, upload atomicity or another-device passkey use.

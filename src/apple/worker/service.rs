@@ -79,19 +79,45 @@ fn seed_identity(seed: &[u8]) -> Result<String> {
     let host = Zeroizing::new(
         hex::decode(&machine.host_uuid).map_err(|_| invalid("invalid ADI host identity"))?,
     );
-    let device = Uuid::parse_str(&machine.identity.device_id)
-        .map_err(|_| invalid("invalid ADI device identity"))?;
+    let device = adi_device_identity(&machine.identity.device_id)?;
     let local = Uuid::parse_str(&machine.identity.local_user_uuid)
         .map_err(|_| invalid("invalid ADI local identity"))?;
-    if machine.version != 1 || host.len() != 16 || device.is_nil() || local.is_nil() {
+    if machine.version != 1 || host.len() != 16 || local.is_nil() {
         return Err(invalid("invalid ADI identity"));
     }
     let mut hash = Sha256::new();
     hash.update(b"keychain/network-worker/adi-identity/v1");
     hash.update(host.as_slice());
-    hash.update(device.as_bytes());
+    hash.update(device.as_slice());
     hash.update(local.as_bytes());
     Ok(hex::encode(hash.finalize()))
+}
+
+/// ADI provisioning IDs are distinct from the app's CloudKit UUID. The pinned
+/// helper supports UUID identities and macOS UDIDs (8 hex digits, '-', 16 hex).
+/// Retain the existing UUID digest input, and give UDIDs a distinct typed prefix.
+fn adi_device_identity(value: &str) -> Result<Zeroizing<Vec<u8>>> {
+    if let Ok(uuid) = Uuid::parse_str(value) {
+        if uuid.is_nil() {
+            return Err(invalid("invalid ADI device identity"));
+        }
+        return Ok(Zeroizing::new(uuid.as_bytes().to_vec()));
+    }
+    if value.len() != 25 || !value.is_ascii() || value.as_bytes()[8] != b'-' {
+        return Err(invalid("invalid ADI device identity"));
+    }
+    let mut udid = Zeroizing::new([0u8; 12]);
+    hex::decode_to_slice(&value[..8], &mut udid[..4])
+        .map_err(|_| invalid("invalid ADI device identity"))?;
+    hex::decode_to_slice(&value[9..], &mut udid[4..])
+        .map_err(|_| invalid("invalid ADI device identity"))?;
+    if udid.iter().all(|byte| *byte == 0) {
+        return Err(invalid("invalid ADI device identity"));
+    }
+    let mut tagged = Zeroizing::new(Vec::with_capacity(17));
+    tagged.extend_from_slice(b"udid:");
+    tagged.extend_from_slice(udid.as_slice());
+    Ok(tagged)
 }
 
 impl Credentials {
@@ -475,6 +501,75 @@ mod tests {
             anisette_seed: STANDARD
                 .encode(serde_json::json!({"version":1,"phase":"ready","machine_json":serde_json::json!({"version":1,"host_uuid":"01".repeat(16),"identity":{"device_id":"11111111-1111-4111-8111-111111111111","local_user_uuid":"22222222-2222-4222-8222-222222222222"},"store_export_b64":"synthetic-adi"}).to_string()}).to_string()),
         }
+    }
+    fn seed_with_device(device_id: &str) -> Result<Zeroizing<Vec<u8>>> {
+        let mut seed: serde_json::Value = serde_json::from_slice(&credential().seed()?)?;
+        let mut machine: serde_json::Value = serde_json::from_str(
+            seed["machine_json"]
+                .as_str()
+                .ok_or_else(|| invalid("test machine"))?,
+        )?;
+        machine["identity"]["device_id"] = device_id.into();
+        seed["machine_json"] = serde_json::to_string(&machine)?.into();
+        Ok(Zeroizing::new(serde_json::to_vec(&seed)?))
+    }
+    #[test]
+    fn existing_uuid_identity_marker_is_unchanged() -> Result<()> {
+        assert_eq!(
+            seed_identity(&credential().seed()?)?,
+            "cc71aa6d8c35578bf1ab515d11529957fd9750417b1869730ae4a0a747de7a85"
+        );
+        Ok(())
+    }
+    #[test]
+    fn adi_udid_is_not_a_cloudkit_uuid_and_preserves_credential_scope() -> Result<()> {
+        let mut original = credential();
+        let seed = seed_with_device("00006000-0A1B2C3D4E5F6071")?;
+        original.anisette_seed = STANDARD.encode(seed.as_slice());
+        let decoded = Credentials::decode(&original.encode()?)?;
+        assert!(decoded.scope() == original.scope());
+        assert_eq!(decoded.seed()?.as_slice(), seed.as_slice());
+        assert_eq!(
+            seed_identity(&seed)?,
+            seed_identity(&seed_with_device("00006000-0a1b2c3d4e5f6071")?)?
+        );
+        // CloudKit-facing app scope still requires a UUID.
+        original.device.device_id = "00006000-0A1B2C3D4E5F6071".into();
+        assert!(original.validate().is_err());
+        Ok(())
+    }
+    #[test]
+    fn malformed_or_zero_adi_device_identifiers_are_refused() {
+        for value in [
+            "",
+            "not-a-device",
+            "00006000-0A1B2C3D4E5F607",
+            "00006000-0A1B2C3D4E5F60712",
+            "00006000_0A1B2C3D4E5F6071",
+            "00006000-0A1B2C3D4E5F607Z",
+            "00006000-0A1B2C3D4E5F607\n",
+            "00000000-0000000000000000",
+            "00000000-0000-0000-0000-000000000000",
+        ] {
+            assert!(
+                adi_device_identity(value).is_err(),
+                "accepted malformed synthetic identity"
+            );
+        }
+    }
+    #[test]
+    fn changing_a_seeded_udid_never_replaces_the_worker_identity() -> Result<()> {
+        let directory = tempfile::tempdir().map_err(|e| Error::io("test", e))?;
+        let paths = AppPaths::for_test(directory.path())?;
+        let original = seed_with_device("00006000-0A1B2C3D4E5F6071")?;
+        let changed = seed_with_device("00006000-0A1B2C3D4E5F6072")?;
+        assert_ne!(seed_identity(&original)?, seed_identity(&changed)?);
+        seed_anisette(&paths, &original)?;
+        assert!(seed_anisette(&paths, &changed).is_err());
+        let saved = fs::read(paths.anisette_dir().join("macos/machine.json"))
+            .map_err(|e| Error::io("test machine", e))?;
+        assert_eq!(saved.as_slice(), original.as_slice());
+        Ok(())
     }
     #[test]
     fn minimal_credential_roundtrip_rejects_unknown_fields_and_invalid_scope() -> Result<()> {

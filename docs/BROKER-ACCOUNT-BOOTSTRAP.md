@@ -2,8 +2,9 @@
 
 The broker can now enroll the existing Octagon agreement identity through an
 explicit root-administrator pipe. This is not an owner/browser socket operation.
-No account has been enrolled from the real profile during implementation, and no
-Apple write, sign-in, escrow retry or biometric capture was used in these tests.
+The production registry has not enrolled a real account. Local encrypted-candidate
+validation is recorded below; no Apple write, sign-in, escrow retry or biometric
+capture was used for that validation.
 
 The two bootstrap packages have different recipients and contents:
 
@@ -95,3 +96,30 @@ VerifiedUpload as authorization. Live authentication, scoped Apple upload
 acceptance/atomicity, real biometric creation and other-device validation remain
 unproven. Do not enable the iCloud creation choice on the basis of these offline
 tests alone.
+
+
+## Local bootstrap candidates — 2026-11-06
+
+The real profile's two exports are staged as root-owned mode-0600 systemd-encrypted
+candidates under `/etc/keychain/network-account.cred.new` and
+`/etc/keychain/broker-account.cred.new`. A private review at
+`/etc/keychain/bootstrap-candidate-review.json` records ciphertext hashes and the
+narrow validation results; it contains no plaintext token, ADI store or agreement
+key. Neither candidate is published or imported into the production registry.
+
+The network candidate passed the installed `check-credentials` command under UID
+957, with systemd credential delivery, PrivateNetwork and AF_UNIX-only restrictions.
+The broker candidate was decrypted directly into an isolated root-only import
+process over a private pipe; the existing signed peer/agreement-key consistency
+checks passed. The disposable validation registry was then removed. No plaintext
+export file, Apple request, helper startup, SEP key creation or biometric capture
+was used. The original profile and agreement keys are retained.
+
+Systemd initialized its separate host credential-encryption key on the first local
+encryption operation. This key is root-only (mode 0400); it is not an Octagon root,
+SEP key or new Apple identity. The initial failed network export produced an empty
+encrypted candidate, which was removed before the validated candidates were made.
+The provisioning-ID validation correction is described in NETWORK-WORKER.md.
+Token acceptance and authenticated share/zone fetching remain unverified for the
+service candidates. The production worker is inactive, its published credential
+is absent and the broker's synced-creation flag remains off.
