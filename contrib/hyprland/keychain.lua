@@ -4,7 +4,9 @@ hl.window_rule({
   match = { class = "^cameroncooper[.]keychain[.]Authentication$" },
   float = true,
   center = true,
-  size = { 420, 340 },
+  size = { 420, 290 },
+  rounding = 16,
+  border_size = 1,
   opacity = "1 override 1 override",
   tag = "-default-opacity",
 })

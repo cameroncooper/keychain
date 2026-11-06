@@ -6,7 +6,7 @@ use crate::broker::login::{RevealField, RevealedLogin};
 use gpui_kit::assets::{AllAssets, IconName};
 use gpui_kit::base::{Button as TileButton, Disableable};
 use gpui_kit::component::{
-    Icon, Theme, ThemeMode, TitleBar,
+    Icon, Theme, TitleBar,
     button::{Button, ButtonVariants},
     input::{Input, InputEvent, InputState},
 };
@@ -49,6 +49,7 @@ impl Passwords {
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Search"));
         let subscriptions = vec![
+            follow_system_appearance(window, cx),
             cx.subscribe_in(&search, window, |this, input, event, _, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.clear_reveal();
@@ -231,6 +232,7 @@ impl Passwords {
         cx.notify();
     }
     fn category_tile(&self, category: Category, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = Palette::current(cx);
         let selected = self.category == category;
         let count = self.items.iter().filter(|i| category.contains(i)).count();
         TileButton::new(category.label())
@@ -247,9 +249,9 @@ impl Passwords {
             .min_w_0()
             .h(px(96.))
             .rounded_xl()
-            .bg(rgb(if selected { BLUE } else { 0xdedddf }))
+            .bg(rgb(if selected { BLUE } else { palette.tile }))
             .cursor_pointer()
-            .text_color(rgb(if selected { 0xffffff } else { TEXT }))
+            .text_color(rgb(if selected { 0xffffff } else { palette.text }))
             .child(
                 div()
                     .flex()
@@ -278,7 +280,8 @@ impl Passwords {
                 cx.notify();
             }))
     }
-    fn field(&self, label: &'static str, value: String) -> impl IntoElement {
+    fn field(&self, label: &'static str, value: String, cx: &App) -> impl IntoElement {
+        let palette = Palette::current(cx);
         div()
             .flex()
             .items_start()
@@ -286,7 +289,7 @@ impl Passwords {
             .gap_4()
             .py_4()
             .border_b_1()
-            .border_color(rgb(LINE))
+            .border_color(rgb(palette.line))
             .child(
                 div()
                     .flex_shrink_0()
@@ -297,7 +300,7 @@ impl Passwords {
                 div()
                     .min_w_0()
                     .text_right()
-                    .text_color(rgb(MUTED))
+                    .text_color(rgb(palette.muted))
                     .child(display_text(&value)),
             )
     }
@@ -307,6 +310,7 @@ impl Passwords {
         field: RevealField,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let palette = Palette::current(cx);
         let value = self.revealed.as_ref().and_then(|(v, _)| match field {
             RevealField::Password => v.password.as_ref().map(|p| p.to_string()),
             RevealField::Notes => v.notes.as_ref().map(|p| p.to_string()),
@@ -324,7 +328,7 @@ impl Passwords {
             .gap_3()
             .py_3()
             .border_b_1()
-            .border_color(rgb(LINE))
+            .border_color(rgb(palette.line))
             .child(
                 div()
                     .flex()
@@ -334,7 +338,7 @@ impl Passwords {
                     .child(label)
                     .child(
                         div()
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(palette.muted))
                             .child(value.unwrap_or_else(|| "••••••••".into())),
                     ),
             )
@@ -353,6 +357,7 @@ impl Passwords {
             )
     }
     fn details(&self, cx: &mut Context<Self>) -> AnyElement {
+        let palette = Palette::current(cx);
         let Some(item) = self
             .items
             .iter()
@@ -365,7 +370,7 @@ impl Passwords {
                 .items_center()
                 .justify_center()
                 .gap_3()
-                .text_color(rgb(MUTED))
+                .text_color(rgb(palette.muted))
                 .child(Icon::new(IconName::KeyRound).size(px(42.)))
                 .child(if self.loading {
                     "Loading credentials…"
@@ -380,8 +385,8 @@ impl Passwords {
             .p_5()
             .rounded_xl()
             .border_1()
-            .border_color(rgb(LINE))
-            .bg(rgb(0xffffff))
+            .border_color(rgb(palette.line))
+            .bg(rgb(palette.surface))
             .child(
                 div()
                     .flex()
@@ -401,15 +406,17 @@ impl Passwords {
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .child(display_text(&item.title)),
                             )
-                            .child(div().text_color(rgb(MUTED)).child(if item.login.is_some() {
-                                "Password"
-                            } else {
-                                "Passkey"
-                            })),
+                            .child(div().text_color(rgb(palette.muted)).child(
+                                if item.login.is_some() {
+                                    "Password"
+                                } else {
+                                    "Passkey"
+                                },
+                            )),
                     ),
             )
-            .child(self.field("Username", item.username.clone()))
-            .child(self.field("Website", display_domain(&item.domain)));
+            .child(self.field("Username", item.username.clone(), cx))
+            .child(self.field("Website", display_domain(&item.domain), cx));
         if let Some(login) = &item.login {
             if login.has_password {
                 card = card.child(self.secret_row("Password", RevealField::Password, cx));
@@ -424,18 +431,19 @@ impl Passwords {
         div().flex_1().min_w_0().h_full().id("credential-details").overflow_y_scroll().p_6().flex().flex_col().gap_5()
             .child(card)
             .child(div().flex().flex_col().gap_2().child(div().font_weight(FontWeight::SEMIBOLD).child("Storage & protection"))
-                .child(div().p_4().rounded_xl().bg(rgb(0xf1f2f5)).flex().flex_col().gap_2()
+                .child(div().p_4().rounded_xl().bg(rgb(palette.inset)).flex().flex_col().gap_2()
                     .child(div().flex().gap_2().items_center().child(Icon::new(IconName::ShieldCheck)).child(item.storage))
-                    .child(div().text_color(rgb(MUTED)).child(item.protection))))
-            .child(div().text_size(px(12.)).text_color(rgb(MUTED)).child(if item.login.is_some() {
+                    .child(div().text_color(rgb(palette.muted)).child(item.protection))))
+            .child(div().text_size(px(12.)).text_color(rgb(palette.muted)).child(if item.login.is_some() {
                 "Revealed fields hide after 30 seconds or when this window loses focus."
             } else { "Use this passkey through the browser integration. Private keys are never displayed." }))
-            .child(div().text_size(px(11.)).text_color(rgb(MUTED)).child(format!("ID  {}", item.id)))
+            .child(div().text_size(px(11.)).text_color(rgb(palette.muted)).child(format!("ID  {}", item.id)))
             .into_any_element()
     }
 }
 impl Render for Passwords {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = Palette::current(cx);
         let compact = window.viewport_size().width < px(900.);
         let matches: Vec<_> = self
             .items
@@ -447,8 +455,8 @@ impl Render for Passwords {
             .flex_1()
             .min_h_0()
             .w_full()
-            .bg(rgb(BACKGROUND))
-            .text_color(rgb(TEXT))
+            .bg(rgb(palette.background))
+            .text_color(rgb(palette.text))
             .font_family("sans-serif")
             .text_size(px(14.))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -466,9 +474,9 @@ impl Render for Passwords {
                         .flex_shrink_0()
                         .h_full()
                         .p_4()
-                        .bg(rgb(SIDEBAR))
+                        .bg(rgb(palette.sidebar))
                         .border_r_1()
-                        .border_color(rgb(LINE))
+                        .border_color(rgb(palette.line))
                         .flex()
                         .flex_col()
                         .gap_4()
@@ -504,7 +512,7 @@ impl Render for Passwords {
                         .child(
                             div()
                                 .text_size(px(12.))
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(palette.muted))
                                 .child("Sync with iCloud using keychain sync."),
                         ),
                 )
@@ -515,15 +523,15 @@ impl Render for Passwords {
                     .flex_shrink_0()
                     .h_full()
                     .border_r_1()
-                    .border_color(rgb(LINE))
-                    .bg(rgb(0xffffff))
+                    .border_color(rgb(palette.line))
+                    .bg(rgb(palette.surface))
                     .flex()
                     .flex_col()
                     .child(
                         div()
                             .p_4()
                             .border_b_1()
-                            .border_color(rgb(LINE))
+                            .border_color(rgb(palette.line))
                             .flex()
                             .flex_col()
                             .gap_3()
@@ -539,7 +547,7 @@ impl Render for Passwords {
                                     )
                                     .child(
                                         div()
-                                            .text_color(rgb(MUTED))
+                                            .text_color(rgb(palette.muted))
                                             .child(format!("{} items", matches.len())),
                                     ),
                             ),
@@ -573,8 +581,8 @@ impl Render for Passwords {
                                     .rounded_lg()
                                     .mb_1()
                                     .cursor_pointer()
-                                    .bg(rgb(if selected { BLUE } else { 0xffffff }))
-                                    .text_color(rgb(if selected { 0xffffff } else { TEXT }))
+                                    .bg(rgb(if selected { BLUE } else { palette.surface }))
+                                    .text_color(rgb(if selected { 0xffffff } else { palette.text }))
                                     .child(icon_badge(
                                         item.icon(),
                                         if selected { 0x3487f6 } else { item.color() },
@@ -608,11 +616,13 @@ impl Render for Passwords {
                                     }))
                             }))
                             .when(matches.is_empty(), |d| {
-                                d.child(div().p_4().text_color(rgb(MUTED)).child(if self.loading {
-                                    "Loading…"
-                                } else {
-                                    "No matching credentials"
-                                }))
+                                d.child(div().p_4().text_color(rgb(palette.muted)).child(
+                                    if self.loading {
+                                        "Loading…"
+                                    } else {
+                                        "No matching credentials"
+                                    },
+                                ))
                             }),
                     ),
             )
@@ -627,8 +637,8 @@ impl Render for Passwords {
                         d.child(
                             div()
                                 .p_4()
-                                .bg(rgb(0xffeee9))
-                                .text_color(rgb(0x943c25))
+                                .bg(rgb(palette.error_background))
+                                .text_color(rgb(palette.error_text))
                                 .child(display_text(error)),
                         )
                     })
@@ -637,7 +647,7 @@ impl Render for Passwords {
                             div()
                                 .px_6()
                                 .py_3()
-                                .text_color(rgb(MUTED))
+                                .text_color(rgb(palette.muted))
                                 .child("Waiting for the selected field…"),
                         )
                     })
@@ -647,7 +657,7 @@ impl Render for Passwords {
             .flex()
             .flex_col()
             .size_full()
-            .bg(rgb(BACKGROUND))
+            .bg(rgb(palette.background))
             .child(TitleBar::new().child("Keychain"))
             .when(compact, |outer| {
                 outer.child(
@@ -692,7 +702,7 @@ impl Render for Passwords {
 pub fn run() {
     gpui_kit::application().with_assets(AllAssets).run(|cx| {
         gpui_kit::init(cx);
-        Theme::change(ThemeMode::Light, None, cx);
+        Theme::sync_system_appearance(None, cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();

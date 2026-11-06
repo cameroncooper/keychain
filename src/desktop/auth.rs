@@ -2,7 +2,10 @@
 use super::*;
 use crate::prompt::{AgentEvent, DisplayEvent, Presentation, read_frame, write_frame};
 use gpui_kit::assets::{AllAssets, IconName};
-use gpui_kit::component::{Icon, Theme, ThemeMode, button::Button};
+use gpui_kit::component::{
+    Icon, Theme,
+    button::{Button, ButtonVariants},
+};
 use gpui_kit::*;
 use std::cell::RefCell;
 use std::io;
@@ -103,17 +106,42 @@ struct AuthPrompt {
     status: String,
     channel: Rc<RefCell<Channel>>,
     focus: FocusHandle,
+    first_frame: bool,
+    presented: bool,
+    was_active: bool,
+    _activation: Subscription,
+    _appearance: Subscription,
+}
+impl AuthPrompt {
+    fn acknowledge_display(&mut self, window: &mut Window) {
+        if self.presented || !self.first_frame || !window.is_visible() || !window.is_window_active()
+        {
+            return;
+        }
+        let mut channel = self.channel.borrow_mut();
+        let id = channel.id;
+        if write_frame(&mut channel.stream, &AgentEvent::Visible { id }).is_ok() {
+            self.presented = true;
+            self.was_active = true;
+        } else {
+            channel.cancel();
+            window.remove_window();
+        }
+    }
 }
 impl Render for AuthPrompt {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = Palette::current(cx);
         div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(0xffffff))
-            .text_color(rgb(TEXT))
+            .rounded(px(16.))
+            .overflow_hidden()
+            .bg(rgb(palette.surface))
+            .text_color(rgb(palette.text))
             .font_family("sans-serif")
-            .text_size(px(14.))
+            .text_size(px(13.))
             .track_focus(&self.focus)
             .on_key_down(|event, window, _| {
                 if event.keystroke.key == "escape" {
@@ -125,22 +153,30 @@ impl Render for AuthPrompt {
                     .flex()
                     .items_center()
                     .justify_between()
-                    .px_5()
-                    .h(px(54.))
+                    .flex_shrink_0()
+                    .mx_4()
+                    .h(px(46.))
                     .border_b_1()
-                    .border_color(rgb(LINE))
+                    .border_color(rgb(palette.line))
                     .child(
                         div()
                             .flex()
                             .items_center()
                             .gap_2()
-                            .child(Icon::new(IconName::KeyRound))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(Icon::new(IconName::UserRound).size(px(16.)))
                             .child("Keychain"),
                     )
                     .child(
                         Button::new("cancel")
                             .label("Cancel")
-                            .on_click(|_, w, _| w.remove_window()),
+                            .ghost()
+                            .rounded(px(6.))
+                            .h(px(24.))
+                            .px_2()
+                            .text_size(px(12.))
+                            .bg(rgb(palette.tile))
+                            .on_click(|_, window, _| window.remove_window()),
                     ),
             )
             .child(
@@ -153,33 +189,43 @@ impl Render for AuthPrompt {
                     .flex_col()
                     .items_center()
                     .justify_center()
-                    .p_6()
-                    .gap_3()
-                    .child(icon_badge(IconName::KeyRound, BLUE, false))
+                    .px_8()
+                    .py_5()
                     .child(
                         div()
-                            .text_size(px(18.))
+                            .text_size(px(17.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_center()
+                            .child("Use your fingerprint"),
+                    )
+                    .child(
+                        div()
+                            .mt_2()
+                            .text_center()
+                            .line_height(px(18.))
                             .child(display_text(&self.request.action)),
                     )
                     .child(
                         div()
-                            .text_color(rgb(MUTED))
+                            .mt_1()
                             .text_center()
+                            .text_color(rgb(palette.muted))
                             .child(display_text(&self.request.account)),
                     )
                     .child(
-                        div()
-                            .mt_3()
-                            .mb_1()
-                            .text_color(rgb(0xc76d89))
-                            .child(Icon::new(IconName::FingerprintPattern).size(px(54.))),
+                        div().mt_4().mb_3().child(
+                            Icon::default()
+                                .data(include_bytes!("../../assets/fingerprint.svg"))
+                                .text_color(rgb(palette.fingerprint))
+                                .size(px(60.)),
+                        ),
                     )
                     .child(
                         div()
+                            .text_size(px(12.))
+                            .line_height(px(17.))
                             .text_center()
-                            .text_color(rgb(MUTED))
+                            .text_color(rgb(palette.muted))
                             .child(self.status.clone()),
                     ),
             )
@@ -196,7 +242,7 @@ fn open_prompt(
     let close = channel.clone();
     let (window, view) = gpui_kit::open_window(
         WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(420.), px(340.)), cx)),
+            window_bounds: Some(WindowBounds::centered(size(px(420.), px(290.)), cx)),
             titlebar: None,
             kind: WindowKind::Dialog,
             is_resizable: false,
@@ -210,31 +256,45 @@ fn open_prompt(
                 close.borrow_mut().cancel();
                 true
             });
-            // Acknowledge only after the first frame has had a chance to display.
-            // This is presentation readiness, never a biometric authorization result.
-            let visible = channel.clone();
-            window.on_next_frame(move |window, _| {
-                window.on_next_frame(move |window, _| {
-                    if window.is_visible() {
-                        let mut channel = visible.borrow_mut();
-                        if write_frame(&mut channel.stream, &AgentEvent::Visible { id }).is_err() {
-                            channel.cancel();
-                            window.remove_window();
-                        }
-                    }
-                });
-                window.refresh();
-            });
-            cx.new(|cx| {
+            let view = cx.new(|cx| {
+                let appearance = follow_system_appearance(window, cx);
                 let focus = cx.focus_handle();
                 window.focus(&focus, cx);
+                let activation =
+                    cx.observe_window_activation(window, |view: &mut AuthPrompt, window, _| {
+                        if window.is_window_active() {
+                            view.was_active = true;
+                            view.acknowledge_display(window);
+                        } else if view.was_active {
+                            // Switching away ends this operation; returning never resumes capture.
+                            view.channel.borrow_mut().cancel();
+                            window.remove_window();
+                        }
+                    });
                 AuthPrompt {
                     request,
                     channel,
                     focus,
                     status: "Preparing fingerprint reader…".into(),
+                    first_frame: false,
+                    presented: false,
+                    was_active: window.is_window_active(),
+                    _activation: activation,
+                    _appearance: appearance,
                 }
-            })
+            });
+            // Wait for a drawn frame AND focus before acknowledging presentation.
+            let visible = view.downgrade();
+            window.on_next_frame(move |window, _| {
+                window.on_next_frame(move |window, cx| {
+                    let _ = visible.update(cx, |view, _| {
+                        view.first_frame = true;
+                        view.acknowledge_display(window);
+                    });
+                });
+                window.refresh();
+            });
+            view
         },
     )?;
     Ok(Active { id, window, view })
@@ -311,7 +371,7 @@ pub fn run() -> io::Result<()> {
         .with_assets(AllAssets)
         .run(move |cx| {
             gpui_kit::init(cx);
-            Theme::change(ThemeMode::Light, None, cx);
+            Theme::sync_system_appearance(None, cx);
             let bus = match crate::prompt::activation::claim_name() {
                 Ok(bus) => bus,
                 Err(error) => {
@@ -360,6 +420,18 @@ pub fn run() -> io::Result<()> {
                                     }
                                 }
                             }
+                        }
+                        // Some backends coalesce activation notifications around mapping.
+                        // Also check current activation while an operation is displayed.
+                        if let Some(current) = active.as_ref() {
+                            let _ = current.window.update(cx, |_, window, cx| {
+                                current.view.update(cx, |view, _| {
+                                    if view.was_active && !window.is_window_active() {
+                                        view.channel.borrow_mut().cancel();
+                                        window.remove_window();
+                                    }
+                                });
+                            });
                         }
                         // A closed window must cancel immediately, even while waiting for End.
                         if active

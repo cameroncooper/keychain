@@ -105,7 +105,7 @@ GPUI advertises a modal dialog, but Hyprland on this development machine still
 places it as a tiled toplevel. `contrib/hyprland/keychain.lua` contains an optional
 Hyprland 0.57+ rule, following the [current window-rule syntax](https://wiki.hypr.land/configuring/core/rules/window-rules/),
 for the exact authentication app ID. It makes only that window floating, centered,
-420 × 340 and opaque; it grants no trusted-surface identity or authorization. Load
+420 × 290 with 16-pixel rounded corners and an opaque background; it grants no trusted-surface identity or authorization. Load
 the module after desktop defaults. On Omarchy, copy it to `~/.config/hypr/keychain.lua`
 and add `require("hypr.keychain")` to `hyprland.lua`, then validate `hyprctl reload`
 and `hyprctl configerrors`. This rule is applied to the development desktop with a
@@ -128,3 +128,49 @@ errors and the scoped rule produces a centered, opaque 420 × 340 dialog. These
 checks never started fingerprint capture. A real fingerprint signing/reveal round
 trip through this new UI remains to be checked with the user; earlier GTK hardware
 evidence is not evidence of GPUI-specific behavior.
+
+### Popup refinement and focus policy
+
+The popup uses an original, embedded fine-line fingerprint SVG, a compact header,
+quiet Cancel control, a short heading, and separate broker-supplied operation/account
+text. It does not parse prose to invent a website, claim a verified application
+identity, offer an unsupported password fallback, or display an approval button.
+
+The prompt remains modal to its operation while allowing desktop app switching.
+It deliberately does not set Hyprland `stay_focused` or install a global input grab.
+After the window first becomes active, losing activation sends Cancel and closes
+it. Returning to Keychain never resumes that capture; the requester must start a
+new operation. The first Visible acknowledgement now requires both a rendered
+frame and active-window focus. These are presentation checks, not a trusted desktop
+surface or biometric authorization. The broker continues to enforce its own
+session, cancellation and authorization checks.
+
+### Desktop appearance
+
+Both windows follow the generic XDG Desktop Portal Settings preference
+`org.freedesktop.appearance/color-scheme`: 0 is no preference, 1 prefers dark, and
+2 prefers light. GPUI's Linux platform already reads this setting and subscribes
+to its change signal. Keychain synchronizes GPUI Component's theme when each
+window opens and observes subsequent window-appearance changes. Custom surfaces,
+text, dividers, error states and the fingerprint artwork use a shared light/dark
+palette; components use the matching GPUI theme. Missing portal support/no
+preference uses GPUI's light fallback. Appearance does not affect authorization.
+
+No Omarchy config, GTK theme name or desktop-specific setting is read to select
+appearance. The portal expresses a preference rather than a complete vendor color
+palette. Reference: [Settings portal specification](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Settings.html).
+
+
+Refinement validation on 2026-11-06: the installed agent rendered the new rounded
+420 × 290 popup in dark mode with the session portal reporting `color-scheme=1`.
+A synthetic request received Visible only after rendering/focus; explicitly
+switching to a terminal produced Cancel and closed the window. No fingerprint
+capture, signing, Apple request or credential reveal was performed in this check.
+The desktop's actual theme was not changed for testing.
+
+
+The first full debug-test rebuild exhausted RAM while several link jobs ran at
+once on the 16 GB development machine; the kernel killed a linker in the terminal
+scope. A serial `cargo test --locked --features desktop-agent --workspace -j 1`
+subsequently passed. Desktop test instructions use one build job on this machine;
+no swap, global Cargo setting or desktop memory policy was changed.

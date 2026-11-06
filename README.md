@@ -250,9 +250,20 @@ Refresh reloads local items; use `keychain sync` to fetch iCloud changes. Passwo
 notes and current-code reveal is explicit and selected-field only; protected logins
 use the broker's fingerprint prompt. Revealed fields hide after 30 seconds, code
 expiry, selection/search changes, window deactivation or Escape. No secret is copied
-to the clipboard automatically. Apple editing/deletion and sync setup remain CLI work.
+to the clipboard automatically. Sync and account setup remain CLI operations; this app does not expose editing or deletion.
 
 The small authentication window uses the same GPUI UI stack but runs in its separate
 D-Bus activated agent. Reinstall the service artifacts to switch the installed GTK
 agent to GPUI; building alone does not replace installed services. See
 [desktop UI design](docs/DESKTOP-UI.md) for the security boundaries and remaining work.
+
+The app and fingerprint prompt follow the XDG Desktop Portal light/dark preference,
+including appearance changes while open. This does not depend on Omarchy-specific
+files. The authentication popup cancels its operation when it loses focus.
+
+GUI builds and tests can have large linker memory peaks. On the 16 GB Asahi
+machine, run desktop validation serially to avoid concurrent debug linkers:
+
+```sh
+cargo test --locked --features desktop-agent --workspace -j 1
+```
