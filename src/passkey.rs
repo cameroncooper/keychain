@@ -242,6 +242,130 @@ pub fn from_item(record_id: &str, fields: &Dictionary) -> Result<Option<Recovere
     }))
 }
 
+/// Prepare Apple's synchronizable software-key representation. A trusted caller
+/// must supply the scalar for this credential's key reference; this is not a
+/// browser/IPC import endpoint and does not change an existing key's provenance.
+/// The result zeroizes its owned data fields on drop and must stay in the broker.
+pub fn encode_sync_item(
+    credential: &PasskeyCredential,
+    private_x963: &[u8],
+) -> Result<crate::apple::pipeline::DecryptedItem> {
+    if credential.provenance != crate::model::PasskeyProvenance::Synced
+        || credential.signing_key.backend_id == "sep-native-v1"
+    {
+        return Err(Error::Refused(
+            "device-bound passkeys cannot be encoded for iCloud".into(),
+        ));
+    }
+    if credential.signing_key.algorithm != crate::security::KeyAlgorithm::P256
+        || credential.signing_key.usage != KeyUsage::WebAuthnSigning
+    {
+        return Err(invalid(
+            &credential.id,
+            "sync passkey key reference is not P-256 WebAuthn signing".into(),
+        ));
+    }
+    if uuid::Uuid::parse_str(&credential.id).is_err() {
+        return Err(Error::InvalidData(
+            "synced passkey record ID is not a UUID".into(),
+        ));
+    }
+    validate_private_key(&credential.id, private_x963)?;
+    let rp = normalize_rp_id(&credential.rp_id)
+        .map_err(|_| invalid(&credential.id, "invalid RP ID".into()))?;
+    if rp != credential.rp_id {
+        return Err(invalid(&credential.id, "RP ID is not canonical".into()));
+    }
+    let id = credential_id(credential)?;
+    let handle = user_handle(credential)?;
+    if !(1..=1023).contains(&id.len())
+        || !(1..=64).contains(&handle.len())
+        || URL_SAFE_NO_PAD.encode(&id) != credential.credential_id
+        || URL_SAFE_NO_PAD.encode(&handle) != credential.user_handle
+    {
+        return Err(invalid(
+            &credential.id,
+            "invalid new credential ID or user handle".into(),
+        ));
+    }
+    for text in [&credential.username, &credential.display_name] {
+        if text.len() > MAX_TEXT_BYTES || text.chars().any(char::is_control) {
+            return Err(invalid(&credential.id, "invalid account metadata".into()));
+        }
+    }
+    let mut tag = Vec::new();
+    ciborium::ser::into_writer(
+        &CborValue::Map(vec![
+            (CborValue::Text("id".into()), CborValue::Bytes(handle)),
+            (
+                CborValue::Text("name".into()),
+                CborValue::Text(credential.username.clone()),
+            ),
+            (
+                CborValue::Text("displayName".into()),
+                CborValue::Text(credential.display_name.clone()),
+            ),
+        ]),
+        &mut tag,
+    )
+    .map_err(|_| invalid(&credential.id, "could not encode account tag".into()))?;
+    let date = |seconds: f64| -> Result<Value> {
+        if !seconds.is_finite() || !(0.0..=253402300799.0).contains(&seconds) {
+            return Err(invalid(
+                &credential.id,
+                "key timestamp is out of range".into(),
+            ));
+        }
+        let duration = std::time::Duration::try_from_secs_f64(seconds)
+            .map_err(|_| invalid(&credential.id, "invalid key timestamp".into()))?;
+        let time = UNIX_EPOCH
+            .checked_add(duration)
+            .ok_or_else(|| invalid(&credential.id, "key timestamp is out of range".into()))?;
+        Ok(Value::Date(time.into()))
+    };
+    use sha1::Sha1;
+    let mut fields = Dictionary::new();
+    fields.insert("class".into(), Value::String("keys".into()));
+    fields.insert("agrp".into(), Value::String(ACCESS_GROUP.into()));
+    fields.insert("labl".into(), Value::Data(rp.into_bytes()));
+    fields.insert("alis".into(), Value::Data(id));
+    fields.insert(
+        "klbl".into(),
+        Value::Data(Sha1::digest(&private_x963[..65]).to_vec()),
+    );
+    fields.insert("atag".into(), Value::Data(tag));
+    fields.insert("pdmn".into(), Value::String("ak".into()));
+    fields.insert("vwht".into(), Value::String("Passwords".into()));
+    fields.insert("sync".into(), Value::Boolean(true)); // Local intent; CKKS serializer omits it.
+    fields.insert("cdat".into(), date(credential.created_at)?);
+    fields.insert("mdat".into(), date(credential.modified_at)?);
+    for (name, number) in [
+        ("kcls", 1),
+        ("type", 73),
+        ("bsiz", 256),
+        ("esiz", 256),
+        ("perm", 1),
+        ("priv", 1),
+        ("modi", 1),
+        ("sign", 1),
+        ("extr", 1),
+    ] {
+        fields.insert(name.into(), Value::Integer(number.into()));
+    }
+    for name in [
+        "crtr", "sens", "asen", "next", "encr", "decr", "drve", "vrfy", "snrc", "vyrc", "wrap",
+        "unwp", "tomb",
+    ] {
+        fields.insert(name.into(), Value::Integer(0.into()));
+    }
+    // Add secret bytes last, after all fallible metadata validation/encoding.
+    fields.insert("v_Data".into(), Value::Data(private_x963.to_vec()));
+    Ok(crate::apple::pipeline::DecryptedItem {
+        record_id: credential.id.clone(),
+        fields,
+    })
+}
+
 pub fn search<'a>(passkeys: &'a [PasskeyCredential], query: &str) -> Vec<&'a PasskeyCredential> {
     let query = query.trim().to_ascii_lowercase();
     let mut found: Vec<_> = passkeys

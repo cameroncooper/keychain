@@ -291,7 +291,7 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 141 passing tests, six ignored (two Apple network and four privileged
+Workspace checks: 145 passing tests, six ignored (two Apple network and four privileged
 integration tests). All three registry tests passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
 Nine browser service-worker flow tests also pass. Strict Clippy is clean.
@@ -381,6 +381,17 @@ items. Real registration/login in Chromium and complete-chain reboot evidence ar
 still pending; no hardware creation pass is claimed from these tests. iCloud
 creation, upload/fetch reconciliation and other-device verification remain required.
 See [registration details](docs/SEP-REGISTRATION.md).
+
+The iCloud path now has offline passkey plist encoding and new-item CKKS
+encryption. Write-key selection requires an explicit current class pointer,
+correct key class and zone-bound authenticated TLK ancestry; it refuses stale
+fallback, record collisions and device-bound export. A synthetic newly encrypted
+passkey reenters the existing sync pipeline with the same credential ID, user
+metadata and P-256 public key. This is local interoperability evidence, not Apple
+acceptance. No upload endpoint or iCloud browser choice is enabled. Atomic
+current-key/change-tag handling, a durable upload/reconciliation journal, broker
+coordination, fetched/other-device verification and the remaining reveal/migration
+gates are still required. See [iCloud creation progress](docs/ICLOUD-CREATION.md).
 
 Cold power-cycle, suspend/resume, other hardware, enrollment-set invalidation,
 native private-key import, P-384 and multi-user SEP identity isolation remain

@@ -75,7 +75,11 @@ pub fn authenticated_data_v2(record: &Record, parent_key_id: &str) -> Result<Vec
         }
         let encoded = match value {
             FieldValue::Bytes(value) => value.clone(),
-            FieldValue::String(value) | FieldValue::Reference(value) => value.as_bytes().to_vec(),
+            FieldValue::String(value) => value.as_bytes().to_vec(),
+            // Apple's v2 projection skips CKReference values; references are
+            // not encoded as arbitrary string AAD. The parent key is separately
+            // bound above under the historical "wrappedkey" AAD label.
+            FieldValue::Reference(_) => continue,
             FieldValue::Integer(value) => little_endian_8(*value),
             FieldValue::Double(value) => (*value as u64).to_le_bytes().to_vec(),
             FieldValue::Date(value) => OffsetDateTime::from_unix_timestamp(*value as i64)
@@ -517,6 +521,10 @@ mod tests {
                 ("gen".into(), FieldValue::Integer(3)),
                 ("encver".into(), FieldValue::Integer(2)),
                 ("zfield".into(), FieldValue::String("last".into())),
+                (
+                    "another-reference".into(),
+                    FieldValue::Reference("outside-aad".into()),
+                ),
             ]),
         };
         let aad =
@@ -524,6 +532,7 @@ mod tests {
         assert_eq!(aad[0], b"uuid");
         assert_eq!(aad[3], b"parent");
         assert_eq!(aad[4], b"last");
+        assert_eq!(aad.len(), 5);
     }
 
     #[test]

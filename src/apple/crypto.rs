@@ -109,6 +109,62 @@ pub fn aes_siv_unwrap(
         .map_err(|_| Error::InvalidData("AES-SIV authentication failed".into()))
 }
 
+/// CKKS wraps a fresh 64-byte item key without a nonce or associated data.
+pub fn aes_siv_wrap_key(parent: &[u8], item_key: &[u8]) -> Result<Vec<u8>> {
+    if item_key.len() != 64 {
+        return Err(Error::InvalidData("CKKS item key must be 64 bytes".into()));
+    }
+    aes_siv_encrypt(parent, item_key, &[])
+}
+
+fn aes_siv_encrypt(key: &[u8], plaintext: &[u8], headers: &[Vec<u8>]) -> Result<Vec<u8>> {
+    use aes_siv::KeyInit as _;
+    if key.len() != 64 || headers.len() > 126 {
+        return Err(Error::InvalidData(
+            "invalid CKKS AES-SIV key or header count".into(),
+        ));
+    }
+    Aes256Siv::new_from_slice(key)
+        .map_err(|_| Error::InvalidData("invalid CKKS AES-SIV key".into()))?
+        .encrypt(headers.iter(), plaintext)
+        .map_err(|_| Error::Security("CKKS AES-SIV encryption failed".into()))
+}
+
+/// Apple's item profile: random 16-byte nonce, sorted metadata AAD supplied by
+/// the caller, ISO-7816 padding to 20-byte blocks, then nonce || SIV ciphertext.
+/// Short v_Data values receive an additional full padding block.
+pub fn encrypt_item(
+    item_key: &[u8],
+    plaintext: &[u8],
+    aad_values: &[Vec<u8>],
+    short_secret: bool,
+) -> Result<Vec<u8>> {
+    if plaintext.len() > 1024 * 1024
+        || aad_values.len() > 125
+        || aad_values.iter().any(|value| value.len() > 256 * 1024)
+    {
+        return Err(Error::InvalidData(
+            "CKKS plaintext or associated data exceeds limits".into(),
+        ));
+    }
+    use rand::RngCore;
+    let mut nonce = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let padding = 20 - plaintext.len() % 20 + if short_secret { 20 } else { 0 };
+    let mut padded = Zeroizing::new(Vec::with_capacity(plaintext.len() + padding));
+    padded.extend_from_slice(plaintext);
+    padded.push(0x80);
+    padded.resize(plaintext.len() + padding, 0);
+    let mut headers = Vec::with_capacity(aad_values.len() + 1);
+    headers.push(nonce.to_vec());
+    headers.extend_from_slice(aad_values);
+    let encrypted = aes_siv_encrypt(item_key, &padded, &headers)?;
+    let mut result = Vec::with_capacity(16 + encrypted.len());
+    result.extend_from_slice(&nonce);
+    result.extend_from_slice(&encrypted);
+    Ok(result)
+}
+
 pub fn decrypt_item(
     item_key: &[u8],
     data: &[u8],
@@ -149,6 +205,38 @@ mod tests {
     use p384::ecdh::diffie_hellman;
     use p384::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
     use p384::{EncodedPoint, PublicKey};
+
+    #[test]
+    fn ckks_write_padding_and_key_wrapping_match_the_existing_reader() -> Result<()> {
+        let key = [0x42u8; 64];
+        let metadata = vec![b"record-uuid".to_vec(), b"current-class-key".to_vec()];
+        for length in [0, 1, 19, 20, 21, 39, 40, 97, 1000] {
+            let plain = Zeroizing::new(vec![0x21u8; length]);
+            for short in [false, true] {
+                let data = encrypt_item(&key, &plain, &metadata, short)?;
+                assert_eq!(
+                    data.len(),
+                    32 + length + 20 - length % 20 + if short { 20 } else { 0 }
+                );
+                assert_eq!(
+                    decrypt_item(&key, &data, &metadata)?.as_slice(),
+                    plain.as_slice()
+                );
+                assert!(decrypt_item(&key, &data, &[]).is_err());
+            }
+        }
+        let wrapped = aes_siv_wrap_key(&key, &[0x11; 64])?;
+        assert_eq!(wrapped.len(), 80);
+        assert_eq!(
+            aes_siv_unwrap(&key, &wrapped, &[])?.as_slice(),
+            &[0x11u8; 64]
+        );
+        assert!(aes_siv_wrap_key(&key, &[0u8; 63]).is_err());
+        assert!(aes_siv_wrap_key(&[0u8; 63], &key).is_err());
+        assert!(encrypt_item(&key, &vec![0; 1024 * 1024 + 1], &[], false).is_err());
+        assert!(encrypt_item(&key, b"data", &vec![vec![]; 126], false).is_err());
+        Ok(())
+    }
 
     #[test]
     fn x963_known_vector() {
