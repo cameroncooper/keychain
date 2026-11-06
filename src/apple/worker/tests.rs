@@ -72,6 +72,9 @@ fn malformed_save_reply_is_audited_before_parsing_and_audit_failure_cannot_enabl
         let check = || Ok(());
         let (client, server) = pair(&binding, &check, until())?;
         let received = std::cell::RefCell::new(Vec::new());
+        let sent = std::cell::RefCell::new(Vec::new());
+        let observed = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let server_observed = observed.clone();
         let attempt = Uuid::new_v4();
         let mut io = WorkerUploadIo {
             client,
@@ -79,6 +82,7 @@ fn malformed_save_reply_is_audited_before_parsing_and_audit_failure_cannot_enabl
             roots: vec![],
             initial: None,
             save_response_audit: None,
+            save_request_audit: None,
         };
         io.audit_save_responses(|id, bytes| {
             assert_eq!(id, attempt);
@@ -88,11 +92,20 @@ fn malformed_save_reply_is_audited_before_parsing_and_audit_failure_cannot_enabl
             }
             Ok(())
         });
+        io.audit_save_requests(|id, bytes| {
+            assert_eq!(id, attempt);
+            sent.borrow_mut().extend_from_slice(bytes);
+            Ok(())
+        });
         let zone = binding.zone.clone();
         let worker = thread::spawn(move || {
             let check = || Ok(());
             let mut channel = Channel::new(server, binding, until(), &check)?;
-            assert_eq!(channel.read(0)?.0, Kind::Save);
+            let (kind, request) = channel.read(0)?;
+            assert_eq!(kind, Kind::Save);
+            *server_observed
+                .lock()
+                .map_err(|_| invalid("fixture mutex"))? = request;
             channel.write(0, Kind::Save, b"synthetic malformed save response")?;
             assert!(channel.read(1).is_err());
             Ok(())
@@ -102,6 +115,7 @@ fn malformed_save_reply_is_audited_before_parsing_and_audit_failure_cannot_enabl
             .err()
             .ok_or_else(|| invalid("malformed reply unexpectedly accepted"))?;
         assert_eq!(&*received.borrow(), b"synthetic malformed save response");
+        assert!(!sent.borrow().is_empty());
         if audit_fails {
             assert!(error.to_string().contains("synthetic audit failure"));
         }
@@ -110,8 +124,45 @@ fn malformed_save_reply_is_audited_before_parsing_and_audit_failure_cannot_enabl
                 .is_err()
         );
         join(worker)?;
+        assert_eq!(
+            &*sent.borrow(),
+            &*observed.lock().map_err(|_| invalid("fixture mutex"))?
+        );
     }
     Ok(())
+}
+
+#[test]
+fn request_audit_failure_closes_before_transmission() -> Result<()> {
+    let (device, binding, item, pointer) =
+        crate::apple::cloudkit::atomic::tests::worker_save_fixture()?;
+    let zone = binding.zone.clone();
+    let check = || Ok(());
+    let (client, server) = pair(&binding, &check, until())?;
+    let mut io = WorkerUploadIo {
+        client,
+        device,
+        roots: vec![],
+        initial: None,
+        save_response_audit: None,
+        save_request_audit: None,
+    };
+    io.audit_save_requests(|_, _| Err(invalid("synthetic request audit failure")));
+    let worker = thread::spawn(move || {
+        let check = || Ok(());
+        let mut channel = Channel::new(server, binding, until(), &check)?;
+        assert!(channel.read(0).is_err());
+        Ok(())
+    });
+    assert!(
+        io.create_atomic(Uuid::new_v4(), &zone, &item, &pointer, &check)
+            .is_err()
+    );
+    assert!(
+        io.create_atomic(Uuid::new_v4(), &zone, &item, &pointer, &check)
+            .is_err()
+    );
+    join(worker)
 }
 pub(crate) fn pair<'a>(
     binding: &Binding,

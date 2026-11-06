@@ -77,9 +77,14 @@ test passed with synthetic data. The separate [broker account bootstrap](BROKER-
 now pins the existing signed identity, imports its agreement key and authenticates
 recoverable/live self-shares before constructing the initial complete snapshot.
 The production owner action derives account/peer/zone exclusively from the root
-enrollment and binds them to the frozen browser transaction/request. It starts
-the fixed systemd unit with StartUnit (never RestartUnit), observes startup state
-and authenticates its kernel UID/socket before fetching roots or opening a prompt.
+enrollment and binds them to the frozen browser transaction/request. It first
+authenticates an already-running configured worker. Only an unavailable default
+socket starts the fixed systemd unit with StartUnit (never RestartUnit), observes
+startup state and authenticates its kernel UID/socket. An unavailable custom
+socket fails with an explicit administrator-start instruction; it cannot start
+the unrelated production unit. No roots are fetched or prompt opened before
+that authenticated connection. A privileged socket-only test verifies wrong-UID
+refusal and missing custom endpoints without starting any service.
 Only missing/refused sockets during startup are retried; a failed handshake or
 interrupted command closes the channel without replay. Startup/readiness polls
 cancellation, the current session and a bounded deadline. The transient readiness

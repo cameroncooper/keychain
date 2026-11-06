@@ -159,9 +159,19 @@ fn reply(
     client: Option<u64>,
     record: Option<&Record>,
 ) -> Result<Vec<u8>> {
+    reply_with_type(save, index, code, client, record, u64::from(SAVE))
+}
+fn reply_with_type(
+    save: &AtomicSave,
+    index: usize,
+    code: u64,
+    client: Option<u64>,
+    record: Option<&Record>,
+    operation_type: u64,
+) -> Result<Vec<u8>> {
     let operation = Writer::new()
         .string(1, &save.operations[index].to_string().to_ascii_uppercase())
-        .uint64(2, u64::from(SAVE))
+        .uint64(2, operation_type)
         .bool(4, index == 1)
         .finish();
     let mut status = Writer::new().uint64(1, code);
@@ -191,6 +201,61 @@ fn reply(
         );
     }
     Ok(wire.finish())
+}
+
+#[test]
+fn none_failure_headers_keep_exact_uuid_status_and_no_success_requirements() -> Result<()> {
+    let save = fixture()?;
+    let failed = frame(&[
+        reply_with_type(&save, 0, 3, Some(16), None, 0)?,
+        reply_with_type(&save, 1, 3, Some(15), None, 0)?,
+    ]);
+    assert!(matches!(
+        save.parse_response(&failed)?,
+        SaveOutcome::PreconditionFailed
+    ));
+    let another = fixture()?;
+    let wrong_id = frame(&[
+        reply_with_type(&save, 0, 3, Some(16), None, 0)?,
+        reply_with_type(&another, 1, 3, Some(15), None, 0)?,
+    ]);
+    assert!(save.parse_response(&wrong_id).is_err());
+    assert!(
+        save.parse_response(&frame(&[
+            reply_with_type(&save, 0, 1, None, Some(&save.item), 0)?,
+            reply_with_type(&save, 1, 1, None, Some(&save.pointer), 0)?,
+        ]))
+        .is_err()
+    );
+    assert!(
+        save.parse_response(&frame(&[
+            reply_with_type(&save, 0, 3, Some(4), None, 0)?,
+            reply_with_type(&save, 1, 3, Some(4), None, 0)?,
+        ]))
+        .is_err()
+    );
+    Ok(())
+}
+
+#[test]
+fn offline_exchange_validation_derives_expected_uuids_only_from_the_recorded_request() -> Result<()>
+{
+    let (device, binding, item, pointer) = worker_save_fixture()?;
+    let save = AtomicSave::new(&device, Uuid::new_v4(), &binding.zone, &item, &pointer)?;
+    let rejected = frame(&[
+        reply_with_type(&save, 0, 3, Some(16), None, 0)?,
+        reply_with_type(&save, 1, 3, Some(15), None, 0)?,
+    ]);
+    assert!(matches!(
+        inspect_save_exchange(&device, &binding, &save.body, &rejected)?,
+        SaveOutcome::PreconditionFailed
+    ));
+    let different = AtomicSave::new(&device, Uuid::new_v4(), &binding.zone, &item, &pointer)?;
+    assert!(inspect_save_exchange(&device, &binding, &different.body, &rejected).is_err());
+    let mut other_device = device.clone();
+    other_device.device_uuid = Uuid::new_v4().to_string();
+    assert!(inspect_save_exchange(&other_device, &binding, &save.body, &rejected).is_err());
+    Ok(())
 }
 
 #[test]

@@ -1,5 +1,33 @@
 # Disposable iCloud creation acceptance test
 
+## Fresh registration proposal after the parser fix
+
+No writes are authorized yet for this new transaction:
+
+- UUID: `b2c70bee-8f52-4b7f-9796-4d77d4c2a520`.
+- RP/origin: `webauthn.io` / `https://webauthn.io`.
+- Username: `keychain-icloud-20261106-2`.
+- Same staged account/owner/zone, isolated registry and item recipient.
+- Private review: `/var/lib/keychain-live-write-check-20261106/fresh-registration-review.json`.
+- One negative attempt, then one positive save only after definite rejection and
+  authenticated absence. Each request and response is captured privately, with
+  both operation UUIDs known before sending.
+
+The live read-only review verified this UUID absent and authenticated the current
+hierarchy. No new key or site challenge has been generated for it. Obtain the
+site challenge only once the user has approved and is ready for the two specific
+fingerprint operations; lift between prompts. Keep the two attempts and key from
+the earlier transaction below unchanged. This is an explicit fresh registration,
+not replacement of a lost key or permission to replay its uncertain attempts.
+
+Use the fresh review with `--review` and a separate root-private request file
+with `--request`; never overwrite the earlier frozen request. Stop if either
+operation is uncertain or the user cancels. Submit the resulting registration
+response to the real RP before its challenge expires, then verify actual use
+from another trusted Apple device.
+
+## Earlier transaction and retained evidence
+
 Prepared 2026-11-06. The user approved this scoped test after the explicit
 write-approval request. The first negative save attempt ran and remains uncertain;
 there is no proven accepted save or completed registration. Each further biometric
@@ -56,7 +84,22 @@ the exact failure cannot be reconstructed. The updated harness preserves the
 underlying error, optionally saves received replies privately before parsing,
 and has a separately confirmed one-send retry mode. Worker failure logs contain
 only fixed stages/numeric HTTP status, never account data or free-form errors.
-No retry has been run or authorized yet.
+The user subsequently approved one retry and separately supplied readiness.
+That retry used the same ciphertext and key and captured a 567-byte reply. Both
+response headers used explicit NONE=0, both result codes were FAILURE=3, and the
+client errors were ATOMIC_FAILURE=16 and OP_LOCK_FAILURE=15. The old parser
+rejected NONE before inspecting those codes. A post-retry authenticated fetch
+again confirmed absence and the exact original pointer.
+
+The parser now accepts explicit NONE only for FAILURE, retaining both exact
+operation-UUID checks, explicit status, no-success-payload and recognized-error
+requirements. Synthetic tests reproduce the observed shape without publishing
+private account records. The current journal remains Attempted: that retry
+captured its reply but not the full outgoing message containing the second
+operation UUID. We do not reconstruct expected UUIDs from a reply or invent a
+rejection checkpoint after the fact. New diagnostic captures retain the complete
+request before transmission and the reply before parsing, allowing strict offline
+exchange validation. No third attempt or positive write has been run.
 
 Do not refresh the frozen request now that a draft exists. The demo's published
 [registration implementation](https://github.com/duo-labs/webauthn.io/blob/15d77cd9059618e0cb8c863303531fdcf7ee5a3a/_app/homepage/services/registration.py)
@@ -180,3 +223,12 @@ fresh authenticated absence/pointer check, uses RetryConfirmedAbsent with the
 same sealed key and ciphertext, and keeps the original attempt file. A new
 attempt artifact and any received raw reply are saved privately. It permits one
 send only; uncertainty never enables an automatic resend or a positive save.
+
+`--mode reconcile` is a separate no-save path for an existing Attempted, Accepted
+or FetchVerified journal. It requires the same confirmed UUID, frozen request and
+fresh biometric authorization. The coordinator independently fetches/decrypts
+before completing registration; a transport wrapper refuses every save even if
+the coordinator requests one. Absence remains unresolved and cannot authorize a
+retry in this mode. It preserves key/request identity and saves only a completed
+public registration response, never a scalar. This is not a way to renew an
+expired RP challenge or retire earlier recovery material.

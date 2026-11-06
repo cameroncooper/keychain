@@ -32,6 +32,18 @@ pub fn validate_create_request(
     AtomicSave::validate_prepared(device, binding, &save.body)
 }
 
+/// Inspect a recorded exchange without sending anything. Both expected UUIDs
+/// come from the canonical recorded request, never inferred from the reply.
+/// This returns parsed data, not a backup receipt or journal transition.
+pub fn inspect_save_exchange(
+    device: &DeviceConfig,
+    binding: &Binding,
+    request: &[u8],
+    response: &[u8],
+) -> Result<SaveOutcome> {
+    AtomicSave::from_prepared(device, binding, request)?.parse_response(response)
+}
+
 /// Account/peer/zone/record scope fixed before any network operation. Networking
 /// stays outside the privileged biometric broker; callers supply roots from
 /// verified Octagon shares, never from an unauthenticated CloudKit record.
@@ -342,6 +354,9 @@ impl AtomicSave {
     /// create/CAS shape, device, item UUID and zone. Re-encoding also detects
     /// fields/duplicates which the historical record reader would ignore.
     fn validate_prepared(device: &DeviceConfig, binding: &Binding, body: &[u8]) -> Result<()> {
+        Self::from_prepared(device, binding, body).map(|_| ())
+    }
+    fn from_prepared(device: &DeviceConfig, binding: &Binding, body: &[u8]) -> Result<Self> {
         binding.validate()?;
         let messages = undelimit(body)?;
         if messages.len() != 2 {
@@ -368,7 +383,7 @@ impl AtomicSave {
                 "worker save differs from canonical scoped create/CAS request",
             ));
         }
-        Ok(())
+        Ok(expected)
     }
 
     pub(crate) fn parse_response(&self, body: &[u8]) -> Result<SaveOutcome> {
@@ -392,11 +407,18 @@ impl AtomicSave {
                 .iter()
                 .position(|expected| expected == &id)
                 .ok_or_else(|| invalid("unmatched save operation UUID"))?;
-            if results[index].is_some() || required_u64(&operation, 2)? != u64::from(SAVE) {
-                return Err(invalid("duplicate or wrong-type save operation"));
+            if results[index].is_some() {
+                return Err(invalid("duplicate save operation"));
             }
             let result = decode_fields(required_bytes(&fields, 3)?)?;
             let code = required_u64(&result, 1)?;
+            let operation_type = required_u64(&operation, 2)?;
+            // Observed Apple atomic/oplock failures explicitly use NONE=0.
+            // UUIDs still must match both requests exactly, with no save
+            // payload on failure. Success remains a typed SAVE response.
+            if operation_type != u64::from(SAVE) && !(operation_type == 0 && code == 3) {
+                return Err(invalid("wrong-type save operation"));
+            }
             let client_code = if let Some(error) = optional_bytes(&result, 2)? {
                 let error = decode_fields(error)?;
                 if let Some(client) = optional_bytes(&error, 1)? {

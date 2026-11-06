@@ -23,6 +23,14 @@ There is no definite rejection or accepted-save/registration proof, so the posit
 gate stays shut. Additional negative retry approval/readiness is separate; the
 updated diagnostic preserves errors/replies and cannot automatically resend.
 
+One separately approved retry captured Apple's explicit atomic/oplock failure
+codes with NONE operation headers. The parser now supports that failure-only
+shape while retaining exact UUID/status/payload checks. Its request/reply capture
+also preserves both request operation IDs before sending for future offline
+validation. The two existing attempts and their sealed key are retained; the
+second reply alone cannot reconstruct its missing expected compare-operation ID,
+so no rejection checkpoint is invented and the positive gate remains closed.
+
 This is the application design and implementation order. The current
 [SEP handoff](SEP-INTEGRATION.md), [driver API](docs/sep-driver/README.md),
 [decryption contract](docs/sep-driver/DECRYPTION.md) and

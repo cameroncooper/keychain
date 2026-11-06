@@ -169,6 +169,36 @@ pub(super) fn connect_worker<'a>(
             "worker startup requires the privileged broker".into(),
         ));
     }
+    guard(preflight_deadline, preflight)?;
+    if settings
+        .socket
+        .try_exists()
+        .map_err(|e| Error::io(&settings.socket, e))?
+    {
+        match WorkerClient::connect(
+            &settings.socket,
+            settings.uid,
+            binding.clone(),
+            channel_deadline,
+            connection_check,
+            preflight,
+        ) {
+            Ok(client) => return Ok(client),
+            Err(Error::Io { source, .. })
+                if matches!(
+                    source.kind(),
+                    io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused
+                ) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    // An administrator-enrolled custom socket may belong to a separately
+    // managed isolated worker. The fixed production unit cannot create it.
+    if settings.socket != Path::new("/run/keychain-network/worker.sock") {
+        return Err(Error::Refused(
+            "configured custom worker is unavailable; start its service explicitly".into(),
+        ));
+    }
     let connection = wait(zbus::Connection::system(), preflight_deadline, preflight)?;
     let (path, job) = start_unit(&connection, WORKER_UNIT, preflight_deadline, preflight)?;
     loop {
@@ -209,6 +239,74 @@ pub(super) fn connect_worker<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires root; temporary local socket only, no systemd, Apple or SEP IO"]
+    fn root_custom_worker_authentication_fails_before_any_service_start() -> Result<()> {
+        use std::io::Read;
+        use std::os::unix::{fs::PermissionsExt, net::UnixListener};
+        assert_eq!(keychain_sep_driver::peer::effective_uid(), 0);
+        let temp = tempfile::Builder::new()
+            .prefix("keychain-custom-worker-")
+            .tempdir_in("/run")
+            .map_err(|e| Error::io("test runtime directory", e))?;
+        std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| Error::io(temp.path(), e))?;
+        let path = temp.path().join("worker.sock");
+        let settings = WorkerSettings {
+            uid: 65534,
+            socket: path.clone(),
+        };
+        let binding = Binding {
+            owner: 1001,
+            account_fingerprint: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+            peer_id: "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+            zone: crate::apple::ckks::ZoneIdentity {
+                name: "Passwords".into(),
+                owner: "synthetic-owner".into(),
+            },
+            transaction: Uuid::new_v4(),
+            request_sha256: "ab".repeat(32),
+        };
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let absent = connect_worker(
+            &settings,
+            binding.clone(),
+            deadline,
+            deadline,
+            &|| Ok(()),
+            &|| Ok(()),
+        );
+        assert!(
+            matches!(absent, Err(Error::Refused(message)) if message.contains("custom worker"))
+        );
+        let listener = UnixListener::bind(&path).map_err(|e| Error::io(&path, e))?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| Error::io(&path, e))?;
+        let server = std::thread::spawn(move || -> Result<()> {
+            let (mut stream, _) = listener
+                .accept()
+                .map_err(|e| Error::io("test listener", e))?;
+            let mut byte = [0];
+            assert_eq!(
+                stream
+                    .read(&mut byte)
+                    .map_err(|e| Error::io("test socket", e))?,
+                0
+            );
+            Ok(())
+        });
+        let wrong_peer =
+            connect_worker(&settings, binding, deadline, deadline, &|| Ok(()), &|| {
+                Ok(())
+            });
+        assert!(
+            matches!(wrong_peer, Err(Error::Security(message)) if message.contains("dedicated worker UID"))
+        );
+        server
+            .join()
+            .map_err(|_| Error::Security("fixture thread failed".into()))??;
+        Ok(())
+    }
     #[test]
     fn startup_wait_cancels_expires_and_discards_a_late_result() {
         let deadline = Instant::now() + Duration::from_secs(1);

@@ -3,8 +3,9 @@
 Implemented 2026-11-06 in `apple::cloudkit::atomic`. The concrete `AppleUploadIo`
 adapter implements the upload coordinator's read/write interface. The broker's
 creation path is connected behind a default-off deployment flag; the installed
-production service leaves that flag off. One scoped negative save was attempted;
-its result remains uncertain and no accepted write has been proven.
+production service leaves that flag off. Two separately authorized negative save
+attempts ran; neither has a completed journal rejection checkpoint or accepted
+write proof. Their key and ciphertext are retained.
 This is implemented framing and policy validation, with Apple acceptance and
 atomicity still requiring the live gates below.
 
@@ -104,5 +105,18 @@ authenticated fetch proved absence and unchanged pointer at that observation;
 it did not prove a definite rejection. The positive gate remains closed. The
 updated diagnostic captures any raw reply privately before parsing and preserves
 underlying errors; the worker emits only fixed failure stages/numeric HTTP status.
-An additional negative attempt needs separate approval and explicit confirmed-
-absence recovery with the same key/ciphertext. It has not been executed.
+The user authorized one additional negative attempt using explicit confirmed-
+absence recovery with the same key/ciphertext. Its captured reply reports two
+FAILURE=3 results with NONE=0 operation headers, client codes 16 (atomic failure)
+and 15 (oplock failure). The strict parser expected SAVE=210 for every response,
+so it rejected this valid failure-header shape before examining the error codes.
+Post-retry fetching again showed absence and an unchanged pointer.
+
+The parser now accepts NONE only on explicit failure, preserving exact UUID
+correlation and all other failure/success requirements. No success case or unknown
+error was relaxed. Tests cover the observed shape, wrong UUIDs, unknown failures,
+NONE on success, and offline request/reply matching. Full outbound message capture
+now precedes sending, because the second operation UUID cannot safely be recovered
+from a reply alone. The earlier retry lacked that request capture, so its journal
+remains Attempted; no false rejection checkpoint or positive write is authorized
+from these partial diagnostics.

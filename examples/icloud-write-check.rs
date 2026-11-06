@@ -30,7 +30,7 @@ struct Args {
     request: PathBuf,
     #[arg(long, value_enum, default_value_t = Mode::Inspect)]
     mode: Mode,
-    /// Required for either write mode. Also requires explicit human coordination.
+    /// Required for capture/write modes. Also requires explicit human coordination.
     #[arg(long)]
     confirm_record: Option<Uuid>,
     /// For an explicitly approved retry, confirm the original uncertain attempt.
@@ -45,6 +45,7 @@ enum Mode {
     Negative,
     RetryNegative,
     Positive,
+    Reconcile,
 }
 #[derive(Deserialize)]
 struct Review {
@@ -154,6 +155,7 @@ struct ScopedIo<'a> {
     ciphertext_sha256: Option<String>,
     attempt_path: PathBuf,
     expected_ciphertext_sha256: Option<String>,
+    allow_send: bool,
 }
 impl ScopedIo<'_> {
     fn check_pointer(&self, pointer: &Record) -> Result<()> {
@@ -201,7 +203,11 @@ impl UploadIo for ScopedIo<'_> {
         check: &dyn Fn() -> Result<()>,
     ) -> Result<SaveOutcome> {
         check()?;
-        if self.attempted || zone != &self.zone || item.name != self.review.record_id.to_string() {
+        if !self.allow_send
+            || self.attempted
+            || zone != &self.zone
+            || item.name != self.review.record_id.to_string()
+        {
             return Err(refused("probe permits one send for the reviewed UUID only"));
         }
         self.check_pointer(pointer)?;
@@ -317,6 +323,43 @@ fn run(args: Args) -> Result<()> {
                 Phase::Rejected => "rejected",
             };
             println!("saved upload phase: {phase}");
+            let attempt = match session.phase()? {
+                Phase::Attempted { attempt } | Phase::Accepted { attempt, .. } => Some(*attempt),
+                _ => None,
+            };
+            if let Some(attempt) = attempt {
+                let request_path = args.registry.join(format!("save-request-{attempt}.bin"));
+                let response_path = args.registry.join(format!("save-response-{attempt}.bin"));
+                if request_path
+                    .try_exists()
+                    .map_err(|e| Error::io(&request_path, e))?
+                    && response_path
+                        .try_exists()
+                        .map_err(|e| Error::io(&response_path, e))?
+                {
+                    let outcome = keychain::apple::cloudkit::atomic::inspect_save_exchange(
+                        &account.device(),
+                        &binding,
+                        &private_read(&request_path)?,
+                        &private_read(&response_path)?,
+                    )?;
+                    println!(
+                        "retained exchange: {}; journal unchanged",
+                        match outcome {
+                            SaveOutcome::PreconditionFailed => "explicit precondition rejection",
+                            SaveOutcome::Accepted(_) =>
+                                "save acknowledgments parsed; independent fetch still required",
+                        }
+                    );
+                } else if response_path
+                    .try_exists()
+                    .map_err(|e| Error::io(&response_path, e))?
+                {
+                    println!(
+                        "retained reply has no captured full request; cannot prove both operation UUIDs offline"
+                    );
+                }
+            }
         }
         let attempted = args.registry.join(format!(
             "probe-attempt-negative-{}.json",
@@ -409,6 +452,17 @@ fn run(args: Args) -> Result<()> {
             ));
         }
     }
+    if args.mode == Mode::Reconcile {
+        let session = registry.uploads()?.resume(&binding)?;
+        if !matches!(
+            session.phase()?,
+            Phase::Attempted { .. } | Phase::Accepted { .. } | Phase::FetchVerified { .. }
+        ) {
+            return Err(refused(
+                "reconcile requires an existing uncertain/accepted/verified journal",
+            ));
+        }
+    }
     let deadline = Instant::now() + Duration::from_secs(120);
     let check = || {
         if Instant::now() >= deadline {
@@ -425,6 +479,13 @@ fn run(args: Args) -> Result<()> {
         &check,
     )?;
     let mut inner = registry.account_upload_io(review.owner, client, &check)?;
+    let request_directory = args.registry.clone();
+    inner.audit_save_requests(move |attempt, request| {
+        keychain::paths::create_private_exclusive(
+            &request_directory.join(format!("save-request-{attempt}.bin")),
+            request,
+        )
+    });
     let response_directory = args.registry.clone();
     inner.audit_save_responses(move |attempt, response| {
         keychain::paths::create_private_exclusive(
@@ -455,8 +516,11 @@ fn run(args: Args) -> Result<()> {
             ))
         },
         expected_ciphertext_sha256,
+        allow_send: args.mode != Mode::Reconcile,
     };
-    io.check_absence(&check)?;
+    if args.mode != Mode::Reconcile {
+        io.check_absence(&check)?;
+    }
     let mut broker = Broker::new(registry, review.owner, args.device, false);
     broker.allow_item_decrypt = true;
     broker.allow_synced_creation = true;
@@ -507,9 +571,15 @@ fn run(args: Args) -> Result<()> {
             .registry
             .join(format!("registration-{}.json", binding.transaction));
         keychain::paths::create_private_exclusive(&output, &serde_json::to_vec(&registration)?)?;
-        println!(
-            "positive creation and fetch/decrypt verification complete; registration response saved privately"
-        );
+        if args.mode == Mode::Reconcile {
+            println!(
+                "reconciliation/fetch verification complete; registration response saved privately; no save sent"
+            );
+        } else {
+            println!(
+                "positive creation and fetch/decrypt verification complete; registration response saved privately"
+            );
+        }
     }
     Ok(())
 }
@@ -651,6 +721,7 @@ mod tests {
                 ciphertext_sha256: None,
                 attempt_path: directory.path().join("attempt.json"),
                 expected_ciphertext_sha256: None,
+                allow_send: true,
             };
             let result = io.create_atomic(Uuid::new_v4(), &zone, &item, &pointer, &|| Ok(()));
             assert_eq!(result.is_ok(), outcome == 0);
@@ -703,6 +774,7 @@ mod tests {
             ciphertext_sha256: None,
             attempt_path: directory.path().join("attempt.json"),
             expected_ciphertext_sha256: None,
+            allow_send: true,
         };
         assert!(
             io.create_atomic(Uuid::new_v4(), &zone, &item, &pointer, &|| Err(refused(
@@ -750,12 +822,43 @@ mod tests {
             ciphertext_sha256: None,
             attempt_path: directory.path().join("attempt.json"),
             expected_ciphertext_sha256: Some(expected),
+            allow_send: true,
         };
         assert!(
             io.create_atomic(Uuid::new_v4(), &zone, &item, &pointer, &|| Ok(()))
                 .is_err()
         );
         assert!(!io.attempted);
+        assert_eq!(fake.calls, 0);
+        assert!(!directory.path().join("attempt.json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn reconciliation_cannot_send_even_if_a_coordinator_requests_it() -> Result<()> {
+        let (zone, pointer, item, review) = fixture()?;
+        let directory = tempfile::tempdir().map_err(|e| Error::io("fixture directory", e))?;
+        let mut fake = Fake {
+            calls: 0,
+            outcome: 0,
+            seen: None,
+        };
+        let mut io = ScopedIo {
+            inner: &mut fake,
+            zone: zone.clone(),
+            review,
+            negative: false,
+            attempted: false,
+            rejected: false,
+            ciphertext_sha256: None,
+            attempt_path: directory.path().join("attempt.json"),
+            expected_ciphertext_sha256: None,
+            allow_send: false,
+        };
+        assert!(
+            io.create_atomic(Uuid::new_v4(), &zone, &item, &pointer, &|| Ok(()))
+                .is_err()
+        );
         assert_eq!(fake.calls, 0);
         assert!(!directory.path().join("attempt.json").exists());
         Ok(())

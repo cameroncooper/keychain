@@ -590,9 +590,15 @@ pub struct WorkerUploadIo<'a> {
     roots: Vec<RecoveredTlk>,
     initial: Option<Snapshot>,
     save_response_audit: Option<SaveResponseAudit<'a>>,
+    save_request_audit: Option<SaveResponseAudit<'a>>,
 }
 type SaveResponseAudit<'a> = Box<dyn FnMut(Uuid, &[u8]) -> Result<()> + 'a>;
 impl<'a> WorkerUploadIo<'a> {
+    /// Opt-in administrator capture before transmission. The body contains
+    /// encrypted CKKS data/public metadata. Failure closes without sending.
+    pub fn audit_save_requests(&mut self, audit: impl FnMut(Uuid, &[u8]) -> Result<()> + 'a) {
+        self.save_request_audit = Some(Box::new(audit));
+    }
     /// Administrator diagnostic opt-in. The response is still untrusted and
     /// must pass the normal parser and independent fetch verification. A failed
     /// audit closes the channel and leaves an attempted write uncertain.
@@ -644,6 +650,7 @@ impl<'a> WorkerUploadIo<'a> {
                 roots,
                 initial: Some(snapshot),
                 save_response_audit: None,
+                save_request_audit: None,
             }),
             Err(error) => {
                 client.channel.close();
@@ -665,6 +672,7 @@ impl<'a> WorkerUploadIo<'a> {
             roots: authenticated_roots,
             initial: None,
             save_response_audit: None,
+            save_request_audit: None,
         })
     }
 }
@@ -710,6 +718,11 @@ impl UploadIo for WorkerUploadIo<'_> {
         }
         let save = AtomicSave::new(&self.device, attempt, zone, record, pointer)?;
         let result = (|| {
+            check()?;
+            self.client.channel.guard()?;
+            if let Some(audit) = &mut self.save_request_audit {
+                audit(attempt, &save.body)?;
+            }
             let response = self
                 .client
                 .exchange_checked(Kind::Save, &save.body, check)?;
