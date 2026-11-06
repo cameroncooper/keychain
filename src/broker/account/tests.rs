@@ -216,6 +216,25 @@ fn root_account_enrollment_is_idempotent_immutable_and_refuses_missing_roots() -
         socket: "/run/synthetic-worker/worker.sock".into(),
     };
     let first = registry.enroll_account(1001, &input, worker.clone())?;
+    let mut broker = crate::broker::Broker::new(
+        super::super::registry::Registry::open(directory.path())?,
+        1001,
+        "/nonexistent-synthetic-sep".into(),
+        false,
+    );
+    assert_eq!(
+        broker.creation_storage_choices()?,
+        vec![crate::model::PasskeyProvenance::DeviceBound]
+    );
+    broker.allow_item_decrypt = true;
+    broker.allow_synced_creation = true;
+    assert_eq!(
+        broker.creation_storage_choices()?,
+        vec![
+            crate::model::PasskeyProvenance::DeviceBound,
+            crate::model::PasskeyProvenance::Synced
+        ]
+    );
     assert!(registry.browser_credentials(1001)?.is_empty());
     let public = registry.backend.public_x963(first.agreement())?;
     assert_eq!(public, f.backend.public_x963(&f.peer.encryption_key)?);
@@ -351,6 +370,7 @@ fn root_account_enrollment_is_idempotent_immutable_and_refuses_missing_roots() -
     let intent = crate::paths::read_bounded(&intent_path)?;
     std::fs::remove_file(&intent_path).map_err(|e| Error::io(&intent_path, e))?;
     assert!(registry.load_account(1001).is_err());
+    assert!(broker.creation_storage_choices().is_err());
     assert!(
         registry
             .enroll_account(1001, &input, first.worker().clone())

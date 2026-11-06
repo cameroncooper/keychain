@@ -294,19 +294,11 @@ fn parse_host_request(message: &[u8]) -> Result<HostRequest> {
             RequestContext::parse(details)?;
         }
     }
-    if let HostRequest::Create {
-        transaction,
-        storage,
-        ..
-    } = &request
-    {
+    if let HostRequest::Create { transaction, .. } = &request {
         if transaction.get_version_num() != 4 {
             return Err(Error::InvalidData(
                 "registration transaction must be a UUID v4".into(),
             ));
-        }
-        if *storage != crate::model::PasskeyProvenance::DeviceBound {
-            return Err(crate::security::sep::ProviderError::UnsupportedPolicy.into());
         }
     }
     Ok(request)
@@ -612,9 +604,14 @@ mod tests {
             "NotSupportedError"
         );
         request["storage"] = json!("synced");
-        let reply = reply_for_broker_with(request.to_string().as_bytes(), |_| {
-            panic!("unsupported storage reached IPC")
+        let reply = reply_for_broker_with(request.to_string().as_bytes(), |operation| {
+            assert!(
+                matches!(operation, crate::broker::Operation::Create { transaction: seen, storage: crate::model::PasskeyProvenance::Synced, .. } if seen == transaction)
+            );
+            Err(crate::security::sep::ProviderError::UnsupportedPolicy.into())
         });
+        // Capability/write policy belongs to the broker; it cannot become an
+        // implicit device-bound registration when the user selected iCloud.
         assert_eq!(reply["error"]["name"], "NotSupportedError");
         request["storage"] = json!("device-bound");
         request["transaction"] = json!(uuid::Uuid::nil());

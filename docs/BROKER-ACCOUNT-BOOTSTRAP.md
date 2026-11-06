@@ -89,8 +89,8 @@ share/page framing through authenticated snapshot construction. It uses syntheti
 keys and a fake pre-authenticated channel; real kernel UID checks and systemd
 credential isolation are tested separately by the worker startup checks.
 
-The typed broker worker-start/connect path and browser integration remain to be
-connected. No production browser operation accepts bootstrap JSON, Snapshot or
+The typed broker worker-start/connect path and browser integration are connected
+behind the default-off `--allow-synced-creation` deployment flag. No production browser operation accepts bootstrap JSON, Snapshot or
 VerifiedUpload as authorization. Live authentication, scoped Apple upload
 acceptance/atomicity, real biometric creation and other-device validation remain
 unproven. Do not enable the iCloud creation choice on the basis of these offline

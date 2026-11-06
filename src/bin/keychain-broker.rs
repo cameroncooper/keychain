@@ -42,6 +42,9 @@ enum Command {
         /// Enable only with the compatible local biometric item-decrypt driver.
         #[arg(long)]
         allow_item_decrypt: bool,
+        /// Explicitly enable iCloud passkey writes after account/live validation.
+        #[arg(long)]
+        allow_synced_creation: bool,
         /// Exit once no request has been queued or active for this many seconds.
         #[arg(long,default_value_t=120,value_parser=clap::value_parser!(u64).range(1..=86400))]
         idle_timeout: u64,
@@ -114,6 +117,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             device,
             allow_diagnostics,
             allow_item_decrypt,
+            allow_synced_creation,
             idle_timeout,
         } => {
             let mut activation = listenfd::ListenFd::from_env();
@@ -128,6 +132,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             };
             let mut broker = Broker::new(registry, cli.owner, device, allow_diagnostics);
             broker.allow_item_decrypt = allow_item_decrypt;
+            broker.allow_synced_creation = allow_synced_creation;
             serve(
                 listener,
                 Arc::new(broker),

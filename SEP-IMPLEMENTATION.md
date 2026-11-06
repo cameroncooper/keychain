@@ -291,10 +291,12 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 199 passing tests, twenty ignored (three Apple network and seventeen privileged
+Workspace checks: 201 passing tests, twenty-one ignored (three Apple network and eighteen privileged
 integration tests). Nine registry, five coordination and one account-bootstrap test passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
-Nine browser service-worker flow tests also pass. Strict Clippy is clean.
+The separate-UID worker and systemd startup tests also pass (seventeen privileged
+library tests total).
+Eleven browser service-worker flow tests also pass. Strict Clippy is clean.
 The broker now exits after an idle interval without interrupting queued/active
 work. Its temporary-root listener/disconnect lifecycle test passed separately;
 installed socket activation, clean idle exit and new-process reactivation have also passed.
@@ -435,10 +437,13 @@ verifies its signed permanent info and persists an immutable enrollment intent.
 The broker authenticates recoverable/live self-shares and constructs its own
 complete preflight snapshot; a root integration test exercises raw share/page
 framing through that path. See [account bootstrap](docs/BROKER-ACCOUNT-BOOTSTRAP.md).
-Worker-start/coordinator/browser wiring and remaining library/scratch memory review
-remain required before exposing this path over IPC; see
-[coordination limits](docs/ICLOUD-BROKER-COORDINATION.md). The production
-Apple adapter and iCloud browser choice remain unconnected to production flows.
+Worker-start/coordinator/browser wiring is now connected behind the default-off
+`--allow-synced-creation` flag. A disposable systemd test verifies guarded startup
+and no restart of an active worker. The browser requires an explicit storage
+choice and never falls back after an iCloud failure. Real account bootstrap,
+remaining library/scratch memory review and live validation remain required
+before enabling that flag; see
+[coordination limits](docs/ICLOUD-BROKER-COORDINATION.md).
 Atomic save framing is implemented from pinned extracted-schema/client references:
 create-only item, unchanged-pointer tag check, zone-isolated stream and strict
 two-operation reply matching. The HTTP write client disables redirect and replay;

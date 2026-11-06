@@ -2,6 +2,7 @@
 //! fields never override key ownership, session policy or stored provenance.
 pub mod account;
 mod native;
+mod network;
 mod protected;
 mod registration;
 mod synced_creation;
@@ -110,6 +111,7 @@ pub struct Failure {
 #[derive(Serialize, Deserialize, Debug, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum FailureCode {
+    AuthenticationRequired,
     Canceled,
     Expired,
     Busy,
@@ -122,6 +124,7 @@ pub enum FailureCode {
 fn failure(error: Error) -> Failure {
     use crate::security::sep::ProviderError;
     let code = match &error {
+        Error::AuthenticationRequired(_) => FailureCode::AuthenticationRequired,
         Error::CredentialExcluded => FailureCode::CredentialExcluded,
         Error::Sep(ProviderError::Canceled) => FailureCode::Canceled,
         Error::Sep(ProviderError::Expired) => FailureCode::Expired,
@@ -216,6 +219,7 @@ pub fn call_cancelable(
                 Error::Sep(crate::security::sep::ProviderError::UnsupportedPolicy)
             }
             FailureCode::CredentialExcluded => Error::CredentialExcluded,
+            FailureCode::AuthenticationRequired => Error::AuthenticationRequired(error.message),
             _ => Error::Refused(error.message),
         }
     })
@@ -260,6 +264,7 @@ pub struct Broker {
     pub device: PathBuf,
     pub allow_diagnostics: bool,
     pub allow_item_decrypt: bool,
+    pub allow_synced_creation: bool,
     active: Mutex<()>,
     seen: Mutex<std::collections::HashMap<Uuid, Instant>>,
 }
@@ -271,6 +276,7 @@ impl Broker {
             device,
             allow_diagnostics,
             allow_item_decrypt: false,
+            allow_synced_creation: false,
             active: Mutex::new(()),
             seen: Mutex::new(std::collections::HashMap::new()),
         }

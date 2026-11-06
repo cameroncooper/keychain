@@ -402,6 +402,16 @@ impl super::registry::Registry {
             signing_spki: keys.signing_spki,
         })
     }
+    pub(super) fn optional_account(&self, owner: u32) -> Result<Option<Account>> {
+        if owner == 0 {
+            return Err(invalid("invalid account owner"));
+        }
+        let path = self.account_path(owner);
+        if !path.try_exists().map_err(|e| Error::io(&path, e))? {
+            return Ok(None);
+        }
+        self.load_account(owner).map(Some)
+    }
     /// Root administrator CLI only, never an owner socket operation. A retry
     /// cannot replace the pinned account, identity, device or worker selection.
     pub fn enroll_account(

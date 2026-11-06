@@ -1,5 +1,5 @@
-//! One selected-secret lifetime for upload and registration. Production IPC must
-//! supply an authenticated, cancellable network-worker UploadIo implementation;
+//! One selected-secret lifetime for upload and registration. Production IPC uses
+//! the authenticated, cancellable network worker;
 //! ordinary browser/owner JSON cannot manufacture snapshots or backup receipts.
 
 use super::protected::SelectedScalar;
@@ -24,7 +24,7 @@ pub struct SyncedCreationRequest {
 }
 
 impl Broker {
-    /// Trusted in-process integration seam, not an enabled browser IPC action.
+    /// Trusted in-process integration seam sharing the production coordinator.
     /// The caller must supply network IO from the isolated trusted worker, with
     /// cooperative cancellation/deadlines. Never run Apple networking inside
     /// this privileged process or accept an owner's claimed upload-success bit.
@@ -34,7 +34,7 @@ impl Broker {
         io: &mut dyn UploadIo,
         canceled: Arc<AtomicBool>,
     ) -> Result<Registration> {
-        if !self.allow_item_decrypt {
+        if !self.allow_item_decrypt || !self.allow_synced_creation {
             return Err(ProviderError::UnsupportedPolicy.into());
         }
         request.binding.validate()?;
@@ -51,6 +51,88 @@ impl Broker {
             .try_lock()
             .map_err(|_| Error::Refused("another key operation is active".into()))?;
         let session = ActiveSession::for_owner(self.owner)?;
+        self.create_synced_in_session(request, io, canceled, session)
+    }
+
+    pub(super) fn create_synced_with_worker(
+        &self,
+        transaction: Uuid,
+        details: String,
+        canceled: Arc<AtomicBool>,
+        session: ActiveSession,
+    ) -> Result<Registration> {
+        if !self.allow_synced_creation || !self.allow_item_decrypt {
+            return Err(ProviderError::UnsupportedPolicy.into());
+        }
+        if transaction.get_version_num() != 4 {
+            return Err(Error::InvalidData(
+                "creation transaction must be UUID v4".into(),
+            ));
+        }
+        let context = CreationContext::parse(&details)?;
+        let account = self.registry.load_account(self.owner)?;
+        let binding = Binding {
+            owner: self.owner,
+            account_fingerprint: account.scope().account_fingerprint.clone(),
+            peer_id: account.scope().peer_id.clone(),
+            transaction,
+            request_sha256: context.binding().into(),
+            zone: account.scope().zone.clone(),
+        };
+        let preflight_deadline = Instant::now() + Duration::from_secs(60);
+        let preflight = || {
+            if canceled.load(Ordering::Acquire)
+                || !session.valid()
+                || canceled.load(Ordering::Acquire)
+            {
+                return Err(ProviderError::Canceled.into());
+            }
+            if Instant::now() >= preflight_deadline {
+                return Err(ProviderError::Expired.into());
+            }
+            Ok(())
+        };
+        let connection_check = || {
+            if canceled.load(Ordering::Acquire) {
+                Err(ProviderError::Canceled.into())
+            } else {
+                Ok(())
+            }
+        };
+        let client = super::network::connect_worker(
+            account.worker(),
+            binding.clone(),
+            preflight_deadline,
+            Instant::now() + Duration::from_secs(120),
+            &connection_check,
+            &preflight,
+        )?;
+        let mut io = self
+            .registry
+            .account_upload_io(self.owner, client, &preflight)?;
+        preflight()?;
+        self.create_synced_in_session(
+            SyncedCreationRequest {
+                binding,
+                request_details_json: details,
+                recovery: UploadRecovery::Reconcile,
+            },
+            &mut io,
+            canceled.clone(),
+            session,
+        )
+    }
+
+    // Called with the broker's operation mutex already held. This keeps the
+    // public owner action and trusted test seam on one authorization lifetime.
+    fn create_synced_in_session(
+        &self,
+        request: SyncedCreationRequest,
+        io: &mut dyn UploadIo,
+        canceled: Arc<AtomicBool>,
+        session: ActiveSession,
+    ) -> Result<Registration> {
+        let context = CreationContext::parse(&request.request_details_json)?;
         if canceled.load(Ordering::Acquire) {
             return Err(ProviderError::Canceled.into());
         }

@@ -273,7 +273,8 @@ async function handleCreate(request) {
     }
     const inspection = reply.result;
     if (inspection?.kind !== "creationInspection" || !Array.isArray(inspection.storageChoices) ||
-        inspection.storageChoices.length === 0 || inspection.storageChoices.some((choice) => choice !== "device-bound")) {
+        inspection.storageChoices.length === 0 || new Set(inspection.storageChoices).size !== inspection.storageChoices.length ||
+        inspection.storageChoices.some((choice) => !["device-bound", "synced"].includes(choice))) {
       throw new Error("The native host returned invalid registration storage choices");
     }
     if (canceledRequests.has(requestId)) return;

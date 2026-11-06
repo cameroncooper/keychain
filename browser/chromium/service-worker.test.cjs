@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 
 const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); } });
-function fixture({ biometric = true, count = 1, holdAssertion = false, holdCreation = false, available = true } = {}) {
+function fixture({ biometric = true, count = 1, holdAssertion = false, holdCreation = false, available = true, storageChoices = ["device-bound"], createError = null } = {}) {
   const stored = {};
   const ports = [];
   const windows = [];
@@ -30,12 +30,16 @@ function fixture({ biometric = true, count = 1, holdAssertion = false, holdCreat
             operations.push(message);
             if (message.action === "assert" && holdAssertion) return;
             if (message.action === "create" && holdCreation) return;
+            if (message.action === "create" && createError) {
+              queueMicrotask(() => { if (!this.disconnected) this.onMessage.listeners.forEach((fn) => fn({ ok: false, error: createError })); });
+              return;
+            }
             const result = message.action === "capabilities"
               ? { kind: "capabilities", userVerificationAvailable: available }
               : message.action === "inspect"
               ? { kind: "inspection", biometric, candidates, rpId: "example.com", origin: "https://example.com" }
               : message.action === "inspectCreation"
-              ? { kind: "creationInspection", storageChoices: ["device-bound"], rpId: "example.com", origin: "https://example.com" }
+              ? { kind: "creationInspection", storageChoices, rpId: "example.com", origin: "https://example.com" }
               : message.action === "create"
               ? { kind: "registration", responseJson: "{\"type\":\"public-key\"}" }
               : { kind: "assertion", responseJson: "{}" };
@@ -176,5 +180,32 @@ test("authenticator availability uses the native backend result without opening 
     assert.equal(f.availability[0].isUvpaa, available);
     assert.equal(f.windows.length, 0);
     assert.deepEqual(f.operations.map((op) => op.action), ["capabilities"]);
+  }
+});
+
+
+test("iCloud selection is frozen and a failed upload never retries on this device", async () => {
+  const f = fixture({ storageChoices: ["device-bound", "synced"], createError: { name: "NotAllowedError", message: "Fresh Apple sign-in required" } });
+  await vm.runInContext('handleCreate({requestId:80,requestDetailsJson:"frozen-icloud"})', f.context);
+  const transaction = f.stored["pending:80"].transaction;
+  await vm.runInContext('createRequest(80,"synced")', f.context);
+  assert.deepEqual(f.operations.map(op => op.action), ["inspectCreation", "create"]);
+  assert.equal(f.operations[1].storage, "synced");
+  assert.equal(f.operations[1].transaction, transaction);
+  assert.equal(f.operations[1].requestDetailsJson, "frozen-icloud");
+  assert.equal(f.created[0].error.name, "NotAllowedError");
+  assert.equal(f.created[0].responseJson, undefined);
+  assert.deepEqual(f.closed, [1]);
+  await vm.runInContext('createRequest(80,"device-bound")', f.context);
+  assert.equal(f.operations.length, 2);
+});
+
+test("unknown or duplicate storage choices are refused before creation", async () => {
+  for (const storageChoices of [["remote"], ["synced", "synced"]]) {
+    const f = fixture({ storageChoices });
+    await vm.runInContext('handleCreate({requestId:81,requestDetailsJson:"frozen"})', f.context);
+    assert.equal(f.windows.length, 0);
+    assert.equal(f.created.length, 1);
+    assert.equal(f.created[0].responseJson, undefined);
   }
 });

@@ -120,7 +120,9 @@ been exported/applied during implementation.
 
 The broker's separate [agreement-key enrollment and authenticated root bootstrap](../docs/BROKER-ACCOUNT-BOOTSTRAP.md)
 now exist. The broker/worker packages are intentionally separate and neither has
-been applied to the real account. Production still needs the configured
-worker-start/connect path and coordinator/browser wiring. Do not accept owner-supplied snapshots,
-roots or uploaded flags. Then connect the existing creation coordinator and
-browser iCloud choice, followed by scoped live Apple and biometric/browser tests.
+been applied to the real account. The fixed-unit worker-start/connect path and
+coordinator/browser wiring are connected behind the default-off
+`--allow-synced-creation` broker flag. Owner-supplied snapshots, roots and uploaded
+flags are refused. Fresh authentication, account bootstrap, remaining memory
+review, scoped live Apple tests and biometric/browser tests are still required
+before enabling the iCloud choice. The installer never adds this flag.

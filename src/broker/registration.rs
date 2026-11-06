@@ -1,9 +1,19 @@
 use super::*;
 use crate::model::PasskeyProvenance;
 use crate::passkey::registration::CreationContext;
-use crate::security::sep::{ProviderError, StoredSepKey};
+use crate::security::sep::StoredSepKey;
 
 impl Broker {
+    pub(super) fn creation_storage_choices(&self) -> Result<Vec<PasskeyProvenance>> {
+        let mut choices = vec![PasskeyProvenance::DeviceBound];
+        if self.allow_synced_creation
+            && self.allow_item_decrypt
+            && self.registry.optional_account(self.owner)?.is_some()
+        {
+            choices.push(PasskeyProvenance::Synced);
+        }
+        Ok(choices)
+    }
     pub(super) fn execute_registration(
         &self,
         id: Uuid,
@@ -27,7 +37,7 @@ impl Broker {
                     "kind":"creationInspection", "rpId":context.rp_id(),
                     "rpName":context.rp_name(), "origin":context.origin(),
                     "username":context.username(), "displayName":context.display_name(),
-                    "storageChoices":["device-bound"],
+                    "storageChoices":self.creation_storage_choices()?,
                 }))
             }
             Operation::Create {
@@ -35,10 +45,18 @@ impl Broker {
                 storage,
                 request_details_json,
             } => {
-                // A storage choice is required. There is never an implicit
-                // cloud-to-local fallback or an Apple write on this path.
-                if storage != PasskeyProvenance::DeviceBound {
-                    return Err(ProviderError::UnsupportedPolicy.into());
+                // The application selection is explicit. No cloud-to-local
+                // fallback, user-provided account snapshot or upload receipt.
+                if storage == PasskeyProvenance::Synced {
+                    let registration = self.create_synced_with_worker(
+                        transaction,
+                        request_details_json,
+                        canceled,
+                        session,
+                    )?;
+                    return Ok(
+                        serde_json::json!({"responseJson":serde_json::to_string(&registration)?, "recordId":transaction.to_string()}),
+                    );
                 }
                 let context = CreationContext::parse(&request_details_json)?;
                 let excluded = self

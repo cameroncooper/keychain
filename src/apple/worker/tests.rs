@@ -89,6 +89,38 @@ fn correlated_roundtrip_preserves_binary_payload_and_sequence() -> Result<()> {
 }
 
 #[test]
+fn handshake_guard_is_not_retained_as_authorization_after_readiness() -> Result<()> {
+    let scope = binding();
+    let base = || Ok(());
+    let (mut client, socket) = pair(&scope, &base, until())?;
+    let server = thread::spawn(move || {
+        let check = || Ok(());
+        let mut channel = Channel::new(socket, scope, until(), &check)?;
+        for step in 0..2 {
+            let (kind, body) = channel.read(step)?;
+            channel.write(step, kind, &body)?;
+        }
+        Ok(())
+    });
+    let live = std::cell::Cell::new(true);
+    let preflight = || {
+        if live.get() {
+            Ok(())
+        } else {
+            Err(crate::security::sep::ProviderError::Expired.into())
+        }
+    };
+    client.exchange_checked(Kind::Hello, &[], &preflight)?;
+    live.set(false);
+    // Post-handshake calls get a CURRENT check, never reuse a readiness grant.
+    assert_eq!(
+        client.exchange_checked(Kind::FetchPage, b"next", &|| Ok(()))?,
+        b"next"
+    );
+    join(server)
+}
+
+#[test]
 fn partial_frames_do_not_restart_after_read_timeouts() -> Result<()> {
     let scope = binding();
     let check = || Ok(());
@@ -246,7 +278,10 @@ fn kernel_uid_authentication_cannot_be_replaced_by_scope_fields() -> Result<()> 
     let check = || Ok(());
     for expected in [0, uid.saturating_add(1), uid.saturating_add(2)] {
         let (socket, _other) = UnixStream::pair().map_err(|e| Error::io("pair", e))?;
-        assert!(WorkerClient::authenticate(socket, expected, binding(), until(), &check).is_err());
+        assert!(
+            WorkerClient::authenticate(socket, expected, binding(), until(), &check, &check)
+                .is_err()
+        );
     }
     let (socket, _other) = UnixStream::pair().map_err(|e| Error::io("pair", e))?;
     struct Never(Binding);
@@ -495,7 +530,7 @@ fn root_dedicated_worker_handshake_and_raw_io() -> Result<()> {
             thread::sleep(Duration::from_millis(10));
         }
         let check = || Ok(());
-        let mut client = WorkerClient::connect(&socket, 65534, scope, deadline, &check)?;
+        let mut client = WorkerClient::connect(&socket, 65534, scope, deadline, &check, &check)?;
         assert_eq!(client.exchange(Kind::FetchPage, b"page")?, b"page");
         assert_eq!(client.exchange(Kind::Save, b"ciphertext")?, b"ciphertext");
         drop(client);

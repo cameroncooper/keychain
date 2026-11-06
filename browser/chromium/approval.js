@@ -54,14 +54,23 @@ async function load() {
     document.title = "Create a passkey";
     document.querySelector("h1").textContent = "Save a passkey";
     document.querySelector("legend").textContent = "Where to save it";
-    document.querySelector("#notice").textContent = "This passkey stays on this device. It is not saved to iCloud and cannot be recovered on another device. Your desktop will ask for a fingerprint.";
+    const notice = document.querySelector("#notice");
+    const updateStorageNotice = () => {
+      const selected = new FormData(form).get("passkey");
+      notice.textContent = selected === "synced"
+        ? "This passkey is saved in iCloud Keychain and syncs to your other devices. Your desktop will ask for a fingerprint."
+        : selected === "device-bound"
+        ? "This passkey stays on this device. It is not saved to iCloud and cannot be recovered on another device. Your desktop will ask for a fingerprint."
+        : "Choose where to save the passkey. Your desktop will ask for a fingerprint after you choose.";
+    };
     approveButton.textContent = "Create passkey";
-    inspection.storageChoices.forEach((choice, index) => {
-      if (choice === "device-bound") {
-        accounts.append(accountChoice({ id: choice, displayName: "This device",
-          username: inspection.username || inspection.displayName || "Passkey" }, index === 0));
-      }
+    inspection.storageChoices.forEach((choice) => {
+      accounts.append(accountChoice({ id: choice,
+        displayName: choice === "synced" ? "iCloud Keychain" : "This device",
+        username: inspection.username || inspection.displayName || "Passkey" }, inspection.storageChoices.length === 1));
     });
+    form.addEventListener("change", updateStorageNotice);
+    updateStorageNotice();
   } else if (inspection.biometric === true) {
     document.querySelector("h1").textContent = "Choose an account";
     document.querySelector("#notice").textContent = "Your desktop will ask for a fingerprint after you choose an account.";

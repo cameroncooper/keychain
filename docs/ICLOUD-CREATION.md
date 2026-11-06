@@ -1,8 +1,9 @@
 # iCloud passkey creation progress
 
 This implements part of milestone 6 in [the SEP completion plan](../SEP-IMPLEMENTATION.md).
-The browser still offers device-only creation. No Apple record writes or live
-uploads were performed. Preparation and staging do not access the network.
+The browser iCloud choice is connected behind a default-off deployment flag;
+the installed service still offers device-only creation. No Apple record writes
+or live uploads were performed. Local preparation and staging do not access the network.
 
 `passkey::encode_sync_item` prepares a synchronizable P-256 software-key plist
 from a trusted caller's credential and X9.63 private representation. It preserves
@@ -150,17 +151,18 @@ before and after commit, interrupted durable transitions, changed drafts during
 signing, fresh-process delivery retry, normal post-creation sync updates and
 missing committed records. Their upload receipts come from the real coordinator
 and CKKS encoder/encryptor with a simulated server; signing/decryption uses
-disposable software fixtures. The APIs are not yet connected to a production
-network operation or the browser's iCloud choice, and this is not hardware or
-Apple acceptance evidence.
+disposable software fixtures. The APIs are connected to the production worker and browser behind an explicit
+deployment flag; these synthetic tests are not hardware or Apple acceptance evidence.
 
 The [broker operation coordinator](ICLOUD-BROKER-COORDINATION.md) now joins these
 stages inside one selected-scalar lifetime, with no second biometric decrypt
 between upload and registration signing. It resumes before preparing ciphertext,
 checks the selected identity against the saved plan, requires explicit uncertain/
 rejected recovery choices and discards canceled network results. Five synthetic
-root integration tests passed. An authenticated cancellable network-worker bridge
-and encoder-memory audit remain unfinished; no new browser IPC route is enabled.
+root integration tests passed. The authenticated cancellable network-worker bridge
+and protected encoder buffers are implemented. Production owner IPC is connected
+but requires the explicit creation flag and account enrollment; remaining
+library/scratch memory review is still required.
 
 The [atomic write implementation](CLOUDKIT-WRITE-PROTOCOL.md) now encodes the new
 item with fail-if-exists and the exact retained current-key record with
@@ -175,22 +177,24 @@ save path was not executed, and the browser still offers device-only creation.
 The updated release service binaries were installed on 2026-11-06. The existing
 disposable profile passed the installed broker/native-host availability check
 with `--availability-only`; it did not start biometric capture or perform a
-registration, assertion or Apple write. The full workspace has 174 passing
-tests with eighteen intentionally ignored tests; nine disposable registry tests
-and five coordination tests also passed separately as root. Strict Clippy and
+registration, assertion or Apple write. The full workspace has 201 passing
+tests with twenty-one intentionally ignored tests. Seventeen privileged library
+tests (registry, coordination, account, systemd startup and separate-UID worker)
+passed separately; eleven browser service-worker tests pass. Strict Clippy and
 the release build passed.
 
 Remaining integration work:
 
-1. Finish the trusted cancellable network-worker connection and memory audit
-   for the implemented selected-scalar coordinator. Never activate a draft
+1. Finish the remaining library/scratch memory audit for the connected
+   selected-scalar coordinator. Never activate a draft
    through generic import verification or convert a native key to exportable storage.
 2. Validate the implemented atomic save/current-key wire protocol against live
    rejection and acceptance, using the retained server identity and tags.
    An ordinary create request alone is insufficient.
-3. Connect the durable coordinator, including its implemented rejected-upload
-   re-encryption and retained-ciphertext reconciliation, to the broker/browser
-   creation path. Preserve identity and all possibly committed ciphertexts.
+3. Complete real account bootstrap after fresh authentication and validate
+   the connected broker/browser path. Preserve the default-off write gate until
+   live testing is explicitly authorized. Explicit recovery-policy UI remains
+   separate work; normal browser resume only reconciles uncertain writes.
 4. Verify Apple acceptance and subsequent authenticated fetch/decryption before
    reporting an iCloud save or enabling normal backed-up use. A local round trip
    or HTTP success alone is insufficient. Browser BE/BS flags must follow the

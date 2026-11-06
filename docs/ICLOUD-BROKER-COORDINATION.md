@@ -1,11 +1,12 @@
 # Syncable creation: broker operation and network boundary
 
-The broker now has a trusted in-process creation coordinator. It is not exposed
-through browser/owner IPC, and the browser still offers device-only creation.
-No Apple write or biometric capture was performed to validate this addition.
+The broker connects browser creation to the isolated network worker and the
+selected-secret coordinator. This path is disabled by default and remains disabled
+on the development machine. No Apple write or biometric capture was performed
+to validate this wiring.
 
 `Broker::create_synced_registration` checks the configured owner, exact frozen
-request and explicit decrypt deployment, serializes the operation and validates
+request and explicit decrypt/creation deployment flags, serializes the operation and validates
 the active local session. It fetches the initial hierarchy before presenting
 the desktop prompt or holding a scalar. Exclusion disclosure shares the native
 registration path's verified-presence policy. The registry durably stages the
@@ -75,11 +76,29 @@ service and selective credential export now exist; its actual systemd startup
 test passed with synthetic data. The separate [broker account bootstrap](BROKER-ACCOUNT-BOOTSTRAP.md)
 now pins the existing signed identity, imports its agreement key and authenticates
 recoverable/live self-shares before constructing the initial complete snapshot.
-Worker startup, coordinator connection and browser integration remain unfinished. The UploadIo
-supplied to this coordinator is still a trusted internal dependency, not an owner
-RPC. Direct AppleUploadIo inside the privileged broker remains prohibited; its
-installed AF_UNIX-only restrictions are retained. Start/authenticate the worker
-before capture; never fork/exec with the selected scalar live.
+The production owner action derives account/peer/zone exclusively from the root
+enrollment and binds them to the frozen browser transaction/request. It starts
+the fixed systemd unit with StartUnit (never RestartUnit), observes startup state
+and authenticates its kernel UID/socket before fetching roots or opening a prompt.
+Only missing/refused sockets during startup are retried; a failed handshake or
+interrupted command closes the channel without replay. Startup/readiness polls
+cancellation, the current session and a bounded deadline. The transient readiness
+guard is not retained as authorization after capture; each upload still receives
+the current NativeAuthorization guard. The root systemd test also exercises
+uncached active-session checks and proves that starting an active service keeps
+the same PID. Direct AppleUploadIo inside the privileged broker remains prohibited;
+its installed AF_UNIX-only restrictions are retained. No broker child is launched
+with the selected scalar live.
+
+The browser offers iCloud only when both `--allow-item-decrypt` and
+`--allow-synced-creation` are configured and a valid root account is enrolled.
+Missing enrollment hides the choice; corrupt/incomplete enrollment fails closed.
+When both storage locations are offered, the application chooser requires an
+explicit choice before the OS fingerprint prompt. It freezes the choice and
+transaction before starting creation and never falls back from iCloud to this
+device on failure. The native host accepts only the two known storage values; it
+cannot supply roots, snapshots or upload receipts. Production units/installers do
+not enable the new write flag.
 
 UploadIo requires the current operation check on every fetch/save. The coordinator
 passes preflight checks before capture and NativeAuthorization checks throughout
@@ -90,6 +109,20 @@ acceptance/verification checkpoints, so late results remain uncertain. Session
 validation uses a fresh exact login1 snapshot with a 250-ms timeout and fails
 closed on errors; it does not cache authorization. No deserialize shortcut
 constructs VerifiedUpload, and no automatic replay was added.
-Production service/bootstrap integration, remaining library/scratch memory review,
+Real account bootstrap, remaining library/scratch memory review,
 scoped live Apple tests, real biometric creation
 and browser/other-device validation remain gates before enabling iCloud creation.
+
+## Installed validation (2026-11-06)
+
+The release binaries were installed with the existing decrypt-only configuration;
+ExecStart has no `--allow-synced-creation`. A synthetic owner Create request with
+`storage: synced` returned Unsupported at the deployment gate, and the actual
+network worker remained inactive. The installed broker/native-host availability
+check passed with `--availability-only`, without capture. The separate disposable
+systemd worker check passed credential delivery, kernel UID, scope refusal,
+handshake and idle cleanup with no Apple/SEP IO. Seventeen privileged library
+tests passed separately; the workspace has 201 passing tests and 21 ignored,
+and all 11 browser flow tests pass. Format, strict Clippy and release build pass.
+These checks do not establish live account acceptance, biometric creation,
+registration in Chromium or synchronization to another device.

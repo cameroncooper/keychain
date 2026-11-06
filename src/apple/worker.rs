@@ -311,8 +311,10 @@ impl<'a> WorkerClient<'a> {
         binding: Binding,
         deadline: Instant,
         check: &'a dyn Fn() -> Result<()>,
+        handshake_check: &dyn Fn() -> Result<()>,
     ) -> Result<Self> {
         check()?;
+        handshake_check()?;
         binding.validate()?;
         if Instant::now() >= deadline {
             return Err(crate::security::sep::ProviderError::Expired.into());
@@ -348,6 +350,7 @@ impl<'a> WorkerClient<'a> {
             binding,
             deadline,
             check,
+            handshake_check,
         )
     }
     fn authenticate(
@@ -356,6 +359,7 @@ impl<'a> WorkerClient<'a> {
         binding: Binding,
         deadline: Instant,
         check: &'a dyn Fn() -> Result<()>,
+        handshake_check: &dyn Fn() -> Result<()>,
     ) -> Result<Self> {
         if worker_uid == 0
             || worker_uid == binding.owner
@@ -370,9 +374,10 @@ impl<'a> WorkerClient<'a> {
             channel: Channel::new(stream, binding, deadline, check)?,
             step: 0,
         };
-        client.exchange(Kind::Hello, &[])?;
+        client.exchange_checked(Kind::Hello, &[], handshake_check)?;
         Ok(client)
     }
+    #[cfg(test)]
     fn exchange(&mut self, kind: Kind, body: &[u8]) -> Result<Vec<u8>> {
         self.exchange_checked(kind, body, &|| Ok(()))
     }
