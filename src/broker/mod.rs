@@ -1,6 +1,7 @@
 //! Privileged selected-credential operations. Transport peers supply UID; request
 //! fields never override key ownership, session policy or stored provenance.
 pub mod account;
+pub mod login;
 mod native;
 mod network;
 mod protected;
@@ -44,6 +45,24 @@ pub enum Operation {
         request_details_json: String,
     },
     ListCredentials,
+    ListLogins,
+    LoginProtectionState {
+        record: String,
+    },
+    ImportLogin {
+        import: Box<login::LoginImport>,
+    },
+    VerifyLogin {
+        record: String,
+    },
+    DiscardStagedLogin {
+        record: String,
+        revision: u64,
+    },
+    RevealLogin {
+        record: String,
+        field: login::RevealField,
+    },
     InspectCreation {
         request_details_json: String,
     },
@@ -95,10 +114,10 @@ pub enum Operation {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Response {
+pub struct Response<T = serde_json::Value> {
     pub version: u32,
     pub id: Uuid,
-    pub result: Option<serde_json::Value>,
+    pub result: Option<T>,
     pub error: Option<Failure>,
 }
 
@@ -150,7 +169,7 @@ pub fn read_frame<T: DeserializeOwned>(stream: &mut UnixStream) -> io::Result<T>
     if size == 0 || size > MAX_FRAME {
         return Err(io::Error::other("invalid broker message length"));
     }
-    let mut data = vec![0; size];
+    let mut data = zeroize::Zeroizing::new(vec![0; size]);
     stream.read_exact(&mut data)?;
     serde_json::from_slice(&data).map_err(io::Error::other)
 }
@@ -172,6 +191,14 @@ pub fn call_cancelable(
     operation: Operation,
     canceled: Arc<AtomicBool>,
 ) -> Result<serde_json::Value> {
+    call_typed_cancelable(socket, operation, canceled)
+}
+
+fn call_typed_cancelable<T: DeserializeOwned>(
+    socket: &Path,
+    operation: Operation,
+    canceled: Arc<AtomicBool>,
+) -> Result<T> {
     if canceled.load(Ordering::Acquire) {
         return Err(Error::Sep(crate::security::sep::ProviderError::Canceled));
     }
@@ -200,7 +227,7 @@ pub fn call_cancelable(
         },
     )
     .map_err(|e| Error::io(socket, e))?;
-    let reply = read_frame::<Response>(&mut stream);
+    let reply = read_frame::<Response<T>>(&mut stream);
     if canceled.load(Ordering::Acquire) {
         return Err(Error::Sep(crate::security::sep::ProviderError::Canceled));
     }
@@ -317,7 +344,19 @@ impl Broker {
             .set_read_timeout(None)
             .map_err(|e| Error::io("broker request", e))?;
         let watch = ClientWatch::new(stream).map_err(|e| Error::io("broker request", e))?;
-        let result = self.execute(request.id, request.operation, watch.canceled.clone());
+        let operation = match request.operation {
+            Operation::RevealLogin { record, field } => {
+                return self.handle_reveal(
+                    stream,
+                    request.id,
+                    &record,
+                    field,
+                    watch.canceled.clone(),
+                );
+            }
+            other => other,
+        };
+        let result = self.execute(request.id, operation, watch.canceled.clone());
         if watch.canceled.load(Ordering::Acquire) {
             return Err(Error::Refused("caller disconnected or canceled".into()));
         }
@@ -360,6 +399,13 @@ impl Broker {
             );
         }
         let operation = match operation {
+            Operation::ListLogins
+            | Operation::LoginProtectionState { .. }
+            | Operation::ImportLogin { .. }
+            | Operation::VerifyLogin { .. }
+            | Operation::DiscardStagedLogin { .. } => {
+                return self.execute_login(id, operation, canceled, session);
+            }
             Operation::ListCredentials => {
                 return Ok(serde_json::to_value(
                     self.registry.browser_credentials(self.owner)?,

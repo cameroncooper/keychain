@@ -14,7 +14,7 @@ The iCloud write flag remains disabled pending the remaining review and live gat
 | Assertion / registration | `SelectedScalar` borrows a context-checked scalar only during the authorized operation; no serializer or raw accessor | SigningKey and elliptic-curve arithmetic use ordinary stack objects |
 | CKKS upload encoding | Fixed protected X9.63 and 64-KiB plist buffers; serializer sees a zero placeholder, real private bytes inserted afterward; encryption is in place | Crypto primitive internal copies are outside these buffers |
 | Independent fetch verification | Decrypt/unwrap into protected buffers; private plist data erased before owned metadata parsing; destination wiped on authentication failure | Account TLK/class-key resolution remains zeroizing heap memory |
-| TOTP generation | Borrowed URI structure; wiping decoded query values, normalized seed, preallocated decode destination, finalized MAC and output code; decoder failure wipes partial output | Parser and HMAC/digest scratch are ordinary memory; generated code intentionally leaves the process when revealed |
+| TOTP generation | Borrowed URI structure; locked decoded query/normalized seed/base32 destinations; wiping finalized MAC/output code; decoder failure wipes the whole protected destination | Compiler and HMAC/digest scratch remain outside the protected allocations; generated code intentionally leaves the process when revealed |
 
 The broker becomes nondumpable before serving. The installed unit disables core
 dumps, bounds locked memory and restricts the broker to AF_UNIX. Apple HTTP and
@@ -68,8 +68,10 @@ It now bounds input to 4096 bytes and 32 query parameters, rejects duplicate
 security parameters (including percent-encoded names), invalid algorithms,
 invalid digit/period values and unrepresentable expiry. URI labels remain opaque;
 percent-encoded, spaced, lowercase and padded base32 seeds remain supported.
-Base32 decoding writes into an already-owned wiping buffer so partial decoding
-errors cannot bypass cleanup. GeneratedCode wipes its owned code on drop and
+Base32 decoding writes into an already-owned locked buffer so partial decoding
+errors cannot bypass cleanup. Form decoding and normalization also use final-size
+protected buffers; there is no seed-bearing owned Url, query String or seed Vec.
+The source URI remains borrowed and the original software vault is unchanged. GeneratedCode wipes its owned code on drop and
 redacts it from Debug; normal reveal output remains intentional.
 
 Tests use only published synthetic RFC 6238 seeds. All eighteen vectors across
@@ -84,10 +86,10 @@ process memory or prove that compiler copies have disappeared.
    custom cryptographic algorithms. Validate the actual supported backend and
    optimized build, including errors and panic/unwind. Keep the narrower memory
    claims above until this is established.
-2. Implement selected login envelopes and explicit password/notes/TOTP-code reveal
-   policy in the broker. No raw TOTP seed or passkey scalar belongs in reveal IPC.
-   The existing software `show` still opens the software vault; these TOTP fixes
-   do not make it a biometric selected-item reveal implementation.
+2. Connect the implemented [selected login envelopes/reveal](SEP-LOGIN-REVEAL.md)
+   to CLI migration/routing and sync reconciliation. No raw TOTP seed or passkey
+   scalar belongs in reveal IPC. The existing software `show` still opens the
+   software vault until that routing is explicitly committed.
 3. Exercise real protected assertion/registration, abort/session-lock/expiry and
    post-reboot persistence with user readiness and disposable credentials.
 4. Complete fresh account authentication/bootstrap and explicitly scoped Apple

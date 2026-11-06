@@ -173,6 +173,7 @@ impl Registry {
         }
         let _lock = self.update_lock()?;
         let id = binding.transaction.to_string();
+        self.refuse_login_collision(&id)?;
         let path = self.synced_creation_filename(&id, false)?;
         // Shared transaction IDs cannot switch between native creation, generic
         // imports and cloud creation, even if one path has not completed.
@@ -332,6 +333,7 @@ impl Registry {
         binding.validate()?;
         check()?;
         let id = binding.transaction.to_string();
+        self.refuse_login_collision(&id)?;
         let draft = {
             let _lock = self.update_lock()?;
             let draft = self.read_synced_creation(&id, binding.owner)?;

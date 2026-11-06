@@ -284,7 +284,10 @@ impl Registry {
             let entry = entry.map_err(|e| Error::io(&self.directory, e))?;
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with("protected-") || name.starts_with("synced-create-") {
+            if name.starts_with("protected-")
+                || name.starts_with("synced-create-")
+                || name.starts_with("login-")
+            {
                 return Err(Error::Security(
                     "item recipient is missing while protected records exist; refusing replacement"
                         .into(),
@@ -318,6 +321,7 @@ impl Registry {
     pub fn import_protected(&self, owner: u32, mut import: ProtectedImport) -> Result<u64> {
         let _lock = self.update_lock()?;
         let id = import.credential.id.clone();
+        self.refuse_login_collision(&id)?;
         if self.synced_creation_summary(&id, owner)?.is_some() {
             return Err(Error::Refused(
                 "registration owns this credential; resume it instead of replacing its key".into(),

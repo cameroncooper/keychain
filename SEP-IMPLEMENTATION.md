@@ -291,10 +291,10 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 202 passing tests, twenty-one ignored (three Apple network and eighteen privileged
-integration tests). Nine registry, five coordination and one account-bootstrap test passed separately as root, including
+Workspace checks: 208 passing tests, twenty-two ignored (three Apple network and nineteen privileged
+integration tests). Ten registry, five coordination and one account-bootstrap test passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
-The separate-UID worker and systemd startup tests also pass (seventeen privileged
+The separate-UID worker and systemd startup tests also pass (eighteen privileged
 library tests total).
 Eleven browser service-worker flow tests also pass. Strict Clippy is clean.
 The broker now exits after an idle interval without interrupting queued/active
@@ -467,5 +467,13 @@ and remaining RFC6979/HMAC scratch exposure. AES-GCM/GHASH/POLYVAL cleanup featu
 are now enabled for the normal Asahi build. TOTP parsing/generation wipes its
 owned seed/MAC/code buffers on success and error, rejects ambiguous/invalid
 configuration and checks expiry arithmetic. All eighteen RFC 6238 vectors pass.
-These changes do not implement selected password/TOTP broker reveal or prove
-complete crypto stack erasure; both remain required.
+The service-side [selected login envelope/reveal path](docs/SEP-LOGIN-REVEAL.md)
+is now implemented: encrypted staging, biometric verification, owner/revision/
+metadata binding, selected password/notes or generated TOTP output, protected
+reply serialization and wiping typed client results. Login/passkey namespaces
+refuse collisions. TOTP query and seed decoding now use checked locked buffers;
+a zero-memlock child proves no unprotected fallback. Synthetic tests cover
+context/field substitution, partial reply cancellation, commit/reopen/interruption
+and missing-root/revision refusal. CLI login migration/show/list routing, sync
+reconciliation and real biometric reveal still need completion. Complete crypto
+stack erasure is not established.

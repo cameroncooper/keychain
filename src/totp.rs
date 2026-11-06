@@ -1,6 +1,7 @@
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GeneratedCode {
     pub code: String,
     pub expires: u64,
@@ -18,91 +19,177 @@ impl std::fmt::Debug for GeneratedCode {
     }
 }
 
-/// Generate only the current code, never return its seed. Application-owned
-/// seed/parser/MAC buffers are wiped on all exits. HMAC/digest implementation
-/// scratch and compiler copies are not individually locked or proven erased.
+#[derive(Clone, Copy)]
+enum Algorithm {
+    Sha1,
+    Sha256,
+    Sha512,
+}
+struct Configuration {
+    key: keychain_sep_driver::memory::SecretBuffer,
+    key_len: usize,
+    digits: u32,
+    period: u64,
+    algorithm: Algorithm,
+}
+impl Configuration {
+    fn parse(uri: &str) -> Option<Self> {
+        if uri.len() > 4096 || uri.contains('#') || uri.chars().any(char::is_control) {
+            return None;
+        }
+        let (scheme, rest) = uri.split_once("://")?;
+        let (host, label_and_query) = rest.split_once('/')?;
+        let (_, query) = label_and_query.split_once('?')?;
+        if !scheme.eq_ignore_ascii_case("otpauth") || !host.eq_ignore_ascii_case("totp") {
+            return None;
+        }
+        // Every decoder destination has final size and checked protections before
+        // seed bytes arrive, including partial/error paths. Never own a Url or
+        // decoded query String containing the seed.
+        let mut configuration = Self {
+            key: keychain_sep_driver::memory::SecretBuffer::new().ok()?,
+            key_len: 0,
+            digits: 6,
+            period: 30,
+            algorithm: Algorithm::Sha1,
+        };
+        let mut name = keychain_sep_driver::memory::SecretBuffer::new().ok()?;
+        let mut value = keychain_sep_driver::memory::SecretBuffer::new().ok()?;
+        let mut seen = 0u8;
+        for (index, parameter) in query
+            .split('&')
+            .filter(|value| !value.is_empty())
+            .enumerate()
+        {
+            if index >= 32 {
+                return None;
+            }
+            let (raw_name, raw_value) = parameter.split_once('=').unwrap_or((parameter, ""));
+            name.as_mut_array().zeroize();
+            let name_len = decode_form(raw_name.as_bytes(), name.as_mut_array())?;
+            let flag = match &name.as_array()[..name_len] {
+                b"secret" => 1,
+                b"digits" => 2,
+                b"period" => 4,
+                b"algorithm" => 8,
+                _ => continue,
+            };
+            if seen & flag != 0 {
+                return None;
+            }
+            seen |= flag;
+            value.as_mut_array().zeroize();
+            let length = decode_form(raw_value.as_bytes(), value.as_mut_array())?;
+            match flag {
+                1 => {
+                    let bytes = value.as_mut_array();
+                    let mut size = 0;
+                    for index in 0..length {
+                        if bytes[index] != b' ' {
+                            bytes[size] = bytes[index].to_ascii_uppercase();
+                            size += 1;
+                        }
+                    }
+                    while size > 0 && bytes[size - 1] == b'=' {
+                        size -= 1;
+                    }
+                    let encoding = data_encoding::BASE32_NOPAD;
+                    let key_len = encoding.decode_len(size).ok()?;
+                    if key_len == 0 || key_len > 4096 {
+                        return None;
+                    }
+                    encoding
+                        .decode_mut(
+                            &bytes[..size],
+                            &mut configuration.key.as_mut_array()[..key_len],
+                        )
+                        .ok()?;
+                    configuration.key_len = key_len;
+                }
+                2 => {
+                    configuration.digits = std::str::from_utf8(&value.as_array()[..length])
+                        .ok()?
+                        .parse()
+                        .ok()?
+                }
+                4 => {
+                    configuration.period = std::str::from_utf8(&value.as_array()[..length])
+                        .ok()?
+                        .parse()
+                        .ok()?
+                }
+                8 => {
+                    let algorithm = &value.as_array()[..length];
+                    configuration.algorithm = if algorithm.eq_ignore_ascii_case(b"SHA1") {
+                        Algorithm::Sha1
+                    } else if algorithm.eq_ignore_ascii_case(b"SHA256") {
+                        Algorithm::Sha256
+                    } else if algorithm.eq_ignore_ascii_case(b"SHA512") {
+                        Algorithm::Sha512
+                    } else {
+                        return None;
+                    };
+                }
+                _ => return None,
+            }
+        }
+        if seen & 1 == 0 || !(6..=10).contains(&configuration.digits) || configuration.period == 0 {
+            return None;
+        }
+        Some(configuration)
+    }
+}
+
+// Form query decoding into the already protected destination. Invalid percent
+// escapes fail closed. This performs no allocation or cryptographic operation.
+fn decode_form(input: &[u8], output: &mut [u8]) -> Option<usize> {
+    let hex = |byte: u8| match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    };
+    let (mut read, mut written) = (0, 0);
+    while read < input.len() {
+        let byte = match input[read] {
+            b'+' => b' ',
+            b'%' => {
+                let byte = (hex(*input.get(read + 1)?)? << 4) | hex(*input.get(read + 2)?)?;
+                read += 2;
+                byte
+            }
+            byte => byte,
+        };
+        *output.get_mut(written)? = byte;
+        written += 1;
+        read += 1;
+    }
+    Some(written)
+}
+
+pub(crate) fn is_valid(uri: &str) -> bool {
+    Configuration::parse(uri).is_some()
+}
+
+/// Generate only the current code, never return its seed. Primary parser/seed
+/// buffers are locked, dump-excluded and wiped on all exits. HMAC/digest scratch
+/// and compiler copies are not individually locked or proven erased.
 pub fn generate(uri: &str, at: u64) -> Option<GeneratedCode> {
     use hmac::{Hmac, Mac};
     use sha1::Sha1;
     use sha2::{Sha256, Sha512};
-
-    // Parse the public URI structure by borrowing rather than making a Url that
-    // owns a second full seed-bearing URI. Bound work before decoding parameters.
-    if uri.len() > 4096 || uri.contains('#') || uri.chars().any(char::is_control) {
-        return None;
-    }
-    let (scheme, rest) = uri.split_once("://")?;
-    let (host, label_and_query) = rest.split_once('/')?;
-    let (_, query) = label_and_query.split_once('?')?;
-    if !scheme.eq_ignore_ascii_case("otpauth") || !host.eq_ignore_ascii_case("totp") {
-        return None;
-    }
-    let mut secret = None;
-    let mut digits = None;
-    let mut period = None;
-    let mut algorithm = None;
-    for (index, (name, value)) in url::form_urlencoded::parse(query.as_bytes()).enumerate() {
-        // Percent-decoded Cow strings may own allocations. Move each directly
-        // into its wiping owner, including unknown/invalid parameters.
-        let name = Zeroizing::new(name.into_owned());
-        let value = Zeroizing::new(value.into_owned());
-        if index >= 32 {
-            return None;
-        }
-        let slot = match name.as_str() {
-            "secret" => &mut secret,
-            "digits" => &mut digits,
-            "period" => &mut period,
-            "algorithm" => &mut algorithm,
-            _ => continue,
-        };
-        if slot.replace(value).is_some() {
-            return None; // Ambiguous authentication parameters are not last-wins.
-        }
-    }
-    let secret = secret?;
-    let mut raw = Zeroizing::new(String::with_capacity(secret.len()));
-    for character in secret.chars().filter(|character| *character != ' ') {
-        if !character.is_ascii() {
-            return None;
-        }
-        raw.push(character.to_ascii_uppercase());
-    }
-    let unpadded = raw.trim_end_matches('=').len();
-    raw.truncate(unpadded);
-    let encoding = data_encoding::BASE32_NOPAD;
-    let mut key = Zeroizing::new(vec![0; encoding.decode_len(raw.len()).ok()?]);
-    // Own the destination before decoding so a partial failure also wipes it.
-    encoding.decode_mut(raw.as_bytes(), &mut key).ok()?;
-    drop(raw);
-    drop(secret);
-    if key.is_empty() {
-        return None;
-    }
-    let digits = match digits {
-        Some(value) => value.parse::<u32>().ok()?,
-        None => 6,
-    };
-    let period = match period {
-        Some(value) => value.parse::<u64>().ok()?,
-        None => 30,
-    };
-    if !(6..=10).contains(&digits) || period == 0 {
-        return None;
-    }
+    let configuration = Configuration::parse(uri)?;
+    let digits = configuration.digits;
+    let period = configuration.period;
+    let key = &configuration.key.as_array()[..configuration.key_len];
     let counter = at / period;
-    // The returned expiry must be representable, including at u64::MAX.
     let expires = counter.checked_add(1)?.checked_mul(period)?;
     let msg = counter.to_be_bytes();
-    let algorithm = algorithm
-        .as_deref()
-        .map(|value| value.as_str())
-        .unwrap_or("SHA1");
     let mut mac = Zeroizing::new([0_u8; 64]);
     macro_rules! compute_mac {
         ($digest:ty) => {{
             let output = Zeroizing::new(
-                Hmac::<$digest>::new_from_slice(&key)
+                Hmac::<$digest>::new_from_slice(key)
                     .ok()?
                     .chain_update(msg)
                     .finalize()
@@ -112,14 +199,10 @@ pub fn generate(uri: &str, at: u64) -> Option<GeneratedCode> {
             output.len()
         }};
     }
-    let mac_len = if algorithm.eq_ignore_ascii_case("SHA1") {
-        compute_mac!(Sha1)
-    } else if algorithm.eq_ignore_ascii_case("SHA256") {
-        compute_mac!(Sha256)
-    } else if algorithm.eq_ignore_ascii_case("SHA512") {
-        compute_mac!(Sha512)
-    } else {
-        return None;
+    let mac_len = match configuration.algorithm {
+        Algorithm::Sha1 => compute_mac!(Sha1),
+        Algorithm::Sha256 => compute_mac!(Sha256),
+        Algorithm::Sha512 => compute_mac!(Sha512),
     };
     let offset = usize::from(mac[mac_len - 1] & 0x0f);
     let value = u32::from_be_bytes(mac.get(offset..offset + 4)?.try_into().ok()?) & 0x7fff_ffff;
@@ -211,6 +294,60 @@ mod tests {
         );
         assert!(padded.is_some());
         assert_eq!(padded, plain);
+    }
+
+    #[test]
+    fn protected_form_decoder_matches_standard_valid_bytes_and_refuses_truncation() {
+        let mut output = [0u8; 4096];
+        for byte in 0u8..=255 {
+            let encoded = format!("prefix+%{byte:02x}%{byte:02X}");
+            let length = decode_form(encoded.as_bytes(), &mut output)
+                .unwrap_or_else(|| panic!("valid form encoding"));
+            let query = format!("value={encoded}");
+            // Compare raw decoded bytes; form_urlencoded's UTF-8 repair is not
+            // applicable to the ASCII seed/algorithm/numeric fields we accept.
+            if byte.is_ascii() {
+                let decoded = url::form_urlencoded::parse(query.as_bytes())
+                    .next()
+                    .unwrap_or_else(|| panic!("standard decoder"))
+                    .1;
+                assert_eq!(&output[..length], decoded.as_bytes());
+            }
+        }
+        for invalid in [b"%".as_slice(), b"%1", b"%zz", b"a%0x"] {
+            assert!(decode_form(invalid, &mut output).is_none());
+        }
+        assert!(decode_form(b"ab", &mut [0u8; 1]).is_none());
+        assert!(is_valid("otpauth://totp/test?secret=MZXW6"));
+        assert!(!is_valid("otpauth://totp/test?secret=MZXW6&%73ecret=MZXW6"));
+    }
+
+    #[test]
+    fn locked_seed_allocation_failure_has_no_fallback() {
+        const CHILD: &str = "KEYCHAIN_TEST_TOTP_NO_MEMLOCK";
+        const URI: &str = "otpauth://totp/test?secret=MZXW6";
+        if std::env::var_os(CHILD).is_some() {
+            assert!(keychain_sep_driver::memory::SecretBuffer::new().is_err());
+            assert!(!is_valid(URI));
+            assert!(generate(URI, 59).is_none());
+            return;
+        }
+        if keychain_sep_driver::peer::effective_uid() == 0 {
+            return;
+        }
+        let executable =
+            std::env::current_exe().unwrap_or_else(|error| panic!("test executable: {error}"));
+        let status = std::process::Command::new("/usr/bin/prlimit")
+            .args(["--memlock=0:0", "--"])
+            .arg(executable)
+            .args([
+                "--exact",
+                "totp::tests::locked_seed_allocation_failure_has_no_fallback",
+            ])
+            .env(CHILD, "1")
+            .status()
+            .unwrap_or_else(|error| panic!("isolated memlock check: {error}"));
+        assert!(status.success());
     }
 
     #[test]

@@ -9,6 +9,8 @@ use crate::paths::{AppPaths, atomic_write_private, create_private_exclusive, rea
 use crate::security::sep::StoredSepKey;
 use crate::security::{Purpose, SecurityBackend, SoftwareFileBackend};
 use crate::{Error, Result};
+mod login;
+pub use login::{LoginRecord, LoginState, LoginSummary};
 mod protected;
 mod registration;
 mod synced_registration;
@@ -199,6 +201,7 @@ impl Registry {
             if id.starts_with("upload-")
                 || id.starts_with("synced-create-")
                 || id.starts_with("account-")
+                || id.starts_with("login-")
             {
                 continue;
             }
@@ -316,6 +319,7 @@ impl Registry {
         Ok(record)
     }
     fn save_new(&self, record: &Record) -> Result<()> {
+        self.refuse_login_collision(&record.credential.id)?;
         let plain = zeroize::Zeroizing::new(serde_json::to_vec(record)?);
         let sealed = self.backend.seal(Purpose::Vault, &plain)?;
         create_private_exclusive(&self.filename(&record.credential.id)?, &sealed)

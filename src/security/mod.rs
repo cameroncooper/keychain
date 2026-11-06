@@ -62,6 +62,7 @@ pub enum Purpose {
     TrustRepair = 7,
     SyncUpload = 8,
     BrokerAccount = 9,
+    BrokerLogin = 10,
 }
 
 impl Purpose {
@@ -76,6 +77,7 @@ impl Purpose {
             7 => Ok(Self::TrustRepair),
             8 => Ok(Self::SyncUpload),
             9 => Ok(Self::BrokerAccount),
+            10 => Ok(Self::BrokerLogin),
             _ => Err(crate::Error::InvalidData(format!(
                 "unknown encrypted-state purpose {value}"
             ))),
@@ -93,6 +95,7 @@ impl Purpose {
             Self::TrustRepair => b"trust-repair",
             Self::SyncUpload => b"sync-upload",
             Self::BrokerAccount => b"broker-account",
+            Self::BrokerLogin => b"broker-login",
         }
     }
 }

@@ -89,3 +89,8 @@ reconciliation are implemented with recovery tests; see
 switch is opt-in and has not been applied to the user's real profile. No source
 scalar, user root, account session or Apple record has been replaced or deleted.
 Same-key warm reboot remains an acceptance gate before retiring old copies.
+
+Selected password/notes/TOTP service support is now implemented separately using
+the same recipient/context envelope; see [login reveal](SEP-LOGIN-REVEAL.md).
+It does not expose passkey scalars or TOTP seeds. CLI login migration/routing,
+sync reconciliation and real biometric reveal acceptance remain unfinished.

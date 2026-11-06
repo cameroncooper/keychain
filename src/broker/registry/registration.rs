@@ -27,6 +27,7 @@ impl Registry {
         }
         let _lock = self.update_lock()?;
         let id = transaction.to_string();
+        self.refuse_login_collision(&id)?;
         if self.synced_creation_exists(&id)? {
             return Err(Error::Refused(
                 "registration transaction belongs to synced storage".into(),
