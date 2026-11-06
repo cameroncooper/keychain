@@ -140,3 +140,19 @@ saved sponsor branch skips new password/2FA/escrow recovery; it retains the same
 candidate and previous peer. Full replacement-peer join, independent complete
 snapshot validation and promotion remain unverified until that continuation
 succeeds. No peer/recipient/root reset or automatic recovery retry was introduced.
+
+
+## Repair committed — 2026-11-06
+
+After the user resumed the corrected CLI, a local status check confirmed
+`Octagon trust repair: Committed`, a joined recovery checkpoint and one retained
+previous peer identity. The cache now contains two logins and two passkeys.
+Metadata-only inventory confirms the original authenticationtest.com/test.com
+logins and webauthn.io/apple.com passkeys with their existing record IDs. No secret
+fields were revealed by that check.
+
+This is completion evidence for the explicit repair's independent full-snapshot,
+promotion and sponsor-retirement path: the code only commits after those checks.
+It does not establish SEP migration, real browser signing, newly created passkey
+upload or other-device use. The previously authorized WebAuthn-only migration is
+now unblocked; no Apple.com migration is implied.

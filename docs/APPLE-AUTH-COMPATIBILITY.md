@@ -154,3 +154,11 @@ incorrectly required an optional identifier enum. The sponsor is saved, the
 parser is corrected, and [repair continuation](SYNC-RECOVERY.md#recovery-record-identifier-compatibility--2026-11-06)
 can use that checkpoint without another escrow recovery. This does not yet prove
 the replacement peer can decrypt a complete snapshot or be safely promoted.
+
+The user then resumed the corrected repair successfully. A local check confirms
+Committed repair, a joined candidate, one retained previous peer and a recovered
+cache of two logins/two passkeys. The local Asahi Mac provider has now completed
+full sign-in, SMS/PET, escrow recovery and this account's repair/snapshot path.
+The earlier init-only limitation is superseded for this concrete run, without
+guaranteeing future Apple availability or different accounts. No provider
+reprovisioning or public/remote anisette service was used.

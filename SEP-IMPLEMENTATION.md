@@ -543,3 +543,11 @@ and explicit-type rejection, and a read-only probe now decodes 20 encrypted
 shares/60 sync-key records. `status` exposes the safe recovery-checkpoint label.
 The replacement-peer join and complete-snapshot/promotion gates remain open;
 no Apple item write was performed. See [recovery details](docs/SYNC-RECOVERY.md#recovery-record-identifier-compatibility--2026-11-06).
+
+
+The user subsequently completed repair. Local status confirms Committed/joined,
+one retained prior peer and restored counts of two logins and two passkeys;
+metadata-only inventory matches the original four record IDs. This satisfies the
+main-profile authentication/recovery prerequisite for the authorized WebAuthn-only
+migration. It does not migrate that credential or establish SEP browser use by
+itself; fingerprint readiness and real browser validation remain separate gates.
