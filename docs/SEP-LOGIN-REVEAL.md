@@ -276,3 +276,31 @@ password version and missing/changed output fields. The command has been built
 but **not run against hardware**; its presence does not satisfy biometric,
 cancellation, session-lock or reboot acceptance. CLI migration and source-journal
 publication still need their own real acceptance checks.
+
+Isolated fixture prepared on 2026-11-06 (no capture yet):
+
+- Unit: `keychain-login-check.service` (transient, one-hour idle exit).
+- Root registry: `/var/lib/keychain-login-check-20261106`.
+- Owner-only socket: `/run/keychain-login-check-20261106/broker.sock`.
+- Expected recipient: `77ab7ff4-2da7-4151-b4e0-c1fa4a6cee5d`.
+- Private client directory: `.sep-check-login-20261106` (ignored by Git).
+
+The new recipient was created through the existing native CREATE API, without a
+biometric request. The installed broker returned an active local session and
+available SEP. Its transient sandbox retains the installed service's hidden home,
+read-only owner-runtime bind, AF_UNIX restriction, device allow-list, no core dumps
+and 1-MiB memlock limit. It enables item decrypt only; there is no account
+enrollment, network worker or iCloud-write flag. The main registry was untouched.
+
+Only when ready for the three initial prompts:
+
+```sh
+./target/release/keychain-sep broker-login-check \
+  --socket /run/keychain-login-check-20261106/broker.sock \
+  --state "$PWD/.sep-check-login-20261106/check.json"
+```
+
+Check the unit and socket first; preparation is not evidence they remain live.
+If idle exit/reboot removes the transient unit/socket, restore the broker against
+the retained registry and owner before using the same client state. Do not create
+a replacement recipient or discard state to make a persistence check pass.
