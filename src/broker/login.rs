@@ -165,16 +165,18 @@ pub(super) fn login_binding(
 // not publish a salt/key for offline password guesses. A fresh import freezes
 // this tag before IPC so verified metadata can prove exact source content.
 fn content_binding(bytes: &[u8]) -> Result<String> {
-    use hmac::{Hmac, Mac};
-    if bytes.len() < 46 {
-        return Err(Error::Security("invalid protected login content".into()));
-    }
-    let mut mac = Hmac::<Sha256>::new_from_slice(&bytes[8..40])
-        .map_err(|_| Error::Security("login content MAC initialization failed".into()))?;
-    mac.update(b"cameroncooper.keychain/login-content/v1\0");
-    mac.update(&bytes[..8]);
-    mac.update(&bytes[40..]);
-    Ok(hex::encode(mac.finalize().into_bytes()))
+    crate::security::secret_compute(|| {
+        use hmac::{Hmac, Mac};
+        if bytes.len() < 46 {
+            return Err(Error::Security("invalid protected login content".into()));
+        }
+        let mut mac = Hmac::<Sha256>::new_from_slice(&bytes[8..40])
+            .map_err(|_| Error::Security("login content MAC initialization failed".into()))?;
+        mac.update(b"cameroncooper.keychain/login-content/v1\0");
+        mac.update(&bytes[..8]);
+        mac.update(&bytes[40..]);
+        Ok(hex::encode(mac.finalize().into_bytes()))
+    })
 }
 
 struct LoginView<'a> {
@@ -184,34 +186,39 @@ struct LoginView<'a> {
 }
 impl<'a> LoginView<'a> {
     fn parse(bytes: &'a [u8], metadata: &LoginMetadata, expected_content: &str) -> Result<Self> {
-        let invalid = || Error::Security("invalid protected login content".into());
-        if bytes.len() < 46 || &bytes[..8] != MAGIC || content_binding(bytes)? != expected_content {
-            return Err(invalid());
-        }
-        let mut fields = [""; 3];
-        let mut offset = 46usize;
-        for (index, field) in fields.iter_mut().enumerate() {
-            let length = usize::from(u16::from_be_bytes([
-                bytes[40 + 2 * index],
-                bytes[41 + 2 * index],
-            ]));
-            let end = offset.checked_add(length).ok_or_else(invalid)?;
-            *field = std::str::from_utf8(bytes.get(offset..end).ok_or_else(invalid)?)
-                .map_err(|_| invalid())?;
-            offset = end;
-        }
-        if offset != bytes.len()
-            || metadata.has_password == fields[0].is_empty()
-            || metadata.has_notes == fields[1].is_empty()
-            || metadata.has_totp == fields[2].is_empty()
-            || (!fields[2].is_empty() && !crate::totp::is_valid(fields[2]))
-        {
-            return Err(invalid());
-        }
-        Ok(Self {
-            password: fields[0],
-            notes: fields[1],
-            totp_uri: fields[2],
+        crate::security::secret_compute(|| {
+            let invalid = || Error::Security("invalid protected login content".into());
+            if bytes.len() < 46
+                || &bytes[..8] != MAGIC
+                || content_binding(bytes)? != expected_content
+            {
+                return Err(invalid());
+            }
+            let mut fields = [""; 3];
+            let mut offset = 46usize;
+            for (index, field) in fields.iter_mut().enumerate() {
+                let length = usize::from(u16::from_be_bytes([
+                    bytes[40 + 2 * index],
+                    bytes[41 + 2 * index],
+                ]));
+                let end = offset.checked_add(length).ok_or_else(invalid)?;
+                *field = std::str::from_utf8(bytes.get(offset..end).ok_or_else(invalid)?)
+                    .map_err(|_| invalid())?;
+                offset = end;
+            }
+            if offset != bytes.len()
+                || metadata.has_password == fields[0].is_empty()
+                || metadata.has_notes == fields[1].is_empty()
+                || metadata.has_totp == fields[2].is_empty()
+                || (!fields[2].is_empty() && !crate::totp::is_valid(fields[2]))
+            {
+                return Err(invalid());
+            }
+            Ok(Self {
+                password: fields[0],
+                notes: fields[1],
+                totp_uri: fields[2],
+            })
         })
     }
 }
@@ -528,15 +535,22 @@ fn write_reveal_response(
         error: Option<()>,
     }
     let mut writer = SecretWriter::new()?;
-    serde_json::to_writer(
-        &mut writer,
-        &Reply {
-            version: 1,
-            id,
-            result: output,
-            error: None,
-        },
-    )?;
+    // Borrow only the protected destination, not its thread-affine owner or
+    // authorization callback. No private JSON scratch remains on the IPC stack.
+    let destination = &mut writer.memory.as_mut_array()[..];
+    writer.length = crate::security::secret_compute(|| {
+        let mut cursor = io::Cursor::new(destination);
+        serde_json::to_writer(
+            &mut cursor,
+            &Reply {
+                version: 1,
+                id,
+                result: output,
+                error: None,
+            },
+        )?;
+        Ok(cursor.position() as usize)
+    })?;
     check()?;
     *delivery_started = true;
     stream

@@ -10,11 +10,11 @@ The iCloud write flag remains disabled pending the remaining review and live gat
 | Operation | Storage and cleanup | Remaining exposure |
 | --- | --- | --- |
 | SEP plaintext delivery | `SecretBuffer` maps its final size, checks mlock, MADV_DONTDUMP and MADV_DONTFORK before input; Drop wipes the whole mapping before unlock/unmap | Driver/kernel internal copies require separate review |
-| Selected passkey generation | Random bytes arrive directly in SecretBuffer, then are sealed before that mapping is dropped | P-256 public derivation creates library scalar temporaries |
-| Assertion / registration | `SelectedScalar` borrows a context-checked scalar only during the authorized operation; no serializer or raw accessor | SigningKey and elliptic-curve arithmetic use ordinary stack objects |
-| CKKS upload encoding | Fixed protected X9.63 and 64-KiB plist buffers; serializer sees a zero placeholder, real private bytes inserted afterward; encryption is in place | Crypto primitive internal copies are outside these buffers |
+| Selected passkey generation | Random bytes arrive directly in SecretBuffer, then are sealed before that mapping is dropped | P-256 derivation runs on the protected worker stack; register copies remain outside the guarantee |
+| Assertion / registration | `SelectedScalar` borrows a context-checked scalar only during the authorized operation; no serializer or raw accessor | SigningKey/RFC6979/arithmetic execute on the protected worker stack; no private key object returns to the caller |
+| CKKS upload encoding | Fixed protected X9.63 and 64-KiB plist buffers; serializer sees a zero placeholder, real private bytes inserted afterward; encryption is in place | The prepared-upload crypto executes on the protected worker stack; account class keys still have zeroizing heap owners |
 | Independent fetch verification | Decrypt/unwrap into protected buffers; private plist data erased before owned metadata parsing; destination wiped on authentication failure | Account TLK/class-key resolution remains zeroizing heap memory |
-| TOTP generation | Borrowed URI structure; locked decoded query/normalized seed/base32 destinations; wiping finalized MAC/output code; decoder failure wipes the whole protected destination | Compiler and HMAC/digest scratch remain outside the protected allocations; generated code intentionally leaves the process when revealed |
+| TOTP generation | Borrowed URI structure; locked decoded query/normalized seed/base32 destinations; wiping finalized MAC/output code; decoder failure wipes the whole protected destination | HMAC/digest/parser scratch executes on the protected worker stack; generated code intentionally leaves the process when revealed |
 
 The broker becomes nondumpable before serving. The installed unit disables core
 dumps, bounds locked memory and restricts the broker to AF_UNIX. Apple HTTP and
@@ -80,12 +80,49 @@ partial-decoding, input-bound, expiry-bound and redacted-debug checks. These tes
 verify behavior and owner lifetimes by source inspection; they do not scan live
 process memory or prove that compiler copies have disappeared.
 
+## Protected computation stacks
+
+`keychain-sep-driver::memory::with_secret_stack` now provides a joined, synchronous
+worker with a caller-owned 512-KiB stack and inaccessible guard pages at both ends.
+The usable mapping is locked and the full mapping marked MADV_DONTDUMP and
+MADV_DONTFORK before pthread creation. Setup failure does not execute the callback.
+After join (including TLS destruction), the caller wipes the entire usable mapping
+before unlock/unmap, both for normal return and caught Rust panic. A failed join
+aborts rather than releasing potentially live borrowed state. Nested computations
+reuse the protected stack, keeping the supported operations within the service's
+1-MiB locked-memory limit. The primitive is not a reusable authorization grant.
+
+The main crate's safe `secret_compute` wrapper is used for selected scalar
+validation/signing, synced scalar public derivation, SEP envelope encryption,
+prepared-upload encryption and independent fetch verification, login content MAC
+and parsing, and login reply serialization. TOTP validation/generation uses the
+same primitive and returns failure if protection cannot be installed. Private
+inputs remain borrowed from their existing protected owners. Only public results,
+metadata views referencing those owners, ciphertext or intentionally revealed
+output leave these callbacks. Session/cancellation checks, biometric capture,
+registry locking and network callbacks stay on their owning thread. IPC delivery
+still checks authorization before and between chunks.
+
+This addresses stack-resident RFC6979/HMAC state without replacing standard crypto
+algorithms or assuming every library type has a wiping destructor. It does not
+protect arbitrary heap allocations, registers, panic payloads, kernel context
+storage or an original software vault/source URI. Account TLK/class-key owners and
+software-root unsealing retain their separately documented limits. Code in these
+callbacks must not fork/exec, format secrets into errors/panics, or return a private
+key/seed. The worker primitive alone cannot enforce those semantic restrictions.
+
+Synthetic tests inspect worker stack VmFlags (`lo`, `dd`, `dc`) and guard mappings,
+prove nested calls use the same worker, exercise success and caught/propagated
+panic cleanup, and verify that zero memlock prevents callback execution. These
+checks prove the owned mapping policy and erase operation, not erasure of every
+register/compiler/library copy. Existing signing, upload, reveal/cancellation and
+RFC 6238 tests exercise the wrapped production paths.
+
 ## Remaining implementation and acceptance work
 
-1. Harden or replace the reviewed signing/HMAC scratch path without introducing
-   custom cryptographic algorithms. Validate the actual supported backend and
-   optimized build, including errors and panic/unwind. Keep the narrower memory
-   claims above until this is established.
+1. Validate the protected worker paths on hardware, including the installed
+   service resource policy. Keep the narrower mapping/stack claims above;
+   successful tests do not establish universal compiler/register erasure.
 2. Validate the implemented changed-login staging/verified-update path on hardware
    for [login migration/reveal](SEP-LOGIN-REVEAL.md). CLI protected selection uses
    the metadata index; the encrypted source journal remains an explicit recovery
@@ -107,3 +144,14 @@ Formatting, strict Clippy and the release build passed. Updated service binaries
 were installed with a retained backup and no write-flag change. Installed
 broker/native-host availability passed without biometric capture. No real account
 bootstrap, migration, login or Apple write was performed during this review.
+
+Protected-stack validation (2026-11-06): all 225 workspace tests passed in both
+normal and optimized builds (23 intentionally ignored). All 19 privileged
+broker/network-worker library tests passed separately in the optimized build with
+RLIMIT_MEMLOCK set to 1 MiB. Formatting, strict Clippy and release binaries passed.
+The three service binaries were installed; previous artifacts are retained at
+`/var/lib/keychain-service-backups/update.KJZEavpk`. Installed broker/native-host
+availability passed without a biometric prompt. The running broker retains
+`--allow-item-decrypt`, a 1-MiB lock limit and no iCloud-creation write flag. No
+real migration/reveal, fingerprint capture, fresh Apple sign-in or Apple write was
+performed by these checks.

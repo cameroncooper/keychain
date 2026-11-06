@@ -463,7 +463,7 @@ reuse the maintainer's test keys.
 
 The [selected-secret memory review](docs/SEP-MEMORY-REVIEW.md) records concrete
 application/primitive lifetimes, the opt-in ARM POLYVAL backend's cleanup limit,
-and remaining RFC6979/HMAC scratch exposure. AES-GCM/GHASH/POLYVAL cleanup features
+and the protected worker used for RFC6979/HMAC and selected crypto scratch. AES-GCM/GHASH/POLYVAL cleanup features
 are now enabled for the normal Asahi build. TOTP parsing/generation wipes its
 owned seed/MAC/code buffers on success and error, rejects ambiguous/invalid
 configuration and checks expiry arithmetic. All eighteen RFC 6238 vectors pass.
@@ -486,5 +486,10 @@ only requested fields. Root staging replacement pins the old pending tag; recove
 retains superseded ciphertexts and refuses known loss/rollback. Tests cover repeated
 changes, lost replies, publication faults, concurrent pending commit, bounded history
 and cancellation before/after commit. Real biometric reveal/update still needs
-completion; synthetic stand-ins do not prove one-fingerprint hardware behavior. Complete crypto
-stack erasure is not established.
+completion; synthetic stand-ins do not prove one-fingerprint hardware behavior.
+Reviewed pure crypto/parser/serializer operations now run on a temporary locked,
+dump-excluded, non-inherited stack with guard pages. The caller joins and wipes
+its full usable mapping on success or Rust unwind; setup failure never runs the
+callback on an ordinary stack. This does not establish erasure of register copies,
+unreviewed heap storage or account root/class keys. Hardware and live account
+acceptance gates remain open.

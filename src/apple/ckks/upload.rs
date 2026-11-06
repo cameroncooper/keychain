@@ -221,23 +221,25 @@ impl PreparedUpload {
         private_x963: &[u8],
         snapshot: &Snapshot,
     ) -> Result<Self> {
-        binding.validate()?;
-        if snapshot.zone != binding.zone {
-            return Err(invalid(
-                "encryption snapshot belongs to another account/zone",
-            ));
-        }
-        let current = CurrentKey::from_snapshot(
-            &binding.zone.name,
-            &snapshot.records,
-            &snapshot.tlks,
-            KeyClass::WhenUnlocked,
-        )?;
-        let record = current.seal_new_passkey(&credential, private_x963)?;
-        let public = private_x963
-            .get(..65)
-            .ok_or_else(|| invalid("truncated private key"))?;
-        Self::from_snapshot(binding, credential, public, record, snapshot)
+        crate::security::secret_compute(|| {
+            binding.validate()?;
+            if snapshot.zone != binding.zone {
+                return Err(invalid(
+                    "encryption snapshot belongs to another account/zone",
+                ));
+            }
+            let current = CurrentKey::from_snapshot(
+                &binding.zone.name,
+                &snapshot.records,
+                &snapshot.tlks,
+                KeyClass::WhenUnlocked,
+            )?;
+            let record = current.seal_new_passkey(&credential, private_x963)?;
+            let public = private_x963
+                .get(..65)
+                .ok_or_else(|| invalid("truncated private key"))?;
+            Self::from_snapshot(binding, credential, public, record, snapshot)
+        })
     }
 
     pub fn from_snapshot(

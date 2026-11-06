@@ -273,91 +273,97 @@ pub(super) fn verify_new_passkey(
     credential: &crate::model::PasskeyCredential,
     public: &str,
 ) -> Result<()> {
-    let parent = record
-        .string("parentkeyref")
-        .ok_or_else(|| invalid("missing wrapping-key reference"))?;
-    let class_key = keys
-        .get(parent)
-        .ok_or_else(|| invalid("authenticated wrapping key unavailable"))?;
-    let wrapped = record
-        .string("wrappedkey")
-        .and_then(|value| STANDARD.decode(value).ok())
-        .ok_or_else(|| invalid("invalid wrapped key"))?;
-    let mut item_key = keychain_sep_driver::memory::SecretBuffer::new()
-        .map_err(|e| Error::io("CKKS verification key memory", e))?;
-    let key_length =
-        crate::apple::crypto::siv_decrypt_into(class_key, &wrapped, &[], item_key.as_mut_array())?;
-    if key_length != 64 {
-        return Err(invalid("invalid decrypted item key"));
-    }
-    let data = record
-        .bytes("data")
-        .filter(|data| data.len() >= 32)
-        .ok_or_else(|| invalid("truncated item ciphertext"))?;
-    let mut headers = vec![data[..16].to_vec()];
-    headers.extend(authenticated_data_v2(record, parent)?);
-    let mut plaintext = super::secret_plist::Plaintext::new()?;
-    let padded = crate::apple::crypto::siv_decrypt_into(
-        &item_key.as_array()[..64],
-        &data[16..],
-        &headers,
-        plaintext.buffer(),
-    )?;
-    let length = plaintext.buffer()[..padded]
-        .iter()
-        .rposition(|byte| *byte != 0)
-        .filter(|index| {
-            padded % 20 == 0 && padded - *index <= 40 && plaintext.buffer()[*index] == 0x80
-        })
-        .ok_or_else(|| invalid("invalid item padding"))?;
-    let range = super::secret_plist::secret_range(&plaintext.buffer()[..length])?;
-    if STANDARD.encode(&plaintext.buffer()[range.start..range.start + 65]) != public {
-        return Err(Error::Security(
-            "fetched upload changed its public key".into(),
-        ));
-    }
-    let expected =
-        crate::passkey::sync_item_template(credential, &plaintext.buffer()[range.clone()])?;
-    // Erase before plist's owned parser can clone the data object. All genuine
-    // primary private-data buffers remain in the checked protected allocation;
-    // cryptographic objects and compiler temporaries have separate lifetimes.
-    plaintext.buffer()[range].fill(0);
-    let value = plist::Value::from_reader(std::io::Cursor::new(&plaintext.buffer()[..length]))?;
-    let plist::Value::Dictionary(fields) = value else {
-        return Err(invalid("expected a flat key item"));
-    };
-    let actual = DecryptedItem {
-        record_id: record.name.clone(),
-        fields,
-    };
-    let projection: BTreeMap<_, _> = expected
-        .fields
-        .iter()
-        .filter(|(name, _)| !matches!(name.as_str(), "sync" | "UUID"))
-        .collect();
-    if actual.fields.len() != projection.len() {
-        return Err(invalid("fetched upload changed its metadata fields"));
-    }
-    for (name, value) in projection {
-        let field = actual
-            .fields
-            .get(name)
-            .ok_or_else(|| invalid("missing fetched metadata"))?;
-        let same = if let (Some(a), Some(b)) = (field.as_date(), value.as_date()) {
-            let a = std::time::SystemTime::from(a);
-            let b = std::time::SystemTime::from(b);
-            a.duration_since(b).unwrap_or_else(|error| error.duration())
-                <= std::time::Duration::from_micros(1)
-        } else {
-            field == value
-        };
-        if !same {
+    crate::security::secret_compute(|| {
+        let parent = record
+            .string("parentkeyref")
+            .ok_or_else(|| invalid("missing wrapping-key reference"))?;
+        let class_key = keys
+            .get(parent)
+            .ok_or_else(|| invalid("authenticated wrapping key unavailable"))?;
+        let wrapped = record
+            .string("wrappedkey")
+            .and_then(|value| STANDARD.decode(value).ok())
+            .ok_or_else(|| invalid("invalid wrapped key"))?;
+        let mut item_key = keychain_sep_driver::memory::SecretBuffer::new()
+            .map_err(|e| Error::io("CKKS verification key memory", e))?;
+        let key_length = crate::apple::crypto::siv_decrypt_into(
+            class_key,
+            &wrapped,
+            &[],
+            item_key.as_mut_array(),
+        )?;
+        if key_length != 64 {
+            return Err(invalid("invalid decrypted item key"));
+        }
+        let data = record
+            .bytes("data")
+            .filter(|data| data.len() >= 32)
+            .ok_or_else(|| invalid("truncated item ciphertext"))?;
+        let mut headers = vec![data[..16].to_vec()];
+        headers.extend(authenticated_data_v2(record, parent)?);
+        let mut plaintext = super::secret_plist::Plaintext::new()?;
+        let padded = crate::apple::crypto::siv_decrypt_into(
+            &item_key.as_array()[..64],
+            &data[16..],
+            &headers,
+            plaintext.buffer(),
+        )?;
+        let length = plaintext.buffer()[..padded]
+            .iter()
+            .rposition(|byte| *byte != 0)
+            .filter(|index| {
+                padded % 20 == 0 && padded - *index <= 40 && plaintext.buffer()[*index] == 0x80
+            })
+            .ok_or_else(|| invalid("invalid item padding"))?;
+        let range = super::secret_plist::secret_range(&plaintext.buffer()[..length])?;
+        if STANDARD.encode(&plaintext.buffer()[range.start..range.start + 65]) != public {
             return Err(Error::Security(
-                "fetched upload changed its credential metadata".into(),
+                "fetched upload changed its public key".into(),
             ));
         }
-    }
-    Ok(())
+        let expected =
+            crate::passkey::sync_item_template(credential, &plaintext.buffer()[range.clone()])?;
+        // Erase before plist's owned parser can clone the data object. All genuine
+        // primary private-data buffers remain in the checked protected allocation;
+        // cryptographic objects and compiler temporaries have separate lifetimes.
+        plaintext.buffer()[range].fill(0);
+        let value = plist::Value::from_reader(std::io::Cursor::new(&plaintext.buffer()[..length]))?;
+        let plist::Value::Dictionary(fields) = value else {
+            return Err(invalid("expected a flat key item"));
+        };
+        let actual = DecryptedItem {
+            record_id: record.name.clone(),
+            fields,
+        };
+        let projection: BTreeMap<_, _> = expected
+            .fields
+            .iter()
+            .filter(|(name, _)| !matches!(name.as_str(), "sync" | "UUID"))
+            .collect();
+        if actual.fields.len() != projection.len() {
+            return Err(invalid("fetched upload changed its metadata fields"));
+        }
+        for (name, value) in projection {
+            let field = actual
+                .fields
+                .get(name)
+                .ok_or_else(|| invalid("missing fetched metadata"))?;
+            let same = if let (Some(a), Some(b)) = (field.as_date(), value.as_date()) {
+                let a = std::time::SystemTime::from(a);
+                let b = std::time::SystemTime::from(b);
+                a.duration_since(b).unwrap_or_else(|error| error.duration())
+                    <= std::time::Duration::from_micros(1)
+            } else {
+                field == value
+            };
+            if !same {
+                return Err(Error::Security(
+                    "fetched upload changed its credential metadata".into(),
+                ));
+            }
+        }
+        Ok(())
+    })
 }
 
 // Prevent an oversized plaintext from being fully allocated before rejecting it.

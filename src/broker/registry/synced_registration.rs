@@ -251,8 +251,8 @@ impl Registry {
         create_private_exclusive(&intent_path, &self.backend.seal(Purpose::Vault, &plain)?)?;
 
         // Allocate/protect before random bytes arrive. The scalar's canonical
-        // storage stays here until sealing finishes; library key temporaries
-        // zeroize on drop but are not claimed to be entirely locked memory.
+        // storage stays here until sealing finishes. Scalar parsing and public
+        // derivation execute on a temporary protected stack.
         let mut memory = keychain_sep_driver::memory::SecretBuffer::new()
             .map_err(|e| Error::io("synced key generation memory", e))?;
         let scalar = &mut memory.as_mut_array()[..32];
@@ -261,8 +261,12 @@ impl Registry {
             rand::rngs::OsRng
                 .try_fill_bytes(scalar)
                 .map_err(|_| Error::Security("synced key randomness unavailable".into()))?;
-            if let Ok(secret) = p256::SecretKey::from_slice(scalar) {
-                public = Some(secret.public_key().to_encoded_point(false));
+            public = crate::security::secret_compute(|| {
+                Ok(p256::SecretKey::from_slice(scalar)
+                    .ok()
+                    .map(|secret| secret.public_key().to_encoded_point(false)))
+            })?;
+            if public.is_some() {
                 break;
             }
         }

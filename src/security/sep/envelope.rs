@@ -18,12 +18,14 @@ const MAX_SEALED: usize = 4096;
 type Cipher = AesGcm<aes::Aes256, U16>;
 
 pub fn seal_item(public_sec1: &[u8], context: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
-    seal_with_ephemeral(
-        public_sec1,
-        context,
-        plaintext,
-        &SecretKey::random(&mut OsRng),
-    )
+    crate::security::secret_compute(|| {
+        seal_with_ephemeral(
+            public_sec1,
+            context,
+            plaintext,
+            &SecretKey::random(&mut OsRng),
+        )
+    })
 }
 
 fn seal_with_ephemeral(

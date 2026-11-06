@@ -1,6 +1,9 @@
 //! Dedicated locked, dump-excluded memory for ioctl plaintext delivery.
 //! This does not cover copies made by a caller or a cryptographic library.
 
+mod stack;
+pub use stack::with_secret_stack;
+
 use std::io;
 use std::ptr::NonNull;
 use zeroize::Zeroize;
@@ -127,6 +130,12 @@ mod tests {
             // SAFETY: only this isolated test child changes its process limit.
             assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &limit) }, 0);
             assert!(LockedBuffer::<65536>::new().is_err());
+            let called = std::sync::atomic::AtomicBool::new(false);
+            assert!(
+                with_secret_stack(|| called.store(true, std::sync::atomic::Ordering::Release))
+                    .is_err()
+            );
+            assert!(!called.load(std::sync::atomic::Ordering::Acquire));
             return;
         }
         // Root may have CAP_IPC_LOCK and bypass RLIMIT_MEMLOCK altogether.

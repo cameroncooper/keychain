@@ -11,6 +11,18 @@ use crate::Result;
 pub use root::{FileRootKeySource, RootKeySource};
 pub use software::SoftwareFileBackend;
 
+/// Reviewed pure computations only: keep secret inputs in protected storage,
+/// return public/intentionally revealed output, and keep authorization on its
+/// owning thread. Stack setup failure never falls back to ordinary memory.
+pub(crate) fn secret_compute<F, T>(operation: F) -> Result<T>
+where
+    F: FnOnce() -> Result<T> + Send,
+    T: Send,
+{
+    keychain_sep_driver::memory::with_secret_stack(operation)
+        .map_err(|e| crate::Error::io("protected crypto stack", e))?
+}
+
 /// Shared selection path for all entry points. Unsupported protection fails closed.
 pub fn backend_for_config(
     config: &crate::config::Config,

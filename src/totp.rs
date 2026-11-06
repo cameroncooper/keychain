@@ -168,13 +168,20 @@ fn decode_form(input: &[u8], output: &mut [u8]) -> Option<usize> {
 }
 
 pub(crate) fn is_valid(uri: &str) -> bool {
-    Configuration::parse(uri).is_some()
+    keychain_sep_driver::memory::with_secret_stack(|| Configuration::parse(uri).is_some())
+        .unwrap_or(false)
 }
 
 /// Generate only the current code, never return its seed. Primary parser/seed
-/// buffers are locked, dump-excluded and wiped on all exits. HMAC/digest scratch
-/// and compiler copies are not individually locked or proven erased.
+/// buffers and the worker stack are locked, dump-excluded and wiped on exit.
+/// This does not promise erasure of register copies or unrelated heap storage.
 pub fn generate(uri: &str, at: u64) -> Option<GeneratedCode> {
+    keychain_sep_driver::memory::with_secret_stack(|| generate_inner(uri, at))
+        .ok()
+        .flatten()
+}
+
+fn generate_inner(uri: &str, at: u64) -> Option<GeneratedCode> {
     use hmac::{Hmac, Mac};
     use sha1::Sha1;
     use sha2::{Sha256, Sha512};

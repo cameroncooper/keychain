@@ -247,7 +247,7 @@ impl<'a> SelectedScalar<'a> {
     pub(super) fn from_biometric(record: &'a ProtectedRecord, scalar: &'a [u8]) -> Result<Self> {
         // This constructor is called only after real driver completion and the
         // exact item-binding check. Unit fixtures explicitly simulate that step.
-        checked_key(record, scalar)?;
+        crate::security::secret_compute(|| checked_key(record, scalar).map(drop))?;
         Ok(Self { record, scalar })
     }
     pub(super) fn sign(
@@ -311,34 +311,36 @@ fn checked_key(record: &ProtectedRecord, scalar: &[u8]) -> Result<SigningKey> {
 }
 
 /// Called only after this transaction's successful biometric decrypt and binding
-/// check. RustCrypto owns zeroize-on-drop key objects; compiler/library temporary
-/// copies are not promised to be completely erased or individually mlocked.
+/// check. Key objects and synchronous signing scratch run on the protected worker
+/// stack, which is wiped after joining. Heap/register copies remain out of scope.
 fn sign_scalar(
     record: &ProtectedRecord,
     scalar: &[u8],
     message: &[u8],
 ) -> Result<AuthorizedSignature> {
-    if scalar.len() != 32 || message.is_empty() || message.len() > 1024 * 1024 {
-        return Err(Error::InvalidData(
-            "invalid selected scalar or signing message bounds".into(),
-        ));
-    }
-    let key = checked_key(record, scalar)?;
-    let expected = *key.verifying_key();
-    let signature: Signature = key
-        .try_sign(message)
-        .map_err(|_| Error::Security("protected software signing failed".into()))?;
-    drop(key);
-    expected
-        .verify(message, &signature)
-        .map_err(|_| Error::Security("protected signature verification failed".into()))?;
-    Ok(AuthorizedSignature::new(
-        signature.to_der().as_bytes().to_vec(),
-        &record.credential.signing_key,
-        message,
-        true,
-        SigningProtection::SepProtectedSoftware,
-    ))
+    crate::security::secret_compute(|| {
+        if scalar.len() != 32 || message.is_empty() || message.len() > 1024 * 1024 {
+            return Err(Error::InvalidData(
+                "invalid selected scalar or signing message bounds".into(),
+            ));
+        }
+        let key = checked_key(record, scalar)?;
+        let expected = *key.verifying_key();
+        let signature: Signature = key
+            .try_sign(message)
+            .map_err(|_| Error::Security("protected software signing failed".into()))?;
+        drop(key);
+        expected
+            .verify(message, &signature)
+            .map_err(|_| Error::Security("protected signature verification failed".into()))?;
+        Ok(AuthorizedSignature::new(
+            signature.to_der().as_bytes().to_vec(),
+            &record.credential.signing_key,
+            message,
+            true,
+            SigningProtection::SepProtectedSoftware,
+        ))
+    })
 }
 
 #[cfg(test)]
