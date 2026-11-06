@@ -84,6 +84,33 @@ pub struct ProtectedRecord {
     pub diagnostic: bool,
     pub verified: bool,
 }
+impl ProtectedRecord {
+    pub(crate) fn validate(&self, id: &str, owner: u32) -> Result<()> {
+        if self.version != 1
+            || self.owner != owner
+            || self.credential.id != id
+            || self.revision == 0
+            || self.credential.provenance != PasskeyProvenance::Synced
+            || self.credential.signing_key.backend_id != "sep-protected-software-v1"
+            || self.credential.signing_key.key_id != id
+            || self.credential.signing_key.algorithm != KeyAlgorithm::P256
+            || self.credential.signing_key.usage != KeyUsage::WebAuthnSigning
+            || !(81..=4096).contains(&self.sealed.len())
+        {
+            return Err(Error::Security(
+                "protected record identity/policy mismatch".into(),
+            ));
+        }
+        item_binding(
+            owner,
+            self.revision,
+            &self.recipient_id,
+            &self.credential,
+            &self.public_sec1,
+        )?;
+        Ok(())
+    }
+}
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -407,28 +434,7 @@ impl Registry {
         }
         let plain = self.backend.open(Purpose::Vault, &data)?;
         let record: ProtectedRecord = serde_json::from_slice(&plain)?;
-        if record.version != 1
-            || record.owner != owner
-            || record.credential.id != id
-            || record.revision == 0
-            || record.credential.provenance != PasskeyProvenance::Synced
-            || record.credential.signing_key.backend_id != "sep-protected-software-v1"
-            || record.credential.signing_key.key_id != id
-            || record.credential.signing_key.algorithm != KeyAlgorithm::P256
-            || record.credential.signing_key.usage != KeyUsage::WebAuthnSigning
-            || !(81..=4096).contains(&record.sealed.len())
-        {
-            return Err(Error::Security(
-                "protected record identity/policy mismatch".into(),
-            ));
-        }
-        item_binding(
-            owner,
-            record.revision,
-            &record.recipient_id,
-            &record.credential,
-            &record.public_sec1,
-        )?;
+        record.validate(id, owner)?;
         Ok(record)
     }
     pub(crate) fn commit_verified(&self, expected: &ProtectedRecord) -> Result<()> {

@@ -53,21 +53,22 @@ fn seal_with_ephemeral(
     let material = derive_material(shared.raw_secret_bytes(), point.as_bytes());
     let cipher = Cipher::new_from_slice(&material[..32])
         .map_err(|_| Error::Security("SEP envelope cipher initialization failed".into()))?;
-    let mut envelope = Zeroizing::new(Vec::with_capacity(12 + context.len() + plaintext.len()));
-    envelope.extend_from_slice(MAGIC);
-    envelope.extend_from_slice(&(context.len() as u32).to_be_bytes());
-    envelope.extend_from_slice(context);
-    envelope.extend_from_slice(plaintext);
+    // Install the complete memory policy BEFORE copying any plaintext. In-place
+    // GCM overwrites this protected allocation; only ciphertext leaves it.
+    let mut memory = keychain_sep_driver::memory::SecretBuffer::new()
+        .map_err(|e| Error::io("SEP sealing plaintext memory", e))?;
+    let length = 12 + context.len() + plaintext.len();
+    let envelope = &mut memory.as_mut_array()[..length];
+    envelope[..8].copy_from_slice(MAGIC);
+    envelope[8..12].copy_from_slice(&(context.len() as u32).to_be_bytes());
+    envelope[12..12 + context.len()].copy_from_slice(context);
+    envelope[12 + context.len()..].copy_from_slice(plaintext);
     let tag = cipher
-        .encrypt_in_place_detached(
-            Nonce::<U16>::from_slice(&material[32..48]),
-            b"",
-            &mut envelope,
-        )
+        .encrypt_in_place_detached(Nonce::<U16>::from_slice(&material[32..48]), b"", envelope)
         .map_err(|_| Error::Security("SEP item encryption failed".into()))?;
     let mut sealed = Vec::with_capacity(65 + envelope.len() + tag.len());
     sealed.extend_from_slice(point.as_bytes());
-    sealed.extend_from_slice(&envelope);
+    sealed.extend_from_slice(envelope);
     sealed.extend_from_slice(&tag);
     Ok(sealed)
 }
