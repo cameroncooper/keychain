@@ -78,12 +78,27 @@ Metadata is rendered as plain text, with controls and bidi overrides removed fro
 presentation; domain fields use ASCII host serialization. The ordinary desktop
 window is not a compositor-protected security surface.
 
-A later structured prompt protocol should carry operation kind, RP ID, requested
-origin and storage policy as separate frozen broker-derived fields. RP ID and
-origin must be distinguished, full hostnames must remain inspectable, and origin
-must be described according to its actual browser-bridge trust boundary. Do not
-infer these values by parsing human action text, trust a client-supplied application
-label, or grant authorization through the GUI.
+The private prompt protocol carries an operation enum, selected account, typed
+WebAuthn/login target and storage policy. The broker constructs these fields from
+its validated request context and selected persisted metadata. The agent renders
+its own action labels; human action text is not an input and no caller-provided
+application label is accepted. Login records are labeled as a protected local
+copy rather than claiming cloud provenance absent from their broker metadata.
+Creation wording says "Save in iCloud", never that an upload already succeeded.
+
+WebAuthn RP IDs must be canonical ASCII hostnames and origins must be canonical
+HTTPS origins belonging to that RP. Control characters, bidi overrides, oversized
+values and incompatible operation/target/storage combinations are refused before
+capture. Passkey use/creation requires an origin; protection verification without
+a browser request deliberately does not invent one. Details shows the complete RP
+and full origin as "Requested origin · browser bridge"; it never calls the ultimate
+browser a verified requester. Long values remain inspectable in the scrollable
+content area; Cancel stays outside that area.
+
+The private wire version is 2. Rebuild/install broker, agent and diagnostic tools
+together; old or unknown wire versions fail closed without capture. This changes
+neither the credential/cache formats nor the browser native-messaging version.
+There is no compatibility fallback that reconstructs trusted data from prose.
 
 ## Validation and follow-up
 
@@ -94,7 +109,7 @@ fingerprint operations separately. Rendering tests do not substitute for a live
 biometric round trip. Keep the previous installed binaries until the replacement
 has passed the presentation checks.
 
-Follow-up: structured prompt fields, resizable panes and large-inventory
+Follow-up: resizable panes and large-inventory
 virtualization, comprehensive assistive-technology validation, deliberate clipboard
 copy with a documented clipboard-manager policy, GUI sync/setup and supported editing
 operations. Never expose an unsupported action just to reproduce a reference image.
@@ -174,3 +189,18 @@ once on the 16 GB development machine; the kernel killed a linker in the termina
 scope. A serial `cargo test --locked --features desktop-agent --workspace -j 1`
 subsequently passed. Desktop test instructions use one build job on this machine;
 no swap, global Cargo setting or desktop memory policy was changed.
+
+Structured-field validation on 2026-11-06: the workspace suite passed after the
+broker constructors were switched, and seven focused prompt tests passed after
+the shared agent decoder was added. These include wire-version refusal,
+operation/target/storage mismatch, canonical RP/origin checks, control/bidi bounds,
+spoofed application fields and creation wording. The serial release build,
+clippy (warnings denied) and formatting passed.
+
+The installed agent rejected root requests using the old wire version, an
+outside-RP origin and a spoofed application label; ordinary-user connections were
+also refused. A synthetic valid request displayed account/storage metadata;
+keyboard Tab/Space opened Details with full RP and origin, while the driver-status
+footer remained visible. Switching focus returned Cancel and closed the preview.
+No SEP operation, Apple request or saved credential change occurred. Normal
+inventory still contains the same five items; synced creation stays disabled.

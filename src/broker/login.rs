@@ -384,12 +384,12 @@ impl Broker {
                     ));
                 }
                 let authorization = self.native_authorization(
-                    Presentation {
+                    Presentation::login(
                         id,
-                        application: "Keychain".into(),
-                        action: format!("Verify protection for {}", record.metadata.domain),
-                        account: record.metadata.username.clone(),
-                    },
+                        PromptOperation::VerifyLoginProtection,
+                        &record.metadata.domain,
+                        &record.metadata.username,
+                    ),
                     canceled,
                     session,
                     false,
@@ -461,19 +461,19 @@ impl Broker {
         if field == RevealField::Totp && !record.metadata.has_totp {
             return Err(Error::Refused("login has no TOTP configured".into()));
         }
-        let action = match field {
-            RevealField::Password => "Reveal password",
-            RevealField::Notes => "Reveal notes",
-            RevealField::Totp => "Generate verification code",
-            RevealField::All => "Reveal password, notes and verification code",
+        let operation = match field {
+            RevealField::Password => PromptOperation::RevealPassword,
+            RevealField::Notes => PromptOperation::RevealNotes,
+            RevealField::Totp => PromptOperation::GenerateCode,
+            RevealField::All => PromptOperation::RevealLogin,
         };
         let authorization = self.native_authorization(
-            Presentation {
+            Presentation::login(
                 id,
-                application: "Keychain".into(),
-                action: format!("{action} for {}", record.metadata.domain),
-                account: record.metadata.username.clone(),
-            },
+                operation,
+                &record.metadata.domain,
+                &record.metadata.username,
+            ),
             canceled,
             session,
             false,

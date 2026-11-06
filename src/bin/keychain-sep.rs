@@ -258,12 +258,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let mut prompt = keychain::prompt::PromptSession::connect(
                 &path,
                 desktop_owner,
-                keychain::prompt::Presentation {
-                    id: uuid::Uuid::new_v4(),
-                    application: "Keychain diagnostic".into(),
-                    action: "Test the Cancel button".into(),
-                    account: "No fingerprint or SEP operation will run".into(),
-                },
+                keychain::prompt::Presentation::diagnostic(
+                    uuid::Uuid::new_v4(),
+                    keychain::prompt::PromptOperation::DiagnosticCancel,
+                    "No fingerprint or SEP operation will run",
+                ),
             )?;
             prompt.status("Click Cancel or press Escape")?;
             let deadline = std::time::Instant::now() + Duration::from_secs(60);
@@ -336,12 +335,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 Some(keychain::prompt::PromptSession::connect(
                     &path,
                     owner,
-                    keychain::prompt::Presentation {
-                        id: uuid::Uuid::new_v4(),
-                        application: "Keychain diagnostic".into(),
-                        action: "Decrypt a disposable test item".into(),
-                        account: "Saved SEP item recipient".into(),
-                    },
+                    keychain::prompt::Presentation::diagnostic(
+                        uuid::Uuid::new_v4(),
+                        keychain::prompt::PromptOperation::DiagnosticDecrypt,
+                        "Saved SEP item recipient",
+                    ),
                 )?)
             } else {
                 None
@@ -403,12 +401,11 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     keychain::prompt::PromptSession::connect(
                         &path,
                         owner,
-                        keychain::prompt::Presentation {
-                            id: uuid::Uuid::new_v4(),
-                            application: "Keychain diagnostic".into(),
-                            action: "Sign a disposable test message".into(),
-                            account: "Disposable SEP key".into(),
-                        },
+                        keychain::prompt::Presentation::diagnostic(
+                            uuid::Uuid::new_v4(),
+                            keychain::prompt::PromptOperation::DiagnosticSign,
+                            "Disposable SEP key",
+                        ),
                     )?,
                 )))
             } else {

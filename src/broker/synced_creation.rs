@@ -159,12 +159,14 @@ impl Broker {
             .into_iter()
             .find(|credential| context.excludes(credential));
         let authorization = self.native_authorization(
-            Presentation {
-                id: Uuid::new_v4(),
-                application: "Keychain".into(),
-                action: format!("Create a passkey for {} in iCloud", context.rp_id()),
-                account: context.username().into(),
-            },
+            Presentation::passkey(
+                Uuid::new_v4(),
+                PromptOperation::CreatePasskey,
+                context.rp_id(),
+                Some(context.origin()),
+                context.username(),
+                crate::model::PasskeyProvenance::Synced,
+            ),
             canceled,
             session,
             false,

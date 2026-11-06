@@ -165,3 +165,11 @@ between windows and quits after the existing idle timeout.
 The normal credential browser is a separate `keychain-gui` binary launched by
 `keychain gui`; it is not a system service. See [desktop design](../docs/DESKTOP-UI.md)
 for reveal limits and the optional Hyprland placement rule.
+
+
+Prompt protocol updates must deploy the broker and auth agent together. The
+current private wire version is 2 and deliberately rejects legacy prose-only
+presentations. Once no operation is active, restart the user agent and stop an
+idle broker service so socket activation loads the newly installed executable.
+The socket and registry remain in place; no re-pairing, migration or rejoin is
+needed. Diagnostic tools must also come from the matching build.

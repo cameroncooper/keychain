@@ -65,12 +65,14 @@ impl Broker {
                     .into_iter()
                     .find(|credential| context.excludes(credential));
                 let authorization = self.native_authorization(
-                    Presentation {
+                    Presentation::passkey(
                         id,
-                        application: "Keychain".into(),
-                        action: format!("Create a passkey for {} on this device", context.rp_id()),
-                        account: context.username().into(),
-                    },
+                        PromptOperation::CreatePasskey,
+                        context.rp_id(),
+                        Some(context.origin()),
+                        context.username(),
+                        PasskeyProvenance::DeviceBound,
+                    ),
                     canceled,
                     session,
                     false,

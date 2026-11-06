@@ -1,11 +1,14 @@
 //! GPUI presentation agent. Root-only socket requests; no SEP access or success grant.
 use super::*;
-use crate::prompt::{AgentEvent, DisplayEvent, Presentation, read_frame, write_frame};
+use crate::prompt::{
+    AgentEvent, DisplayEvent, Presentation, read_frame, read_presentation, write_frame,
+};
 use gpui_kit::assets::{AllAssets, IconName};
 use gpui_kit::component::{
     Icon, Theme,
     button::{Button, ButtonVariants},
 };
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 use std::cell::RefCell;
 use std::io;
@@ -42,14 +45,7 @@ fn listen(listener: UnixListener, output: mpsc::SyncSender<Event>) -> io::Result
             let _ = input.set_write_timeout(Some(Duration::from_secs(1)));
             let mut active_id = None;
             let _result = (|| -> io::Result<()> {
-                let DisplayEvent::Present {
-                    version: 1,
-                    request,
-                } = read_frame(&mut input)?
-                else {
-                    return Err(io::Error::other("expected presentation"));
-                };
-                request.validate()?;
+                let request = read_presentation(&mut input)?;
                 let id = request.id;
                 active_id = Some(id);
                 output
@@ -106,6 +102,7 @@ struct AuthPrompt {
     status: String,
     channel: Rc<RefCell<Channel>>,
     focus: FocusHandle,
+    details: bool,
     first_frame: bool,
     presented: bool,
     was_active: bool,
@@ -129,6 +126,42 @@ impl AuthPrompt {
         }
     }
 }
+impl AuthPrompt {
+    fn target_details(&self, palette: Palette) -> impl IntoElement {
+        use crate::prompt::PromptTarget;
+        let (label, value) = match self.request.target.as_ref() {
+            Some(PromptTarget::WebAuthn { rp_id, .. }) => ("Relying party", rp_id.as_str()),
+            Some(PromptTarget::Login { website }) => ("Website label", website.as_str()),
+            None => ("", ""),
+        };
+        div()
+            .w_full()
+            .mt_1()
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .text_center()
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .line_height(px(14.))
+                    .text_color(rgb(palette.muted))
+                    .child(label),
+            )
+            .child(display_text(value))
+            .when_some(self.request.requested_origin(), |body, origin| {
+                body.child(
+                    div()
+                        .mt_1()
+                        .text_size(px(11.))
+                        .line_height(px(14.))
+                        .text_color(rgb(palette.muted))
+                        .child("Requested origin · browser bridge"),
+                )
+                .child(origin.to_owned())
+            })
+    }
+}
 impl Render for AuthPrompt {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::current(cx);
@@ -142,6 +175,7 @@ impl Render for AuthPrompt {
             .text_color(rgb(palette.text))
             .font_family("sans-serif")
             .text_size(px(13.))
+            .line_height(px(18.))
             .track_focus(&self.focus)
             .on_key_down(|event, window, _| {
                 if event.keystroke.key == "escape" {
@@ -168,15 +202,35 @@ impl Render for AuthPrompt {
                             .child("Keychain"),
                     )
                     .child(
-                        Button::new("cancel")
-                            .label("Cancel")
-                            .ghost()
-                            .rounded(px(6.))
-                            .h(px(24.))
-                            .px_2()
-                            .text_size(px(12.))
-                            .bg(rgb(palette.tile))
-                            .on_click(|_, window, _| window.remove_window()),
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .when(self.request.target.is_some(), |header| {
+                                header.child(
+                                    Button::new("details")
+                                        .label(if self.details { "Back" } else { "Details" })
+                                        .ghost()
+                                        .h(px(24.))
+                                        .px_2()
+                                        .text_size(px(12.))
+                                        .on_click(cx.listener(|view, _, _, cx| {
+                                            view.details = !view.details;
+                                            cx.notify();
+                                        })),
+                                )
+                            })
+                            .child(
+                                Button::new("cancel")
+                                    .label("Cancel")
+                                    .ghost()
+                                    .rounded(px(6.))
+                                    .h(px(24.))
+                                    .px_2()
+                                    .text_size(px(12.))
+                                    .bg(rgb(palette.tile))
+                                    .on_click(|_, window, _| window.remove_window()),
+                            ),
                     ),
             )
             .child(
@@ -188,22 +242,32 @@ impl Render for AuthPrompt {
                     .flex()
                     .flex_col()
                     .items_center()
-                    .justify_center()
+                    .justify_start()
                     .px_8()
-                    .py_5()
+                    .py_2()
+                    .child(div().flex_1().min_h_0())
                     .child(
                         div()
                             .text_size(px(17.))
+                            .line_height(px(22.))
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_center()
-                            .child("Use your fingerprint"),
+                            .child(if self.details {
+                                "Request details"
+                            } else {
+                                self.request.operation.heading()
+                            }),
                     )
                     .child(
                         div()
                             .mt_2()
                             .text_center()
                             .line_height(px(18.))
-                            .child(display_text(&self.request.action)),
+                            .child(display_text(&if self.details {
+                                self.request.operation.label().into()
+                            } else {
+                                self.request.summary()
+                            })),
                     )
                     .child(
                         div()
@@ -212,13 +276,35 @@ impl Render for AuthPrompt {
                             .text_color(rgb(palette.muted))
                             .child(display_text(&self.request.account)),
                     )
+                    .when_some(self.request.storage_label(), |body, storage| {
+                        body.child(
+                            div()
+                                .mt_1()
+                                .text_size(px(11.))
+                                .line_height(px(14.))
+                                .text_color(rgb(palette.muted))
+                                .child(storage),
+                        )
+                    })
+                    .when(self.details, |body| {
+                        body.child(self.target_details(palette))
+                    })
+                    .child(div().flex_1().min_h_0()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .px_8()
+                    .pb_4()
                     .child(
-                        div().mt_4().mb_3().child(
-                            Icon::default()
-                                .data(include_bytes!("../../assets/fingerprint.svg"))
-                                .text_color(rgb(palette.fingerprint))
-                                .size(px(60.)),
-                        ),
+                        Icon::default()
+                            .data(include_bytes!("../../assets/fingerprint.svg"))
+                            .text_color(rgb(palette.fingerprint))
+                            .size(px(if self.details { 20. } else { 52. })),
                     )
                     .child(
                         div()
@@ -271,11 +357,18 @@ fn open_prompt(
                             window.remove_window();
                         }
                     });
+                let initial_status =
+                    if request.operation == crate::prompt::PromptOperation::DiagnosticCancel {
+                        "Click Cancel or press Escape — do not touch the reader"
+                    } else {
+                        "Preparing fingerprint reader…"
+                    };
                 AuthPrompt {
                     request,
                     channel,
                     focus,
-                    status: "Preparing fingerprint reader…".into(),
+                    status: initial_status.into(),
+                    details: false,
                     first_frame: false,
                     presented: false,
                     was_active: window.is_window_active(),

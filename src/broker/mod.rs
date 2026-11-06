@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 
-use crate::prompt::{Presentation, PromptSession};
+use crate::prompt::{Presentation, PromptOperation, PromptSession};
 use crate::security::authorization::AuthorizationRequirement;
 use crate::security::sep::{NativeSepProvider, sign_native};
 use crate::{Error, Result};
@@ -562,25 +562,28 @@ impl Broker {
             }
             None
         };
-        let action = if cancellation_test {
-            "Test cancellation — do not touch the reader".into()
-        } else {
-            context
-                .as_ref()
-                .map(|c| format!("Use your passkey for {}", c.rp_id))
-                .unwrap_or_else(|| "Sign a disposable test message".into())
-        };
-        let authorization = self.native_authorization(
-            Presentation {
+        let presentation = if let Some(context) = &context {
+            Presentation::passkey(
                 id,
-                application: "Keychain".into(),
-                action,
-                account: record.credential.username.clone(),
-            },
-            canceled,
-            session,
-            cancellation_test,
-        )?;
+                PromptOperation::UsePasskey,
+                &record.credential.rp_id,
+                Some(&context.origin),
+                &record.credential.username,
+                record.credential.provenance,
+            )
+        } else {
+            Presentation::diagnostic(
+                id,
+                if cancellation_test {
+                    PromptOperation::DiagnosticCancel
+                } else {
+                    PromptOperation::DiagnosticSign
+                },
+                "Disposable SEP key",
+            )
+        };
+        let authorization =
+            self.native_authorization(presentation, canceled, session, cancellation_test)?;
         let provider = authorization.provider(record.native_key, self.device.clone())?;
         let result = if let Some(context) = context {
             let public = provider.public_sec1()?;

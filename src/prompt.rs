@@ -18,24 +18,198 @@ pub mod activation;
 
 const MAX_FRAME: usize = 8192;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Private broker/agent protocol. Upgrade both artifacts together; no v1 fallback.
+pub const VERSION: u32 = 2;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PromptOperation {
+    UsePasskey,
+    CreatePasskey,
+    VerifyPasskeyProtection,
+    VerifyLoginProtection,
+    RevealPassword,
+    RevealNotes,
+    GenerateCode,
+    RevealLogin,
+    DiagnosticSign,
+    DiagnosticDecrypt,
+    DiagnosticCancel,
+}
+impl PromptOperation {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::UsePasskey => "Use a passkey",
+            Self::CreatePasskey => "Create a passkey",
+            Self::VerifyPasskeyProtection => "Verify passkey protection",
+            Self::VerifyLoginProtection => "Verify login protection",
+            Self::RevealPassword => "Reveal password",
+            Self::RevealNotes => "Reveal notes",
+            Self::GenerateCode => "Generate verification code",
+            Self::RevealLogin => "Reveal password, notes and verification code",
+            Self::DiagnosticSign => "Sign a disposable test message",
+            Self::DiagnosticDecrypt => "Decrypt a disposable test item",
+            Self::DiagnosticCancel => "Cancel without touching the fingerprint reader",
+        }
+    }
+    pub fn heading(self) -> &'static str {
+        if self == Self::DiagnosticCancel {
+            "Cancellation check"
+        } else {
+            "Use your fingerprint"
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PromptStorage {
+    ICloudSynced,
+    DeviceOnly,
+    ProtectedLocalCopy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum PromptTarget {
+    WebAuthn {
+        rp_id: String,
+        origin: Option<String>,
+    },
+    Login {
+        website: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Presentation {
     pub id: Uuid,
-    pub application: String,
-    pub action: String,
+    pub operation: PromptOperation,
     pub account: String,
+    pub target: Option<PromptTarget>,
+    pub storage: Option<PromptStorage>,
 }
 impl Presentation {
+    pub fn passkey(
+        id: Uuid,
+        operation: PromptOperation,
+        rp_id: &str,
+        origin: Option<&str>,
+        account: &str,
+        storage: crate::model::PasskeyProvenance,
+    ) -> Self {
+        Self {
+            id,
+            operation,
+            account: account.into(),
+            target: Some(PromptTarget::WebAuthn {
+                rp_id: rp_id.into(),
+                origin: origin.map(str::to_owned),
+            }),
+            storage: Some(match storage {
+                crate::model::PasskeyProvenance::Synced => PromptStorage::ICloudSynced,
+                crate::model::PasskeyProvenance::DeviceBound => PromptStorage::DeviceOnly,
+            }),
+        }
+    }
+    pub fn login(id: Uuid, operation: PromptOperation, website: &str, account: &str) -> Self {
+        Self {
+            id,
+            operation,
+            account: account.into(),
+            target: Some(PromptTarget::Login {
+                website: website.into(),
+            }),
+            storage: Some(PromptStorage::ProtectedLocalCopy),
+        }
+    }
+    pub fn diagnostic(id: Uuid, operation: PromptOperation, account: &str) -> Self {
+        Self {
+            id,
+            operation,
+            account: account.into(),
+            target: None,
+            storage: None,
+        }
+    }
+    pub fn storage_label(&self) -> Option<&'static str> {
+        match (self.operation, self.storage?) {
+            (PromptOperation::CreatePasskey, PromptStorage::ICloudSynced) => Some("Save in iCloud"),
+            (PromptOperation::CreatePasskey, PromptStorage::DeviceOnly) => {
+                Some("Save on this device only")
+            }
+            (_, PromptStorage::ICloudSynced) => Some("iCloud-synced"),
+            (_, PromptStorage::DeviceOnly) => Some("This device only"),
+            (_, PromptStorage::ProtectedLocalCopy) => Some("Protected local copy"),
+        }
+    }
+    pub fn summary(&self) -> String {
+        let label = self.operation.label();
+        match &self.target {
+            Some(PromptTarget::WebAuthn { rp_id, .. }) => format!("{label} for {rp_id}"),
+            Some(PromptTarget::Login { website }) if !website.is_empty() => {
+                format!("{label} for {website}")
+            }
+            _ => label.into(),
+        }
+    }
+    pub fn requested_origin(&self) -> Option<&str> {
+        match &self.target {
+            Some(PromptTarget::WebAuthn { origin, .. }) => origin.as_deref(),
+            _ => None,
+        }
+    }
     pub fn validate(&self) -> io::Result<()> {
-        if self.id.is_nil()
-            || self.application.is_empty()
-            || self.action.is_empty()
-            || [&self.application, &self.action, &self.account]
-                .iter()
-                .any(|s| s.len() > 512 || s.chars().any(char::is_control))
-        {
-            return Err(io::Error::other("invalid prompt presentation"));
+        let invalid = || io::Error::other("invalid prompt presentation");
+        let valid_text = |value: &str, maximum| {
+            value.len() <= maximum && !value.chars().any(|c| c.is_control() || matches!(c,
+            '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+        };
+        if self.id.is_nil() || !valid_text(&self.account, 512) {
+            return Err(invalid());
+        }
+        use PromptOperation as O;
+        match (&self.target, self.storage, self.operation) {
+            (
+                Some(PromptTarget::WebAuthn { rp_id, origin }),
+                Some(PromptStorage::ICloudSynced | PromptStorage::DeviceOnly),
+                O::UsePasskey | O::CreatePasskey | O::VerifyPasskeyProtection,
+            ) => {
+                if rp_id.is_empty()
+                    || rp_id.len() > 253
+                    || !rp_id.is_ascii()
+                    || rp_id.ends_with('.')
+                    || url::Host::parse(rp_id)
+                        .map(|h| h.to_string())
+                        .ok()
+                        .as_deref()
+                        != Some(rp_id)
+                {
+                    return Err(invalid());
+                }
+                match origin {
+                    Some(origin)
+                        if valid_text(origin, 2048)
+                            && crate::passkey::validate_origin_for_rp(origin, rp_id)
+                                .ok()
+                                .as_deref()
+                                == Some(origin) => {}
+                    None if self.operation == O::VerifyPasskeyProtection => {}
+                    _ => return Err(invalid()),
+                }
+            }
+            (
+                Some(PromptTarget::Login { website }),
+                Some(PromptStorage::ProtectedLocalCopy),
+                O::VerifyLoginProtection
+                | O::RevealPassword
+                | O::RevealNotes
+                | O::GenerateCode
+                | O::RevealLogin,
+            ) if valid_text(website, 1024) => {}
+            (None, None, O::DiagnosticSign | O::DiagnosticDecrypt | O::DiagnosticCancel) => {}
+            _ => return Err(invalid()),
         }
         Ok(())
     }
@@ -75,6 +249,19 @@ pub fn read_frame<T: DeserializeOwned>(stream: &mut UnixStream) -> io::Result<T>
     serde_json::from_slice(&bytes).map_err(io::Error::other)
 }
 
+/// Validate the complete private presentation before the agent opens a window.
+pub fn read_presentation(stream: &mut UnixStream) -> io::Result<Presentation> {
+    let DisplayEvent::Present {
+        version: VERSION,
+        request,
+    } = read_frame(stream)?
+    else {
+        return Err(io::Error::other("unsupported prompt protocol or message"));
+    };
+    request.validate()?;
+    Ok(request)
+}
+
 pub struct PromptSession {
     stream: UnixStream,
     id: Uuid,
@@ -111,7 +298,7 @@ impl PromptSession {
         write_frame(
             &mut stream,
             &DisplayEvent::Present {
-                version: 1,
+                version: VERSION,
                 request,
             },
         )?;
@@ -180,6 +367,162 @@ mod tests {
             )
             .is_err()
         );
+    }
+    fn assertion() -> Presentation {
+        Presentation::passkey(
+            Uuid::new_v4(),
+            PromptOperation::UsePasskey,
+            "example.com",
+            Some("https://login.example.com:8443"),
+            "alice",
+            crate::model::PasskeyProvenance::Synced,
+        )
+    }
+    #[test]
+    fn fields_preserve_the_complete_origin_and_creation_does_not_claim_saved_state()
+    -> io::Result<()> {
+        let mut request = assertion();
+        request.validate()?;
+        assert_eq!(
+            request.requested_origin(),
+            Some("https://login.example.com:8443")
+        );
+        assert_eq!(request.storage_label(), Some("iCloud-synced"));
+        let encoded = serde_json::to_vec(&request).map_err(io::Error::other)?;
+        let decoded: Presentation = serde_json::from_slice(&encoded).map_err(io::Error::other)?;
+        assert_eq!(request, decoded);
+        request.operation = PromptOperation::CreatePasskey;
+        request.validate()?;
+        assert_eq!(request.storage_label(), Some("Save in iCloud"));
+        request.storage = Some(PromptStorage::DeviceOnly);
+        assert_eq!(request.storage_label(), Some("Save on this device only"));
+        Ok(())
+    }
+    #[test]
+    fn unbound_or_misleading_prompt_fields_are_refused() {
+        let mut request = assertion();
+        request.operation = PromptOperation::RevealPassword;
+        assert!(request.validate().is_err());
+        request = assertion();
+        request.storage = Some(PromptStorage::ProtectedLocalCopy);
+        assert!(request.validate().is_err());
+        request = assertion();
+        request.target = None;
+        assert!(request.validate().is_err());
+        request = assertion();
+        request.id = Uuid::nil();
+        assert!(request.validate().is_err());
+        request = assertion();
+        request.account = "alice\u{202e}evil".into();
+        assert!(request.validate().is_err());
+        request = assertion();
+        request.account = "x".repeat(513);
+        assert!(request.validate().is_err());
+        request = assertion();
+        request.operation = PromptOperation::DiagnosticSign;
+        assert!(request.validate().is_err());
+    }
+    #[test]
+    fn origin_and_rp_canonicalization_prevent_displaying_a_different_site() {
+        for (rp, origin) in [
+            ("example.com", "https://example.com.evil.invalid"),
+            ("example.com", "https://example.com@evil.invalid"),
+            ("example.com", "https://example.com/path"),
+            ("example.com", "https://example.com?fake=1"),
+            ("example.com", "http://example.com"),
+            ("Example.com", "https://example.com"),
+            ("example.com.", "https://example.com"),
+            ("bücher.example", "https://xn--bcher-kva.example"),
+        ] {
+            let request = Presentation::passkey(
+                Uuid::new_v4(),
+                PromptOperation::UsePasskey,
+                rp,
+                Some(origin),
+                "alice",
+                crate::model::PasskeyProvenance::Synced,
+            );
+            assert!(request.validate().is_err(), "accepted {rp} / {origin}");
+        }
+        let request = Presentation::passkey(
+            Uuid::new_v4(),
+            PromptOperation::UsePasskey,
+            "xn--bcher-kva.example",
+            Some("https://xn--bcher-kva.example"),
+            "alice",
+            crate::model::PasskeyProvenance::Synced,
+        );
+        assert!(request.validate().is_ok());
+        let mut request = assertion();
+        if let Some(PromptTarget::WebAuthn { origin, .. }) = &mut request.target {
+            *origin = None;
+        }
+        assert!(request.validate().is_err());
+        request.operation = PromptOperation::VerifyPasskeyProtection;
+        assert!(request.validate().is_ok());
+        request.operation = PromptOperation::CreatePasskey;
+        assert!(request.validate().is_err());
+    }
+    #[test]
+    fn logins_and_diagnostics_do_not_claim_unproven_cloud_or_requester_identity() -> io::Result<()>
+    {
+        let mut login = Presentation::login(
+            Uuid::new_v4(),
+            PromptOperation::RevealPassword,
+            "Example login",
+            "alice",
+        );
+        login.validate()?;
+        assert_eq!(login.storage_label(), Some("Protected local copy"));
+        assert!(login.requested_origin().is_none());
+        login.storage = Some(PromptStorage::ICloudSynced);
+        assert!(login.validate().is_err());
+        let diagnostic = Presentation::diagnostic(
+            Uuid::new_v4(),
+            PromptOperation::DiagnosticCancel,
+            "Disposable key",
+        );
+        diagnostic.validate()?;
+        assert_eq!(diagnostic.operation.heading(), "Cancellation check");
+        let mut json = serde_json::to_value(diagnostic).map_err(io::Error::other)?;
+        json["application"] = "Verified browser".into();
+        assert!(serde_json::from_value::<Presentation>(json).is_err());
+        Ok(())
+    }
+    #[test]
+    fn agent_rejects_old_wire_versions_and_invalid_context_before_presentation() -> io::Result<()> {
+        for version in [1, VERSION + 1] {
+            let (mut sender, mut receiver) = UnixStream::pair()?;
+            write_frame(
+                &mut sender,
+                &DisplayEvent::Present {
+                    version,
+                    request: assertion(),
+                },
+            )?;
+            assert!(read_presentation(&mut receiver).is_err());
+        }
+        let (mut sender, mut receiver) = UnixStream::pair()?;
+        let mut request = assertion();
+        request.operation = PromptOperation::DiagnosticSign;
+        write_frame(
+            &mut sender,
+            &DisplayEvent::Present {
+                version: VERSION,
+                request,
+            },
+        )?;
+        assert!(read_presentation(&mut receiver).is_err());
+        let request = assertion();
+        write_frame(
+            &mut sender,
+            &DisplayEvent::Present {
+                version: VERSION,
+                request: request.clone(),
+            },
+        )?;
+        assert_eq!(read_presentation(&mut receiver)?, request);
+        Ok(())
     }
     #[test]
     fn peer_identity_comes_from_kernel() {

@@ -41,7 +41,8 @@ button on the successful biometric path.
 2. Resolve the eligible credential. Show a picker only when selection is needed;
    an unambiguous selected credential proceeds directly to authentication.
 3. The broker validates and freezes the operation. The session agent displays
-   requesting app, action, RP and selected account.
+   service identity, action, RP and selected account. The immediate process is not
+   proof of an ultimate browser identity; origin remains browser-bridge evidence.
 4. Once the prompt is visible, start the operation. Show preparation first and
    finger-placement guidance from actual driver status. A visible window or an
    opened descriptor alone does not mean the reader is ready.
@@ -67,7 +68,8 @@ retry; capture guidance within the existing request is not a hidden retry.
 
 Use the same agent for CLI and browser operations. Headless use needs an explicit
 non-GUI mode or an unavailable-UI error, never invisible capture. Do not cancel
-merely because the app loses focus: the prompt itself may move focus. Cancel on
+merely because the requesting app loses focus: the prompt itself may move focus.
+The GPUI prompt cancels when its own active window loses focus. Cancel on
 caller cancellation/disconnect, session lock/logout, agent disappearance or
 expiry. Suppress result delivery after cancellation even if hardware already
 executed; wait for cleanup before making the device available again.
@@ -589,3 +591,13 @@ creation/login and synced decrypt/software-signing now both have RP acceptance.
 This does not satisfy complete-chain reboot, source retirement, Rust-created
 iCloud save/atomicity or other-device use of a Rust-created key. The iCloud writer
 remains disabled and no service account has been enrolled yet.
+
+
+Structured prompt implementation: the broker now sends typed operation, target,
+selected account and storage fields, with canonical RP/origin validation. The
+agent owns copy and exposes full origin under Details with its actual browser-
+bridge trust boundary. Login copies do not claim cloud provenance, creation does
+not claim completed upload, and cancellation checks never display a touch request
+as their heading. Private wire version 2 is a coordinated broker/agent update;
+legacy prose-based presentation is rejected. See docs/DESKTOP-UI.md. This is not
+additional proof of the outstanding live SEP/reboot or Apple-write gates.

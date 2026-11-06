@@ -131,18 +131,19 @@ impl Broker {
         } else {
             None
         };
-        let action = if verify {
-            format!("Verify protection for {}", record.credential.rp_id)
-        } else {
-            format!("Use your passkey for {}", record.credential.rp_id)
-        };
         let authorization = self.native_authorization(
-            crate::prompt::Presentation {
+            crate::prompt::Presentation::passkey(
                 id,
-                application: "Keychain".into(),
-                action,
-                account: record.credential.username.clone(),
-            },
+                if verify {
+                    crate::prompt::PromptOperation::VerifyPasskeyProtection
+                } else {
+                    crate::prompt::PromptOperation::UsePasskey
+                },
+                &record.credential.rp_id,
+                context.as_ref().map(|c| c.origin.as_str()),
+                &record.credential.username,
+                record.credential.provenance,
+            ),
             canceled,
             session,
             false,
