@@ -1,7 +1,8 @@
 # Broker / Apple network worker boundary
 
 `src/apple/worker.rs` implements the socket protocol and broker-side `UploadIo`.
-It is not yet an installed production worker service or an enabled browser path.
+The separate worker executable/service and minimal credential export now exist;
+the broker account bootstrap/browser path is not enabled.
 The broker keeps its AF_UNIX-only service restriction. No Apple write or biometric
 capture was used to validate this transport.
 
@@ -84,13 +85,20 @@ raw data only. These tests do not establish live Apple atomicity or browser UV.
 
 ## Remaining production connection
 
-Implement the separate worker executable/service and explicit account bootstrap.
-Its identity/configuration and credential sources must be root controlled and
-scoped to the selected account/peer. Do not grant it the owner's home directory,
-reuse the ordinary owner socket, or accept owner-submitted snapshots/roots.
-Keep account authentication material in the worker and authenticated Octagon
-roots in the broker. Use the selected local Asahi Mac anisette helper; no remote
-provider or provisioning reset is authorized by this implementation.
+The [worker executable/service and credential bootstrap](../contrib/NETWORK-WORKER.md)
+now support a dedicated UID, encrypted systemd credential package and private
+local Mac anisette state. The export selects only the CloudKit token and existing
+ADI seed, not PET/passwords or account private keys. Startup refuses missing,
+changed or unsafe state and validates root-controlled helper/image inputs.
+An actual disposable systemd service has passed credential delivery, different-UID
+socket authentication, wrong owner/peer refusal and idle exit with synthetic data
+and non-loopback traffic denied. No real account package has been exported or
+applied, and live Apple authentication remains unverified.
+
+The broker's trusted account/Octagon-root bootstrap and worker start/connect
+configuration remain unfinished. Do not grant the worker the owner's home,
+reuse the owner socket or accept owner-submitted snapshots/roots. Keep account
+HTTP credentials in the worker and authenticated Octagon roots in the broker.
 
 Connect/handshake and perform the authenticated initial fetch before showing
 the biometric prompt. Use the coordinator's operation check throughout the

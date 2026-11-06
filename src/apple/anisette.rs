@@ -112,6 +112,12 @@ pub struct ManagedAnisette {
 
 impl ManagedAnisette {
     pub fn start(helper: &Path, paths: &AppPaths) -> Result<Self> {
+        Self::start_with_image(helper, paths, None)
+    }
+
+    /// A service can keep the public Apple image outside its private mutable
+    /// ADI state. Helper/image trust checks belong to its root-controlled setup.
+    pub fn start_with_image(helper: &Path, paths: &AppPaths, image: Option<&Path>) -> Result<Self> {
         let helper = validate_helper(helper)?;
         ensure_anisette_dir(paths)?;
         let listener = TcpListener::bind(("127.0.0.1", 0))
@@ -138,7 +144,10 @@ impl ManagedAnisette {
             .connect_timeout(Duration::from_secs(2))
             .timeout(Duration::from_secs(5))
             .build()?;
-        let child = Command::new(&helper)
+        let mut command = Command::new(&helper);
+        command
+            .env_remove("CREDENTIALS_DIRECTORY")
+            .env_remove("ENCRYPTED_CREDENTIALS_DIRECTORY")
             .env("KEYCHAIN_ANISETTE_NONCE", nonce.as_str())
             .arg("--host")
             .arg("127.0.0.1")
@@ -149,9 +158,11 @@ impl ManagedAnisette {
             .stdin(Stdio::null())
             // The upstream helper logs raw authentication headers at INFO.
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| Error::io(&helper, error))?;
+            .stderr(Stdio::null());
+        if let Some(image) = image {
+            command.arg("--coreadi").arg(image);
+        }
+        let child = command.spawn().map_err(|error| Error::io(&helper, error))?;
         let mut managed = Self {
             endpoint: format!("http://127.0.0.1:{port}/"),
             child,

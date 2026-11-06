@@ -25,6 +25,25 @@ pub struct AppleUploadIo<'a, 'provider> {
     client: Client,
 }
 impl<'a, 'provider> AppleUploadIo<'a, 'provider> {
+    pub(crate) fn for_worker(
+        transport: &'a CloudKitTransport<'provider>,
+        binding: Binding,
+    ) -> Result<Self> {
+        binding.validate()?;
+        if binding.zone.owner != transport.user_id
+            || binding.account_fingerprint != transport.account_fingerprint
+        {
+            return Err(Error::Security(
+                "worker scope differs from authenticated account".into(),
+            ));
+        }
+        Ok(Self {
+            transport,
+            binding,
+            tlks: vec![],
+            client: crate::apple::http::apple_write_client(Duration::from_secs(45))?,
+        })
+    }
     pub fn new(
         transport: &'a CloudKitTransport<'provider>,
         peer: &OctagonState,

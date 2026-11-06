@@ -1,0 +1,29 @@
+[Unit]
+Description=Keychain account-scoped Apple network worker
+
+[Service]
+Type=exec
+User=keychain-network
+Group=keychain-network
+ExecStart=/usr/libexec/keychain/keychain-network-worker serve
+LoadCredentialEncrypted=network-account:/etc/keychain/network-account.cred
+RuntimeDirectory=keychain-network
+RuntimeDirectoryMode=0700
+StateDirectory=keychain-network
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LimitCORE=0
+LimitMEMLOCK=1M
+TimeoutStopSec=5
+# Explicitly started before broker capture; exits after its idle timeout.
+# No Restart or Install target: never replay writes or run persistently by default.

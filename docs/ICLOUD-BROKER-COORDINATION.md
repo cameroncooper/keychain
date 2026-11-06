@@ -71,7 +71,9 @@ Raw CloudKit messages cross this boundary; roots stay local to the broker and
 reply validation/fetch verification still run there. The worker independently
 checks canonical request scope before HTTP. A disposable different-UID process
 test verifies the real kernel peer checks and handshake. The production worker
-service/account bootstrap and browser connection remain unfinished. The UploadIo
+service and selective credential export now exist; its actual systemd startup
+test passed with synthetic data. Broker account/root bootstrap, worker startup
+and browser connection remain unfinished. The UploadIo
 supplied to this coordinator is still a trusted internal dependency, not an owner
 RPC. Direct AppleUploadIo inside the privileged broker remains prohibited; its
 installed AF_UNIX-only restrictions are retained. Start/authenticate the worker

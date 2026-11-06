@@ -22,6 +22,26 @@ const MAX_HEADER: usize = 16 * 1024;
 const MAX_PAYLOAD: usize = 64 * 1024 * 1024;
 const IO_TICK: Duration = Duration::from_millis(40);
 
+pub mod service;
+
+/// Static account selection supplied by trusted service credentials. Per-call
+/// transaction/browser bindings arrive only from the authenticated root broker.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AccountScope {
+    pub owner: u32,
+    pub account_fingerprint: String,
+    pub peer_id: String,
+    pub zone: ZoneIdentity,
+}
+impl AccountScope {
+    fn accepts(&self, binding: &Binding) -> bool {
+        self.owner == binding.owner
+            && self.account_fingerprint == binding.account_fingerprint
+            && self.peer_id == binding.peer_id
+            && self.zone == binding.zone
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum Kind {
@@ -98,7 +118,7 @@ impl<'a> Channel<'a> {
     fn frames(&mut self) -> Frames<'_> {
         Frames {
             stream: &mut self.stream,
-            binding: &self.binding,
+            binding: Some(&self.binding),
             deadline: self.deadline,
             check: self.check,
         }
@@ -122,7 +142,7 @@ impl<'a> Channel<'a> {
 /// the call, and no closure containing biometric authorization is persisted.
 struct Frames<'a> {
     stream: &'a mut UnixStream,
-    binding: &'a Binding,
+    binding: Option<&'a Binding>,
     deadline: Instant,
     check: &'a dyn Fn() -> Result<()>,
 }
@@ -168,7 +188,10 @@ impl Frames<'_> {
         }
         let mut bytes = serde_json::to_vec(&Header {
             version: 1,
-            binding: self.binding.clone(),
+            binding: self
+                .binding
+                .ok_or_else(|| invalid("unbound outgoing frame"))?
+                .clone(),
             step,
             kind,
             length: body.len(),
@@ -199,6 +222,10 @@ impl Frames<'_> {
         self.guard()
     }
     fn read(&mut self, step: u64) -> Result<(Kind, Vec<u8>)> {
+        let (header, body) = self.envelope(step)?;
+        Ok((header.kind, body))
+    }
+    fn envelope(&mut self, step: u64) -> Result<(Header, Vec<u8>)> {
         let mut size = [0u8; 4];
         self.transfer(&mut size, false)?;
         let size = u32::from_be_bytes(size) as usize;
@@ -209,13 +236,19 @@ impl Frames<'_> {
         self.transfer(&mut bytes, false)?;
         let header: Header = serde_json::from_slice(&bytes)?;
         if header.version != 1
-            || &header.binding != self.binding
+            || self
+                .binding
+                .is_some_and(|binding| &header.binding != binding)
             || header.step != step
             || header.length > MAX_PAYLOAD
         {
             return Err(invalid(
                 "version, scope, sequence or payload bounds mismatch",
             ));
+        }
+        if self.binding.is_none() && (step != 0 || header.kind != Kind::Hello || header.length != 0)
+        {
+            return Err(invalid("only the initial empty handshake may select scope"));
         }
         if matches!(
             header.kind,
@@ -230,7 +263,7 @@ impl Frames<'_> {
             .map_err(|_| invalid("payload allocation failed"))?;
         payload.resize(header.length, 0);
         self.transfer(&mut payload, false)?;
-        Ok((header.kind, payload))
+        Ok((header, payload))
     }
 }
 
@@ -340,7 +373,7 @@ impl<'a> WorkerClient<'a> {
             };
             let mut frames = Frames {
                 stream: &mut self.channel.stream,
-                binding: &self.channel.binding,
+                binding: Some(&self.channel.binding),
                 deadline: self.channel.deadline,
                 check: &combined,
             };
@@ -388,8 +421,20 @@ pub fn serve(
     backend: &mut dyn NetworkBackend,
     deadline: Instant,
 ) -> Result<()> {
+    authenticate_broker(&stream)?;
+    let check = || Ok(());
+    let mut channel = Channel::new(stream, backend.binding().clone(), deadline, &check)?;
+    let (kind, _) = channel.read(0)?;
+    if kind != Kind::Hello {
+        return Err(invalid("missing initial handshake"));
+    }
+    channel.write(0, Kind::Hello, &[])?;
+    serve_bound(&mut channel, backend)
+}
+
+fn authenticate_broker(stream: &UnixStream) -> Result<()> {
     if keychain_sep_driver::peer::effective_uid() == 0
-        || keychain_sep_driver::peer::credentials(&stream)
+        || keychain_sep_driver::peer::credentials(stream)
             .map_err(|e| Error::io("broker peer credentials", e))?
             .uid
             != 0
@@ -398,13 +443,46 @@ pub fn serve(
             "worker requires a privileged broker peer and a separate service UID",
         ));
     }
+    Ok(())
+}
+
+/// Accept a dynamic transaction only within the service's fixed account scope.
+/// No backend (and hence no Apple request) is constructed for a wrong scope.
+pub fn serve_account<B: NetworkBackend>(
+    mut stream: UnixStream,
+    scope: &AccountScope,
+    backend: impl FnOnce(Binding) -> Result<B>,
+    deadline: Instant,
+) -> Result<()> {
+    authenticate_broker(&stream)?;
+    stream
+        .set_read_timeout(Some(IO_TICK))
+        .map_err(|e| Error::io("worker timeout", e))?;
+    stream
+        .set_write_timeout(Some(IO_TICK))
+        .map_err(|e| Error::io("worker timeout", e))?;
     let check = || Ok(());
-    let mut channel = Channel::new(stream, backend.binding().clone(), deadline, &check)?;
-    let (kind, _) = channel.read(0)?;
-    if kind != Kind::Hello {
-        return Err(invalid("missing initial handshake"));
+    let (header, _) = Frames {
+        stream: &mut stream,
+        binding: None,
+        deadline,
+        check: &check,
     }
+    .envelope(0)?;
+    header.binding.validate()?;
+    if !scope.accepts(&header.binding) {
+        return Err(invalid("broker selected another account/peer/owner/zone"));
+    }
+    let mut backend = backend(header.binding.clone())?;
+    if backend.binding() != &header.binding {
+        return Err(invalid("backend changed the authenticated scope"));
+    }
+    let mut channel = Channel::new(stream, header.binding, deadline, &check)?;
     channel.write(0, Kind::Hello, &[])?;
+    serve_bound(&mut channel, &mut backend)
+}
+
+fn serve_bound(channel: &mut Channel<'_>, backend: &mut dyn NetworkBackend) -> Result<()> {
     for step in 1..=4096 {
         let (kind, request) = channel.read(step)?;
         let result = match kind {
