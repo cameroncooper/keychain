@@ -63,6 +63,7 @@ pub enum Purpose {
     SyncUpload = 8,
     BrokerAccount = 9,
     BrokerLogin = 10,
+    VaultIndex = 11,
 }
 
 impl Purpose {
@@ -78,6 +79,7 @@ impl Purpose {
             8 => Ok(Self::SyncUpload),
             9 => Ok(Self::BrokerAccount),
             10 => Ok(Self::BrokerLogin),
+            11 => Ok(Self::VaultIndex),
             _ => Err(crate::Error::InvalidData(format!(
                 "unknown encrypted-state purpose {value}"
             ))),
@@ -96,6 +98,7 @@ impl Purpose {
             Self::SyncUpload => b"sync-upload",
             Self::BrokerAccount => b"broker-account",
             Self::BrokerLogin => b"broker-login",
+            Self::VaultIndex => b"vault-index",
         }
     }
 }

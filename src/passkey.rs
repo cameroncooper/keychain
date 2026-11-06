@@ -97,12 +97,14 @@ pub fn reconcile_synced_passkeys(
     previous: &[PasskeyCredential],
     backend: &dyn SecurityBackend,
     socket: Option<&std::path::Path>,
+    login_ids: &[String],
 ) -> Result<Vec<PasskeyCredential>> {
     reconcile_with(
         recovered,
         previous,
         backend,
         socket.is_some(),
+        login_ids,
         |operation| {
             let socket = socket.ok_or_else(|| {
                 Error::Config("protected passkeys require their configured broker for sync".into())
@@ -117,6 +119,7 @@ fn reconcile_with(
     previous: &[PasskeyCredential],
     backend: &dyn SecurityBackend,
     has_broker: bool,
+    login_ids: &[String],
     mut call: impl FnMut(crate::broker::Operation) -> Result<serde_json::Value>,
 ) -> Result<Vec<PasskeyCredential>> {
     use crate::broker::{Operation, registry::ProtectionState};
@@ -125,6 +128,11 @@ fn reconcile_with(
     let mut result = Vec::with_capacity(recovered.len() + previous.len());
     let mut seen = std::collections::BTreeSet::new();
     for recovered in recovered {
+        if login_ids.contains(&recovered.record_id) {
+            return Err(Error::Security(
+                "synced login/passkey identity collision".into(),
+            ));
+        }
         if !seen.insert(recovered.record_id.clone()) {
             return Err(Error::InvalidData("duplicate synced passkey record".into()));
         }
@@ -196,10 +204,15 @@ fn reconcile_with(
         .iter()
         .filter(|p| p.provenance == PasskeyProvenance::DeviceBound)
     {
+        if login_ids.contains(&local.id) {
+            return Err(Error::Security(
+                "synced login/local-passkey identity collision".into(),
+            ));
+        }
         result.push(local.clone());
     }
     if has_broker {
-        let records = result
+        let mut records: Vec<String> = result
             .iter()
             .filter(|p| {
                 p.provenance == PasskeyProvenance::Synced
@@ -207,6 +220,7 @@ fn reconcile_with(
             })
             .map(|p| p.id.clone())
             .collect();
+        records.extend_from_slice(login_ids);
         let updated = call(Operation::SetSyncedInventory { records })?;
         if updated.get("updated").and_then(serde_json::Value::as_bool) != Some(true) {
             return Err(Error::Security(
@@ -950,6 +964,7 @@ mod tests {
             &[protected.clone(), local.clone()],
             &backend,
             true,
+            &[],
             |op| match op {
                 Operation::ProtectionState { .. } => {
                     operations.push("state");
@@ -985,7 +1000,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
         let paths = AppPaths::for_test(dir.path()).unwrap_or_else(|e| panic!("paths: {e}"));
         let backend = SoftwareFileBackend::new(paths.clone());
-        let result = reconcile_with(vec![recovered], &[], &backend, true, |op| match op {
+        let result = reconcile_with(vec![recovered], &[], &backend, true, &[], |op| match op {
             Operation::ProtectionState { record } => {
                 assert_eq!(record, protected.id);
                 Ok(serde_json::to_value(ProtectionState {
@@ -1017,7 +1032,7 @@ mod tests {
         let paths = AppPaths::for_test(dir.path()).unwrap_or_else(|e| panic!("paths: {e}"));
         let backend = SoftwareFileBackend::new(paths.clone());
         let mut checked = false;
-        let result = reconcile_with(vec![recovered], &[], &backend, true, |op| match op {
+        let result = reconcile_with(vec![recovered], &[], &backend, true, &[], |op| match op {
             Operation::ProtectionState { .. } => {
                 assert!(!paths.keys_file().exists());
                 checked = true;
@@ -1054,7 +1069,7 @@ mod tests {
                 _ => (),
             }
             assert!(
-                reconcile_with(vec![recovered], &[], &backend, true, |op| {
+                reconcile_with(vec![recovered], &[], &backend, true, &[], |op| {
                     assert!(matches!(op, Operation::ProtectionState { .. }));
                     if case == 4 {
                         return Err(Error::Refused("broker unavailable".into()));
@@ -1093,6 +1108,7 @@ mod tests {
                 std::slice::from_ref(&protected),
                 &backend,
                 true,
+                &[],
                 |op| {
                     assert!(matches!(
                         op,
@@ -1108,9 +1124,14 @@ mod tests {
         );
         let (recovered, protected, _) = protected_fixture();
         assert!(
-            reconcile_with(vec![recovered], &[protected], &backend, false, |_| panic!(
-                "no broker"
-            ))
+            reconcile_with(
+                vec![recovered],
+                &[protected],
+                &backend,
+                false,
+                &[],
+                |_| panic!("no broker")
+            )
             .is_err()
         );
         assert!(!paths.keys_file().exists());
@@ -1124,15 +1145,27 @@ mod tests {
         let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
         let paths = AppPaths::for_test(dir.path()).unwrap_or_else(|e| panic!("paths: {e}"));
         let backend = SoftwareFileBackend::new(paths);
-        let result = reconcile_with(vec![], std::slice::from_ref(&local), &backend, true, |op| {
-            let crate::broker::Operation::SetSyncedInventory { records } = op else {
-                panic!("inventory only")
-            };
-            assert!(records.is_empty());
-            Ok(serde_json::json!({"updated":true}))
-        })
-        .unwrap_or_else(|e| panic!("reconcile empty: {e}"));
-        assert_eq!(result, vec![local]);
+        for login_ids in [
+            vec![],
+            vec!["00000000-0000-4000-8000-000000000001".to_owned()],
+        ] {
+            let result = reconcile_with(
+                vec![],
+                std::slice::from_ref(&local),
+                &backend,
+                true,
+                &login_ids,
+                |op| {
+                    let crate::broker::Operation::SetSyncedInventory { records } = op else {
+                        panic!("inventory only")
+                    };
+                    assert_eq!(records, login_ids);
+                    Ok(serde_json::json!({"updated":true}))
+                },
+            )
+            .unwrap_or_else(|e| panic!("reconcile empty: {e}"));
+            assert_eq!(result, vec![local.clone()]);
+        }
     }
 
     #[test]

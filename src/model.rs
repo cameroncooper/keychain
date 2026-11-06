@@ -144,6 +144,8 @@ pub struct OctagonState {
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct Credential {
+    #[serde(default)]
+    pub protected: bool,
     pub id: String,
     pub domain: String,
     pub username: String,

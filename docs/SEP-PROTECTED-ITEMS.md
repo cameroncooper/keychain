@@ -92,5 +92,6 @@ Same-key warm reboot remains an acceptance gate before retiring old copies.
 
 Selected password/notes/TOTP service support is now implemented separately using
 the same recipient/context envelope; see [login reveal](SEP-LOGIN-REVEAL.md).
-It does not expose passkey scalars or TOTP seeds. CLI login migration/routing,
-sync reconciliation and real biometric reveal acceptance remain unfinished.
+It does not expose passkey scalars or TOTP seeds. CLI login migration/routing and
+unchanged/deleted-item sync reconciliation are connected; changed-login verified
+updates and real biometric reveal acceptance remain unfinished.

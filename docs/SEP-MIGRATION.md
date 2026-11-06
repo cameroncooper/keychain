@@ -1,6 +1,6 @@
 # Selected-passkey migration
 
-`keychain passkey protect ID [--socket /run/keychain/broker-UID.sock]` preserves an
+`keychain protect ID [--socket /run/keychain/broker-UID.sock]` preserves an
 existing synced passkey's identity while switching its local signing reference
 to the biometric broker. The desktop requests a fingerprint. The account and
 Octagon encryption root remain separate. No Apple writes or replacement keys are

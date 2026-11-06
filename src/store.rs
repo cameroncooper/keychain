@@ -1,13 +1,46 @@
 use std::path::Path;
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::model::{AccountState, DeviceIdentity, OctagonState, VaultState};
 use crate::paths::{AppPaths, atomic_write_private, read_bounded};
 use crate::security::{Purpose, SecurityBackend};
 use crate::{Error, Result};
+
+/// Authenticated metadata only; its source hash binds the exact encrypted
+/// snapshot, so interrupted two-file publication cannot use stale selection data.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VaultIndex {
+    pub schema_version: u32,
+    pub source_sha256: String,
+    pub credentials: Vec<crate::broker::login::LoginMetadata>,
+    pub protected_login_ids: Vec<String>,
+    pub passkeys: Vec<crate::model::PasskeyCredential>,
+}
+impl VaultIndex {
+    pub fn from_vault(vault: &VaultState, source_sha256: String) -> Self {
+        Self {
+            schema_version: 1,
+            source_sha256,
+            protected_login_ids: vault
+                .credentials
+                .iter()
+                .filter(|item| item.protected)
+                .map(|item| item.id.clone())
+                .collect(),
+            credentials: vault
+                .credentials
+                .iter()
+                .map(crate::broker::login::LoginMetadata::from)
+                .collect(),
+            passkeys: vault.passkeys.clone(),
+        }
+    }
+}
 
 pub struct StateStore<'a> {
     paths: &'a AppPaths,
@@ -17,6 +50,10 @@ pub struct StateStore<'a> {
 impl<'a> StateStore<'a> {
     pub fn new(paths: &'a AppPaths, backend: &'a dyn SecurityBackend) -> Self {
         Self { paths, backend }
+    }
+
+    pub fn paths(&self) -> &AppPaths {
+        self.paths
     }
 
     fn save<T: Serialize>(&self, path: &Path, purpose: Purpose, value: &T) -> Result<()> {
@@ -84,7 +121,39 @@ impl<'a> StateStore<'a> {
                 atomic_write_private(&self.paths.previous_vault_file(), &encrypted)?;
             }
         }
-        self.save(&self.paths.vault_file(), Purpose::Vault, value)
+        let plain = Zeroizing::new(serde_json::to_vec(value)?);
+        let encrypted = self.backend.seal(Purpose::Vault, &plain)?;
+        let index = VaultIndex::from_vault(value, hex::encode(Sha256::digest(&encrypted)));
+        let metadata = Zeroizing::new(serde_json::to_vec(&index)?);
+        let index_envelope = self.backend.seal(Purpose::VaultIndex, &metadata)?;
+        atomic_write_private(&self.paths.vault_file(), &encrypted)?;
+        atomic_write_private(&self.paths.vault_index_file(), &index_envelope)
+    }
+    pub fn has_vault(&self) -> Result<bool> {
+        self.paths
+            .vault_file()
+            .try_exists()
+            .map_err(|error| Error::io(self.paths.vault_file(), error))
+    }
+    pub fn load_index(&self) -> Result<Option<VaultIndex>> {
+        if !self
+            .paths
+            .vault_index_file()
+            .try_exists()
+            .map_err(|e| Error::io(self.paths.vault_index_file(), e))?
+        {
+            return Ok(None);
+        }
+        let index: VaultIndex = self
+            .load(&self.paths.vault_index_file(), Purpose::VaultIndex)?
+            .ok_or_else(|| Error::Refused("cache metadata is missing".into()))?;
+        let ciphertext = read_bounded(&self.paths.vault_file())?;
+        if index.schema_version != 1
+            || index.source_sha256 != hex::encode(Sha256::digest(ciphertext))
+        {
+            return Err(Error::Refused("cache metadata does not match its snapshot; resume protection or sync to repair it".into()));
+        }
+        Ok(Some(index))
     }
     pub fn load_vault(&self) -> Result<Option<VaultState>> {
         let state: Option<VaultState> = self.load(&self.paths.vault_file(), Purpose::Vault)?;
@@ -119,6 +188,64 @@ mod tests {
     use super::*;
     use crate::security::SoftwareFileBackend;
     #[test]
+    fn index_contains_only_metadata_and_detects_interrupted_snapshot_publication() -> Result<()> {
+        let directory = tempdir().map_err(|e| Error::io("test", e))?;
+        let paths = AppPaths::for_test(directory.path())?;
+        let backend = SoftwareFileBackend::new(paths.clone());
+        let store = StateStore::new(&paths, &backend);
+        let item = crate::broker::login::tests::item();
+        let mut vault = VaultState {
+            schema_version: 1,
+            synced_at: 1,
+            credentials: vec![item.clone()],
+            passkeys: vec![],
+        };
+        store.save_vault(&vault)?;
+        let index = store
+            .load_index()?
+            .ok_or_else(|| Error::Security("test index missing".into()))?;
+        assert!(index.credentials[0].has_totp);
+        let metadata = serde_json::to_string(&index)?;
+        for secret in [&item.password, &item.notes, &item.totp_uri] {
+            assert!(!metadata.contains(secret));
+        }
+        let old_index = read_bounded(&paths.vault_index_file())?;
+        vault.credentials[0].title = "Changed metadata".into();
+        store.save_vault(&vault)?;
+        atomic_write_private(&paths.vault_index_file(), &old_index)?;
+        assert!(store.load_index().is_err());
+        assert_eq!(
+            store
+                .load_vault()?
+                .ok_or_else(|| Error::Security("test vault missing".into()))?
+                .credentials[0]
+                .title,
+            "Changed metadata"
+        );
+        // A deliberately authenticated synthetic index for an undecryptable
+        // ciphertext proves index lookup does not open the password vault.
+        let mut ciphertext = read_bounded(&paths.vault_file())?;
+        let last = ciphertext.len() - 1;
+        ciphertext[last] ^= 1;
+        atomic_write_private(&paths.vault_file(), &ciphertext)?;
+        let index = VaultIndex::from_vault(&vault, hex::encode(Sha256::digest(&ciphertext)));
+        let bytes = serde_json::to_vec(&index)?;
+        atomic_write_private(
+            &paths.vault_index_file(),
+            &backend.seal(Purpose::VaultIndex, &bytes)?,
+        )?;
+        assert!(store.load_vault().is_err());
+        assert_eq!(
+            store
+                .load_index()?
+                .ok_or_else(|| Error::Security("test index missing".into()))?
+                .credentials
+                .len(),
+            1
+        );
+        Ok(())
+    }
+    #[test]
     fn an_empty_replacement_preserves_the_last_nonempty_encrypted_snapshot() {
         let directory = tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
         let paths = AppPaths::for_test(directory.path()).unwrap_or_else(|e| panic!("paths: {e}"));
@@ -129,7 +256,8 @@ mod tests {
             synced_at: 1,
             passkeys: vec![],
             credentials: vec![crate::model::Credential {
-                id: "synthetic".into(),
+                protected: false,
+                id: "00000000-0000-4000-8000-000000000001".into(),
                 domain: "example.com".into(),
                 username: "user".into(),
                 password: "synthetic-secret".into(),

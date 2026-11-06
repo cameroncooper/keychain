@@ -86,10 +86,12 @@ process memory or prove that compiler copies have disappeared.
    custom cryptographic algorithms. Validate the actual supported backend and
    optimized build, including errors and panic/unwind. Keep the narrower memory
    claims above until this is established.
-2. Connect the implemented [selected login envelopes/reveal](SEP-LOGIN-REVEAL.md)
-   to CLI migration/routing and sync reconciliation. No raw TOTP seed or passkey
-   scalar belongs in reveal IPC. The existing software `show` still opens the
-   software vault until that routing is explicitly committed.
+2. Finish changed-login staging/verified-update recovery for the connected
+   [login migration/reveal](SEP-LOGIN-REVEAL.md). CLI protected selection now uses
+   the metadata index; the encrypted source journal remains an explicit recovery
+   copy. Content verification uses HMAC with a random key inside the sealed
+   payload; its primitive/compiler scratch shares the HMAC limits above. No raw
+   TOTP seed or passkey scalar belongs in reveal IPC.
 3. Exercise real protected assertion/registration, abort/session-lock/expiry and
    post-reboot persistence with user readiness and disposable credentials.
 4. Complete fresh account authentication/bootstrap and explicitly scoped Apple

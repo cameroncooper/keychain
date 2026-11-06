@@ -291,7 +291,7 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 208 passing tests, twenty-two ignored (three Apple network and nineteen privileged
+Workspace checks: 218 passing tests, twenty-two ignored (three Apple network and nineteen privileged
 integration tests). Ten registry, five coordination and one account-bootstrap test passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
 The separate-UID worker and systemd startup tests also pass (eighteen privileged
@@ -323,7 +323,7 @@ another client's claim. The goal is incomplete; native signing does not
 depend on root migration.
 
 Selected migration now has an encrypted local journal and an explicit
-`keychain passkey protect` command. Interrupted staging, server commit and local
+`keychain protect` command. Interrupted staging, server commit and local
 configuration updates resume without software fallback or source deletion.
 Sync preserves migrated references/native local records, checks recovered public
 identity, refreshes metadata and atomically updates a synced-eligibility inventory.
@@ -474,6 +474,11 @@ reply serialization and wiping typed client results. Login/passkey namespaces
 refuse collisions. TOTP query and seed decoding now use checked locked buffers;
 a zero-memlock child proves no unprotected fallback. Synthetic tests cover
 context/field substitution, partial reply cancellation, commit/reopen/interruption
-and missing-root/revision refusal. CLI login migration/show/list routing, sync
-reconciliation and real biometric reveal still need completion. Complete crypto
+and missing-root/revision refusal. CLI login migration/show/list/TOTP routing is
+now connected through a metadata-only authenticated cache index. Frozen keyed
+content tags prove exact source contents; recovery journals retain the encrypted
+source. Config publication precedes primary-cache redaction, and cache/index
+markers prevent lost-routing fallback. Unchanged/deleted logins share the managed
+sync inventory with passkeys. Changed-login verified update recovery and real
+biometric reveal still need completion. Complete crypto
 stack erasure is not established.

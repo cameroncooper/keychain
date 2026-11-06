@@ -21,9 +21,9 @@ pub struct LoginMetadata {
     pub has_notes: bool,
     pub has_totp: bool,
 }
-impl LoginMetadata {
-    pub fn from_credential(item: &Credential) -> Result<Self> {
-        let metadata = Self {
+impl From<&Credential> for LoginMetadata {
+    fn from(item: &Credential) -> Self {
+        Self {
             id: item.id.clone(),
             domain: item.domain.clone(),
             username: item.username.clone(),
@@ -33,7 +33,12 @@ impl LoginMetadata {
             has_password: !item.password.is_empty(),
             has_notes: !item.notes.is_empty(),
             has_totp: !item.totp_uri.is_empty(),
-        };
+        }
+    }
+}
+impl LoginMetadata {
+    pub fn from_credential(item: &Credential) -> Result<Self> {
+        let metadata = Self::from(item);
         metadata.validate()?;
         Ok(metadata)
     }
@@ -51,12 +56,13 @@ impl LoginMetadata {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoginImport {
     pub expected_revision: u64,
     pub recipient_id: String,
     pub metadata: LoginMetadata,
+    pub content_binding: String,
     pub sealed: Vec<u8>,
 }
 impl LoginImport {
@@ -72,9 +78,8 @@ impl LoginImport {
         let revision = expected_revision
             .checked_add(1)
             .ok_or_else(|| Error::InvalidData("login revision overflow".into()))?;
-        let binding = login_binding(owner, revision, &recipient.id, &metadata)?;
         let mut memory = SecretBuffer::new().map_err(|e| Error::io("login sealing memory", e))?;
-        let mut length = 14usize;
+        let mut length = 46usize;
         let fields = [&item.password, &item.notes, &item.totp_uri];
         for field in fields {
             length = length
@@ -84,14 +89,18 @@ impl LoginImport {
         }
         let bytes = &mut memory.as_mut_array()[..length];
         bytes[..8].copy_from_slice(MAGIC);
-        let mut offset = 14;
+        rand::RngCore::try_fill_bytes(&mut rand::rngs::OsRng, &mut bytes[8..40])
+            .map_err(|_| Error::Security("login content randomness unavailable".into()))?;
+        let mut offset = 46;
         for (index, field) in fields.iter().enumerate() {
-            bytes[8 + index * 2..10 + index * 2]
+            bytes[40 + index * 2..42 + index * 2]
                 .copy_from_slice(&(field.len() as u16).to_be_bytes());
             bytes[offset..offset + field.len()].copy_from_slice(field.as_bytes());
             offset += field.len();
         }
-        LoginView::parse(bytes, &metadata)?;
+        let content_binding = content_binding(bytes)?;
+        LoginView::parse(bytes, &metadata, &content_binding)?;
+        let binding = login_binding(owner, revision, &recipient.id, &metadata, &content_binding)?;
         let sealed = envelope::seal_item(
             &registry::decode_public(&recipient.public_sec1)?,
             &binding,
@@ -101,6 +110,7 @@ impl LoginImport {
             expected_revision,
             recipient_id: recipient.id.clone(),
             metadata,
+            content_binding,
             sealed,
         })
     }
@@ -111,10 +121,17 @@ pub(super) fn login_binding(
     revision: u64,
     recipient: &str,
     metadata: &LoginMetadata,
+    content_binding: &str,
 ) -> Result<Vec<u8>> {
     metadata.validate()?;
     crate::paths::validate_record_id(recipient)?;
-    if owner == 0 || revision == 0 {
+    if owner == 0
+        || revision == 0
+        || content_binding.len() != 64
+        || hex::decode(content_binding)
+            .map(|bytes| hex::encode(bytes) != content_binding)
+            .unwrap_or(true)
+    {
         return Err(Error::InvalidData("invalid login owner/revision".into()));
     }
     #[derive(Serialize)]
@@ -128,6 +145,7 @@ pub(super) fn login_binding(
         purpose: &'static str,
         algorithm: &'static str,
         metadata_sha256: String,
+        content_binding: &'a str,
     }
     Ok(serde_json::to_vec(&Binding {
         application: "cameroncooper.keychain",
@@ -139,7 +157,24 @@ pub(super) fn login_binding(
         purpose: "login-secret-fields",
         algorithm: "utf8-fields-v1",
         metadata_sha256: hex::encode(Sha256::digest(serde_json::to_vec(metadata)?)),
+        content_binding,
     })?)
+}
+
+// The random MAC key is sealed inside the payload. Publishing this tag does
+// not publish a salt/key for offline password guesses. A fresh import freezes
+// this tag before IPC so verified metadata can prove exact source content.
+fn content_binding(bytes: &[u8]) -> Result<String> {
+    use hmac::{Hmac, Mac};
+    if bytes.len() < 46 {
+        return Err(Error::Security("invalid protected login content".into()));
+    }
+    let mut mac = Hmac::<Sha256>::new_from_slice(&bytes[8..40])
+        .map_err(|_| Error::Security("login content MAC initialization failed".into()))?;
+    mac.update(b"cameroncooper.keychain/login-content/v1\0");
+    mac.update(&bytes[..8]);
+    mac.update(&bytes[40..]);
+    Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
 struct LoginView<'a> {
@@ -148,17 +183,17 @@ struct LoginView<'a> {
     totp_uri: &'a str,
 }
 impl<'a> LoginView<'a> {
-    fn parse(bytes: &'a [u8], metadata: &LoginMetadata) -> Result<Self> {
+    fn parse(bytes: &'a [u8], metadata: &LoginMetadata, expected_content: &str) -> Result<Self> {
         let invalid = || Error::Security("invalid protected login content".into());
-        if bytes.len() < 14 || &bytes[..8] != MAGIC {
+        if bytes.len() < 46 || &bytes[..8] != MAGIC || content_binding(bytes)? != expected_content {
             return Err(invalid());
         }
         let mut fields = [""; 3];
-        let mut offset = 14usize;
+        let mut offset = 46usize;
         for (index, field) in fields.iter_mut().enumerate() {
             let length = usize::from(u16::from_be_bytes([
-                bytes[8 + 2 * index],
-                bytes[9 + 2 * index],
+                bytes[40 + 2 * index],
+                bytes[41 + 2 * index],
             ]));
             let end = offset.checked_add(length).ok_or_else(invalid)?;
             *field = std::str::from_utf8(bytes.get(offset..end).ok_or_else(invalid)?)
@@ -227,6 +262,14 @@ impl<'a> RevealOutput<'a> {
     }
 }
 
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoginSelection {
+    pub id: String,
+    pub revision: u64,
+    pub content_binding: String,
+}
+
 /// Intentionally revealed fields in the requesting process. Owned response
 /// strings and codes wipe on drop; no seed/private-key field is accepted.
 #[derive(Serialize, Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
@@ -240,7 +283,7 @@ pub struct RevealedLogin {
 }
 pub fn reveal(
     socket: &Path,
-    record: &str,
+    selection: &LoginSelection,
     field: RevealField,
     canceled: Arc<AtomicBool>,
 ) -> Result<RevealedLogin> {
@@ -249,15 +292,20 @@ pub fn reveal(
     let reply: RevealedLogin = super::call_typed_cancelable(
         socket,
         Operation::RevealLogin {
-            record: record.into(),
+            selection: selection.clone(),
             field,
         },
         canceled,
     )?;
-    validate_reply(reply, record, field)
+    validate_reply(reply, selection, field)
 }
-fn validate_reply(reply: RevealedLogin, record: &str, field: RevealField) -> Result<RevealedLogin> {
-    if reply.id != record
+fn validate_reply(
+    reply: RevealedLogin,
+    selection: &LoginSelection,
+    field: RevealField,
+) -> Result<RevealedLogin> {
+    if reply.id != selection.id
+        || reply.revision != selection.revision
         || reply.revision == 0
         || (reply.password.is_some() != matches!(field, RevealField::Password | RevealField::All))
         || (reply.notes.is_some() != matches!(field, RevealField::Notes | RevealField::All))
@@ -344,6 +392,7 @@ impl Broker {
             record.revision,
             &record.recipient_id,
             &record.metadata,
+            &record.content_binding,
         )?;
         let mut memory = SecretBuffer::new().map_err(|e| Error::io("login plaintext memory", e))?;
         let length = key.decrypt_selected(
@@ -355,7 +404,7 @@ impl Broker {
         )?;
         authorization.check()?;
         let bytes = envelope::item_view(memory.as_array(), length, &binding)?;
-        let view = LoginView::parse(bytes, &record.metadata)?;
+        let view = LoginView::parse(bytes, &record.metadata, &record.content_binding)?;
         let result = operation(&view);
         drop(memory);
         authorization.check()?;
@@ -364,7 +413,7 @@ impl Broker {
     fn reveal_login(
         &self,
         id: Uuid,
-        record: &str,
+        selection: &LoginSelection,
         field: RevealField,
         canceled: Arc<AtomicBool>,
         deliver: impl FnOnce(&RevealOutput<'_>, &dyn Fn() -> Result<()>) -> Result<()>,
@@ -377,8 +426,19 @@ impl Broker {
             .active
             .try_lock()
             .map_err(|_| Error::Refused("another key operation is active".into()))?;
-        let record = self.registry.load_login(record, self.owner)?;
-        if !record.verified {
+        let record = self.registry.load_login(&selection.id, self.owner)?;
+        if record.revision != selection.revision
+            || record.content_binding != selection.content_binding
+        {
+            return Err(Error::Refused(
+                "selected login changed; select it again".into(),
+            ));
+        }
+        if !record.verified
+            || !self
+                .registry
+                .synced_record_enabled(&record.metadata.id, self.owner)?
+        {
             return Err(Error::Refused("login is not verified".into()));
         }
         if field == RevealField::Totp && !record.metadata.has_totp {
@@ -418,12 +478,12 @@ impl Broker {
         &self,
         stream: &mut UnixStream,
         id: Uuid,
-        record: &str,
+        selection: &LoginSelection,
         field: RevealField,
         canceled: Arc<AtomicBool>,
     ) -> Result<()> {
         let mut delivery_started = false;
-        let result = self.reveal_login(id, record, field, canceled.clone(), |output, check| {
+        let result = self.reveal_login(id, selection, field, canceled.clone(), |output, check| {
             write_reveal_response(stream, id, output, check, &mut delivery_started)
         });
         match result {
@@ -519,6 +579,7 @@ pub(crate) mod tests {
 
     pub(crate) fn item() -> Credential {
         Credential {
+            protected: false,
             id: Uuid::new_v4().to_string(),
             domain: "example.com".into(),
             username: "Synthetic login".into(),
@@ -576,9 +637,10 @@ pub(crate) mod tests {
             record.revision,
             &record.recipient_id,
             &record.metadata,
+            &record.content_binding,
         )?;
         let bytes = envelope::item_view(memory.as_array(), length, &binding)?;
-        LoginView::parse(bytes, &record.metadata)?;
+        LoginView::parse(bytes, &record.metadata, &record.content_binding)?;
         Ok(())
     }
     fn record(import: LoginImport) -> registry::LoginRecord {
@@ -588,6 +650,7 @@ pub(crate) mod tests {
             revision: import.expected_revision + 1,
             recipient_id: import.recipient_id,
             metadata: import.metadata,
+            content_binding: import.content_binding,
             sealed: import.sealed,
             verified: true,
         }
@@ -602,9 +665,15 @@ pub(crate) mod tests {
         }
         let record = record(import);
         let (memory, length) = decrypt(&record.sealed)?;
-        let binding = login_binding(1001, 1, &record.recipient_id, &record.metadata)?;
+        let binding = login_binding(
+            1001,
+            1,
+            &record.recipient_id,
+            &record.metadata,
+            &record.content_binding,
+        )?;
         let bytes = envelope::item_view(memory.as_array(), length, &binding)?;
-        let view = LoginView::parse(bytes, &record.metadata)?;
+        let view = LoginView::parse(bytes, &record.metadata, &record.content_binding)?;
         for field in [
             RevealField::Password,
             RevealField::Notes,
@@ -627,7 +696,11 @@ pub(crate) mod tests {
                 response
                     .result
                     .ok_or_else(|| Error::Security("test result missing".into()))?,
-                &record.metadata.id,
+                &LoginSelection {
+                    id: record.metadata.id.clone(),
+                    revision: record.revision,
+                    content_binding: record.content_binding.clone(),
+                },
                 field,
             )?;
             assert_eq!(
@@ -670,13 +743,47 @@ pub(crate) mod tests {
             serde_json::json!({"id":id,"revision":1,"password":"synthetic","totp":{"code":"123456","period":30,"expires":60}}),
         ] {
             let reply: RevealedLogin = serde_json::from_value(json)?;
-            assert!(validate_reply(reply, &id, RevealField::Password).is_err());
+            assert!(
+                validate_reply(
+                    reply,
+                    &LoginSelection {
+                        id: id.clone(),
+                        revision: 1,
+                        content_binding: "0".repeat(64)
+                    },
+                    RevealField::Password
+                )
+                .is_err()
+            );
         }
         assert!(serde_json::from_str::<RevealedLogin>(r#"{"id":"x","revision":1,"totp":{"code":"123456","period":30,"expires":60,"secret":"forbidden"}}"#).is_err());
         let import = LoginImport::seal(1001, &recipient()?, 0, &item())?;
         let mut json = serde_json::to_value(&import)?;
         json["verified"] = serde_json::Value::Bool(true);
         assert!(serde_json::from_value::<LoginImport>(json).is_err());
+        Ok(())
+    }
+    #[test]
+    fn content_tags_are_randomized_and_bind_every_private_field() -> Result<()> {
+        let item = item();
+        let recipient = recipient()?;
+        let first = LoginImport::seal(1001, &recipient, 0, &item)?;
+        let second = LoginImport::seal(1001, &recipient, 0, &item)?;
+        assert_ne!(first.content_binding, second.content_binding);
+        let (memory, length) = decrypt(&first.sealed)?;
+        let context = login_binding(
+            1001,
+            1,
+            &first.recipient_id,
+            &first.metadata,
+            &first.content_binding,
+        )?;
+        let bytes = envelope::item_view(memory.as_array(), length, &context)?;
+        for position in [8, 40, 46, bytes.len() - 1] {
+            let mut changed = zeroize::Zeroizing::new(bytes.to_vec());
+            changed[position] ^= 1;
+            assert_ne!(content_binding(&changed)?, first.content_binding);
+        }
         Ok(())
     }
     #[test]
@@ -699,23 +806,30 @@ pub(crate) mod tests {
                 changed.revision,
                 &changed.recipient_id,
                 &changed.metadata,
+                &changed.content_binding,
             )?;
             assert!(envelope::item_view(memory.as_array(), length, &binding).is_err());
         }
-        let binding = login_binding(1001, 1, &record.recipient_id, &record.metadata)?;
+        let binding = login_binding(
+            1001,
+            1,
+            &record.recipient_id,
+            &record.metadata,
+            &record.content_binding,
+        )?;
         let bytes = envelope::item_view(memory.as_array(), length, &binding)?;
         for mutation in 0..5 {
             let mut bad = zeroize::Zeroizing::new(bytes.to_vec());
             match mutation {
                 0 => bad[0] ^= 1,
-                1 => bad[8..10].copy_from_slice(&u16::MAX.to_be_bytes()),
+                1 => bad[40..42].copy_from_slice(&u16::MAX.to_be_bytes()),
                 2 => bad.push(0),
-                3 => bad[14] = 255,
+                3 => bad[46] = 255,
                 _ => {
                     bad.pop();
                 }
             }
-            assert!(LoginView::parse(&bad, &record.metadata).is_err());
+            assert!(LoginView::parse(&bad, &record.metadata, &content_binding(&bad)?).is_err());
         }
         item.totp_uri = "otpauth://totp/test?secret=INVALID0".into();
         assert!(LoginImport::seal(1001, &recipient()?, 0, &item).is_err());

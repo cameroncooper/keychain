@@ -91,6 +91,17 @@ configured. `show --json` emits the same secret-bearing result as one compact JS
 structured consumers. The narrower `totp` command emits only the current code and remains the safer
 choice for scripts that do not need the password.
 
+With a paired compatible SEP broker, `keychain protect ID` migrates one selected
+login or passkey and retains an encrypted software recovery copy. For protected
+logins, `show`/`show --json` request a fresh fingerprint and return the selected
+password, notes and current TOTP code; `totp` requests only the code. The seed is
+never revealed. Lookup uses an authenticated metadata index rather than opening
+the password vault. Missing broker/routing/index data cannot trigger software
+fallback. Unchanged protected logins and deletions reconcile during sync;
+changed protected login payloads currently refuse snapshot replacement pending
+the verified-update workflow. Real biometric login migration/reveal still needs
+validation. See [login protection and recovery](docs/SEP-LOGIN-REVEAL.md).
+
 The Apple ID password is read from the terminal only when a fresh Apple authentication is needed.
 It is never saved. The device passcode, 2FA code, PET, and decrypted transport keys are also never
 persisted. The account state retains only the reusable `mmeAuthToken` and `cloudKitToken` needed by

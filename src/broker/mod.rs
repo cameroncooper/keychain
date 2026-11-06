@@ -60,7 +60,7 @@ pub enum Operation {
         revision: u64,
     },
     RevealLogin {
-        record: String,
+        selection: login::LoginSelection,
         field: login::RevealField,
     },
     InspectCreation {
@@ -345,11 +345,11 @@ impl Broker {
             .map_err(|e| Error::io("broker request", e))?;
         let watch = ClientWatch::new(stream).map_err(|e| Error::io("broker request", e))?;
         let operation = match request.operation {
-            Operation::RevealLogin { record, field } => {
+            Operation::RevealLogin { selection, field } => {
                 return self.handle_reveal(
                     stream,
                     request.id,
-                    &record,
+                    &selection,
                     field,
                     watch.canceled.clone(),
                 );

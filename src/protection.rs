@@ -1,6 +1,8 @@
 //! Explicit selected-passkey migration. The local source remains as a recovery
 //! copy; normal references move only after the broker verifies the same identity.
 //! This module never deletes a scalar, replaces a root or performs Apple writes.
+pub mod login;
+
 use crate::broker::{
     Operation,
     registry::{ProtectedSummary, ProtectionState, Recipient},

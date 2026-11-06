@@ -37,6 +37,7 @@ impl RootKeySource for FileRootKeySource {
             self.paths.octagon_file(),
             self.paths.trust_repair_file(),
             self.paths.vault_file(),
+            self.paths.vault_index_file(),
             self.paths.previous_vault_file(),
             self.paths.protection_dir(),
         ]
@@ -104,6 +105,12 @@ mod tests {
             .unwrap_or_else(|e| panic!("write: {e}"));
         let source = FileRootKeySource::new(paths.clone());
         assert!(matches!(source.root_key(), Err(Error::Security(_))));
+        assert!(!paths.software_key_file().exists());
+        std::fs::remove_file(paths.vault_file())
+            .unwrap_or_else(|error| panic!("test remove: {error}"));
+        atomic_write_private(&paths.vault_index_file(), b"existing encrypted index")
+            .unwrap_or_else(|error| panic!("test index: {error}"));
+        assert!(FileRootKeySource::new(paths.clone()).root_key().is_err());
         assert!(!paths.software_key_file().exists());
     }
     #[test]

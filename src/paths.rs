@@ -131,6 +131,9 @@ impl AppPaths {
     pub fn vault_file(&self) -> PathBuf {
         self.state_dir.join("vault.enc")
     }
+    pub fn vault_index_file(&self) -> PathBuf {
+        self.state_dir.join("vault-index.enc")
+    }
     pub fn previous_vault_file(&self) -> PathBuf {
         self.state_dir.join("vault.previous.enc")
     }

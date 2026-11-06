@@ -415,6 +415,7 @@ pub fn from_items(items: &[DecryptedItem]) -> Result<Projection> {
             let sidecar_title = sidecar_text(sidecar.and_then(|value| value.get("title")));
             let sidecar_site = sidecar_primary_site(sidecar.and_then(|value| value.get("s_as")));
             Credential {
+                protected: false,
                 id: login.id,
                 domain: if sidecar_site.is_empty() {
                     login.domain

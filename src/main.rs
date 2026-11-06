@@ -81,6 +81,12 @@ enum Command {
     },
     /// Generate the current verification code for one credential.
     Totp { id: String },
+    /// Protect one existing login or passkey with biometrics, retaining recovery data.
+    Protect {
+        id: String,
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
     /// Inspect or exercise locally cached passkeys.
     Passkey {
         #[command(subcommand)]
@@ -98,12 +104,6 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum PasskeyCommand {
-    /// Move one existing synced passkey to biometric broker signing, retaining a recovery copy.
-    Protect {
-        id: String,
-        #[arg(long)]
-        socket: Option<PathBuf>,
-    },
     /// Produce a diagnostic WebAuthn assertion after an interactive approval.
     Assert {
         id: String,
@@ -166,10 +166,14 @@ fn run(cli: Cli) -> Result<()> {
         }
         Command::List { query, json } => command_list(query.as_deref(), json, &config, &store),
         Command::Show { id, json } => command_show(&id, json, &config, &store),
-        Command::Totp { id } => command_totp(&id, &store),
+        Command::Totp { id } => command_totp(&id, &config, &store),
+        Command::Protect { id, socket } => {
+            let _lock = StateLock::acquire(&paths)?;
+            command_protect(&id, socket, &paths, &config, backend, &store)
+        }
         Command::Passkey { command } => {
             let _lock = StateLock::acquire(&paths)?;
-            command_passkey(command, &paths, &config, backend, &store)
+            command_passkey(command, &config, backend, &store)
         }
         Command::Status => command_status(&paths, &config, backend, &store),
         Command::Logout { forget_device } => {
@@ -720,6 +724,17 @@ fn save_synced_projection(
 ) -> Result<()> {
     let count = projection.credentials.len();
     let previous = store.load_vault()?;
+    let (credentials, login_ids) = keychain::protection::login::reconcile_synced(
+        projection.credentials,
+        previous
+            .as_ref()
+            .map(|vault| vault.credentials.as_slice())
+            .unwrap_or_default(),
+        config,
+        store.paths(),
+        backend,
+        store,
+    )?;
     let passkeys = passkey::reconcile_synced_passkeys(
         projection.passkeys,
         previous
@@ -728,12 +743,13 @@ fn save_synced_projection(
             .unwrap_or_default(),
         backend,
         config.credential_broker.as_deref(),
+        &login_ids,
     )?;
     let passkey_count = passkeys.len();
     store.save_vault(&VaultState {
         schema_version: 1,
         synced_at: unix_now(),
-        credentials: projection.credentials,
+        credentials,
         passkeys,
     })?;
     println!("synced {count} credential(s)");
@@ -747,13 +763,21 @@ fn command_list(
     config: &Config,
     store: &StateStore<'_>,
 ) -> Result<()> {
-    let vault = visible_vault(config, store)?;
-    let query = query.unwrap_or_default();
-    let mut items: Vec<_> = credential::search(&vault.credentials, query)
-        .into_iter()
-        .map(VaultItem::Login)
+    let index = visible_index(config, store)?;
+    let query = query.unwrap_or_default().trim().to_ascii_lowercase();
+    let mut items: Vec<_> = index
+        .credentials
+        .iter()
+        .filter(|item| {
+            query.is_empty()
+                || item.id.to_ascii_lowercase().starts_with(&query)
+                || item.domain.to_ascii_lowercase().contains(&query)
+                || item.username.to_ascii_lowercase().contains(&query)
+                || item.title.to_ascii_lowercase().contains(&query)
+        })
+        .map(VaultItem::Metadata)
         .chain(
-            passkey::search(&vault.passkeys, query)
+            passkey::search(&index.passkeys, &query)
                 .into_iter()
                 .map(VaultItem::Passkey),
         )
@@ -765,56 +789,153 @@ fn command_list(
             .then_with(|| a.username().cmp(b.username()))
     });
     if json {
-        let mut output = Vec::with_capacity(items.len());
+        let mut output = Vec::new();
         for item in items {
             output.push(match item {
-                VaultItem::Login(item) => serde_json::json!({
-                    "schema_version": 1,
-                    "kind": "login",
-                    "id": item.id,
-                    "title": item.title,
-                    "domain": item.domain,
-                    "username": item.username,
-                    "totp": !item.totp_uri.is_empty(),
-                }),
-                VaultItem::Passkey(item) => serde_json::json!({
-                    "schema_version": 1,
-                    "kind": "passkey",
-                    "id": item.id,
-                    "rp_id": item.rp_id,
-                    "username": item.username,
-                    "display_name": item.display_name,
-                    "credential_fingerprint": passkey::credential_fingerprint(item)?,
-                    "algorithm": "ES256",
-                    "storage": item.provenance,
-                }),
-            });
+            VaultItem::Metadata(item)=>serde_json::json!({"schema_version":1,"kind":"login","id":item.id,
+                "title":item.title,"domain":item.domain,"username":item.username,"totp":item.has_totp}),
+            VaultItem::Passkey(item)=>serde_json::json!({"schema_version":1,"kind":"passkey","id":item.id,
+                "rp_id":item.rp_id,"username":item.username,"display_name":item.display_name,
+                "credential_fingerprint":passkey::credential_fingerprint(item)?,"algorithm":"ES256","storage":item.provenance}),
+            VaultItem::Login(_)=>return Err(Error::Security("unexpected secret-bearing list item".into())),
+        });
         }
         println!("{}", serde_json::to_string(&output)?);
-        return Ok(());
+    } else {
+        for item in items {
+            println!(
+                "{}\t{}\t{}\t{}\t{}",
+                short_id(item.id()),
+                item.kind(),
+                credential::printable(item.site()),
+                credential::printable(item.username()),
+                credential::printable(item.title())
+            );
+        }
     }
-    for item in items {
-        println!(
-            "{}\t{}\t{}\t{}\t{}",
-            short_id(item.id()),
-            item.kind(),
-            credential::printable(item.site()),
-            credential::printable(item.username()),
-            credential::printable(item.title()),
-        );
+    Ok(())
+}
+fn command_show(id: &str, json: bool, config: &Config, store: &StateStore<'_>) -> Result<()> {
+    let index = visible_index(config, store)?;
+    refuse_missing_login_match(config, &index, id)?;
+    match find_index_item(&index, id)? {
+        VaultItem::Metadata(item) => {
+            if let Some(route) = config
+                .protected_logins
+                .iter()
+                .find(|route| route.id == item.id)
+            {
+                command_show_protected(item, route, json, config)
+            } else {
+                let vault = require_vault(store)?;
+                command_show_login(find_credential(&vault.credentials, &item.id)?, json)
+            }
+        }
+        VaultItem::Passkey(item) => command_show_passkey(item, json),
+        VaultItem::Login(_) => Err(Error::Security(
+            "unexpected secret-bearing index item".into(),
+        )),
+    }
+}
+fn reveal_protected(
+    route: &keychain::config::LoginRoute,
+    field: keychain::broker::login::RevealField,
+    config: &Config,
+) -> Result<keychain::broker::login::RevealedLogin> {
+    let socket = config
+        .credential_broker
+        .as_ref()
+        .ok_or_else(|| Error::Config("protected login requires its broker".into()))?;
+    keychain::broker::login::reveal(
+        socket,
+        &keychain::broker::login::LoginSelection {
+            id: route.id.clone(),
+            revision: route.revision,
+            content_binding: route.content_binding.clone(),
+        },
+        field,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+}
+fn command_show_protected(
+    item: &keychain::broker::login::LoginMetadata,
+    route: &keychain::config::LoginRoute,
+    json: bool,
+    config: &Config,
+) -> Result<()> {
+    let value = reveal_protected(route, keychain::broker::login::RevealField::All, config)?;
+    let password = value
+        .password
+        .as_ref()
+        .map(|value| value.as_str())
+        .ok_or_else(|| Error::Security("broker omitted selected password field".into()))?;
+    let notes = value
+        .notes
+        .as_ref()
+        .map(|value| value.as_str())
+        .ok_or_else(|| Error::Security("broker omitted selected notes field".into()))?;
+    let now = unix_now().max(0) as u64;
+    if json {
+        #[derive(serde::Serialize)]
+        struct Code<'a> {
+            code: &'a str,
+            expires_at: u64,
+            period: u64,
+            remaining_seconds: u64,
+        }
+        #[derive(serde::Serialize)]
+        struct Show<'a> {
+            schema_version: u32,
+            kind: &'static str,
+            id: &'a str,
+            title: &'a str,
+            domain: &'a str,
+            username: &'a str,
+            password: &'a str,
+            notes: &'a str,
+            totp: Option<Code<'a>>,
+        }
+        let output = Show {
+            schema_version: 1,
+            kind: "login",
+            id: &item.id,
+            title: &item.title,
+            domain: &item.domain,
+            username: &item.username,
+            password,
+            notes,
+            totp: value.totp.as_ref().map(|code| Code {
+                code: &code.code,
+                expires_at: code.expires,
+                period: code.period,
+                remaining_seconds: code.expires.saturating_sub(now),
+            }),
+        };
+        serde_json::to_writer(std::io::stdout().lock(), &output)?;
+        println!();
+    } else {
+        println!("id: {}", item.id);
+        println!("title: {}", credential::printable(&item.title));
+        println!("domain: {}", credential::printable(&item.domain));
+        println!("username: {}", credential::printable(&item.username));
+        println!("password: {password}");
+        if !notes.is_empty() {
+            let printable = zeroize::Zeroizing::new(credential::printable(notes));
+            println!("notes: {}", printable.as_str());
+        }
+        if let Some(code) = &value.totp {
+            println!(
+                "totp: {} ({}s remaining)",
+                code.code,
+                code.expires.saturating_sub(now)
+            );
+        }
     }
     Ok(())
 }
 
-fn command_show(id: &str, json: bool, config: &Config, store: &StateStore<'_>) -> Result<()> {
-    let vault = visible_vault(config, store)?;
-    match find_vault_item(&vault, id)? {
-        VaultItem::Login(item) => command_show_login(item, json),
-        VaultItem::Passkey(item) => command_show_passkey(item, json),
-    }
-}
-
 fn command_show_login(item: &Credential, json: bool) -> Result<()> {
+    require_software_login(item)?;
     let now = unix_now().max(0) as u64;
     let totp = if item.totp_uri.is_empty() {
         None
@@ -909,45 +1030,88 @@ fn command_show_passkey(item: &PasskeyCredential, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn command_totp(id: &str, store: &StateStore<'_>) -> Result<()> {
-    let vault = require_vault(store)?;
-    let item = find_credential(&vault.credentials, id)?;
-    let code = keychain::totp::generate(&item.totp_uri, unix_now() as u64)
-        .ok_or_else(|| Error::InvalidData("credential has no usable TOTP configuration".into()))?;
-    println!("{}", code.code);
+fn require_software_login(item: &Credential) -> Result<()> {
+    if item.protected {
+        return Err(Error::Refused(
+            "this login requires biometric verification through its broker".into(),
+        ));
+    }
     Ok(())
 }
 
-fn command_passkey(
-    command: PasskeyCommand,
+fn command_totp(id: &str, config: &Config, store: &StateStore<'_>) -> Result<()> {
+    let index = visible_index(config, store)?;
+    refuse_missing_login_match(config, &index, id)?;
+    let VaultItem::Metadata(item) = find_index_item(&index, id)? else {
+        return Err(Error::Config("selected item is not a login".into()));
+    };
+    if let Some(route) = config
+        .protected_logins
+        .iter()
+        .find(|route| route.id == item.id)
+    {
+        let value = reveal_protected(route, keychain::broker::login::RevealField::Totp, config)?;
+        let code = value
+            .totp
+            .as_ref()
+            .ok_or_else(|| Error::Security("broker omitted selected verification code".into()))?;
+        println!("{}", code.code);
+    } else {
+        let vault = require_vault(store)?;
+        let item = find_credential(&vault.credentials, &item.id)?;
+        require_software_login(item)?;
+        let code = keychain::totp::generate(&item.totp_uri, unix_now().max(0) as u64).ok_or_else(
+            || Error::InvalidData("credential has no usable TOTP configuration".into()),
+        )?;
+        println!("{}", code.code);
+    }
+    Ok(())
+}
+fn command_protect(
+    id: &str,
+    socket: Option<PathBuf>,
     paths: &AppPaths,
     config: &Config,
     backend: &dyn SecurityBackend,
     store: &StateStore<'_>,
 ) -> Result<()> {
-    match command {
-        PasskeyCommand::Protect { id, socket } => {
-            let vault = require_vault(store)?;
-            let id = find_passkey(&vault.passkeys, &id)?.id.clone();
-            let socket = socket
-                .or_else(|| config.credential_broker.clone())
-                .unwrap_or_else(|| {
-                    PathBuf::from(format!(
-                        "/run/keychain/broker-{}.sock",
-                        keychain_sep_driver::peer::effective_uid()
-                    ))
-                });
-            eprintln!("Protecting the existing passkey; your desktop will ask for a fingerprint.");
-            let outcome =
-                keychain::protection::migrate_passkey(paths, backend, store, &id, &socket)?;
-            println!(
-                "protected passkey {} (revision {})",
-                outcome.record, outcome.revision
-            );
-            println!("browser broker: {}", socket.display());
-            println!("software recovery copy retained; no Apple records changed");
-            Ok(())
+    let vault = require_vault(store)?;
+    let item = find_vault_item(&vault, id)?;
+    let socket = socket
+        .or_else(|| config.credential_broker.clone())
+        .unwrap_or_else(|| {
+            PathBuf::from(format!(
+                "/run/keychain/broker-{}.sock",
+                keychain_sep_driver::peer::effective_uid()
+            ))
+        });
+    eprintln!("Protecting the existing credential; your desktop will ask for a fingerprint.");
+    let outcome = match item {
+        VaultItem::Login(item) => {
+            keychain::protection::login::migrate_login(paths, backend, store, &item.id, &socket)?
         }
+        VaultItem::Passkey(item) => {
+            keychain::protection::migrate_passkey(paths, backend, store, &item.id, &socket)?
+        }
+        VaultItem::Metadata(_) => {
+            return Err(Error::Security("unexpected migration source".into()));
+        }
+    };
+    println!(
+        "protected {} (revision {})",
+        outcome.record, outcome.revision
+    );
+    println!("software recovery copy retained; no Apple records changed");
+    Ok(())
+}
+
+fn command_passkey(
+    command: PasskeyCommand,
+    config: &Config,
+    backend: &dyn SecurityBackend,
+    store: &StateStore<'_>,
+) -> Result<()> {
+    match command {
         PasskeyCommand::Assert {
             id,
             challenge,
@@ -964,7 +1128,7 @@ fn command_passkey_assert(
     backend: &dyn SecurityBackend,
     store: &StateStore<'_>,
 ) -> Result<()> {
-    let vault = visible_vault(config, store)?;
+    let vault = visible_index(config, store)?;
     let item = find_passkey(&vault.passkeys, id)?;
     eprintln!("Passkey sign-in requested");
     eprintln!("relying party: {}", credential::printable(&item.rp_id));
@@ -972,7 +1136,7 @@ fn command_passkey_assert(
     eprintln!("account: {}", credential::printable(&item.username));
     if keychain::protection::is_broker_key(&item.signing_key) {
         let socket=config.credential_broker.as_ref().ok_or_else(||Error::Config(
-            "this passkey requires its credential broker; resume `keychain passkey protect` if migration was interrupted".into()))?;
+            "this passkey requires its credential broker; resume `keychain protect` if migration was interrupted".into()))?;
         let details = serde_json::json!({"challenge":challenge,"rpId":item.rp_id,
             "allowCredentials":[{"type":"public-key","id":item.credential_id}],"userVerification":"required",
             "extensions":{"remoteDesktopClientOverride":{"origin":origin,"sameOriginWithAncestors":true}}});
@@ -1139,6 +1303,7 @@ fn command_logout(
         paths.octagon_file(),
         paths.trust_repair_file(),
         paths.vault_file(),
+        paths.vault_index_file(),
         paths.previous_vault_file(),
     ] {
         store.remove_if_exists(&path)?;
@@ -1227,25 +1392,80 @@ fn require_vault(store: &StateStore<'_>) -> Result<VaultState> {
         .ok_or_else(|| Error::Config("vault is empty; run `keychain sync`".into()))
 }
 
-/// Local native credentials live in the root broker, independently of account
-/// sync and logout. Merge their metadata without caching it as Apple data or
-/// dropping software credentials that have not been migrated to the broker.
-fn visible_vault(config: &Config, store: &StateStore<'_>) -> Result<VaultState> {
-    let Some(socket) = &config.credential_broker else {
-        return require_vault(store);
+fn refuse_missing_login_match(
+    config: &Config,
+    index: &keychain::store::VaultIndex,
+    id: &str,
+) -> Result<()> {
+    if config.protected_logins.iter().any(|route| {
+        route.id.starts_with(id) && !index.credentials.iter().any(|item| item.id == route.id)
+    }) {
+        return Err(Error::Refused(
+            "selected protected login is missing or disabled; refusing software fallback".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn visible_index(config: &Config, store: &StateStore<'_>) -> Result<keychain::store::VaultIndex> {
+    let mut index = match store.load_index()? {
+        Some(index) => index,
+        None if !store.has_vault()? => keychain::store::VaultIndex {
+            schema_version: 1,
+            source_sha256: String::new(),
+            protected_login_ids: vec![],
+            credentials: vec![],
+            passkeys: vec![],
+        },
+        None if config.protected_logins.is_empty() => {
+            keychain::store::VaultIndex::from_vault(&require_vault(store)?, String::new())
+        }
+        None => {
+            return Err(Error::Refused(
+                "protected cache metadata is missing; resume protection to repair it".into(),
+            ));
+        }
     };
-    let mut vault = store.load_vault()?.unwrap_or_else(|| VaultState {
-        schema_version: 1,
-        synced_at: 0,
-        credentials: vec![],
-        passkeys: vec![],
+    if index
+        .protected_login_ids
+        .iter()
+        .any(|id| !config.protected_logins.iter().any(|route| &route.id == id))
+    {
+        return Err(Error::Refused(
+            "protected login routing is missing; resume protection to restore it".into(),
+        ));
+    }
+    index.credentials.retain(|item| {
+        !config
+            .protected_logins
+            .iter()
+            .any(|route| route.id == item.id)
     });
-    let native: Vec<PasskeyCredential> = serde_json::from_value(keychain::broker::call(
-        socket,
-        keychain::broker::Operation::ListCredentials,
-    )?)?;
-    merge_native_inventory(&mut vault, native)?;
-    Ok(vault)
+    if let Some(socket) = &config.credential_broker {
+        let native: Vec<PasskeyCredential> = serde_json::from_value(keychain::broker::call(
+            socket,
+            keychain::broker::Operation::ListCredentials,
+        )?)?;
+        let mut metadata = VaultState {
+            schema_version: 1,
+            synced_at: 0,
+            credentials: vec![],
+            passkeys: std::mem::take(&mut index.passkeys),
+        };
+        merge_native_inventory(&mut metadata, native)?;
+        index.passkeys = std::mem::take(&mut metadata.passkeys);
+        for login in keychain::protection::login::inventory(config)? {
+            if index
+                .passkeys
+                .iter()
+                .any(|item| item.id == login.metadata.id)
+            {
+                return Err(Error::Security("login/passkey inventory collision".into()));
+            }
+            index.credentials.push(login.metadata);
+        }
+    }
+    Ok(index)
 }
 
 fn merge_native_inventory(vault: &mut VaultState, records: Vec<PasskeyCredential>) -> Result<()> {
@@ -1378,6 +1598,7 @@ fn prompt_bottle_choice(
 #[derive(Clone, Copy)]
 enum VaultItem<'a> {
     Login(&'a Credential),
+    Metadata(&'a keychain::broker::login::LoginMetadata),
     Passkey(&'a PasskeyCredential),
 }
 
@@ -1385,13 +1606,14 @@ impl<'a> VaultItem<'a> {
     fn id(self) -> &'a str {
         match self {
             Self::Login(item) => &item.id,
+            Self::Metadata(item) => &item.id,
             Self::Passkey(item) => &item.id,
         }
     }
 
     fn kind(self) -> &'static str {
         match self {
-            Self::Login(_) => "login",
+            Self::Login(_) | Self::Metadata(_) => "login",
             Self::Passkey(_) => "passkey",
         }
     }
@@ -1399,6 +1621,7 @@ impl<'a> VaultItem<'a> {
     fn site(self) -> &'a str {
         match self {
             Self::Login(item) => &item.domain,
+            Self::Metadata(item) => &item.domain,
             Self::Passkey(item) => &item.rp_id,
         }
     }
@@ -1406,6 +1629,7 @@ impl<'a> VaultItem<'a> {
     fn username(self) -> &'a str {
         match self {
             Self::Login(item) => &item.username,
+            Self::Metadata(item) => &item.username,
             Self::Passkey(item) => &item.username,
         }
     }
@@ -1413,6 +1637,7 @@ impl<'a> VaultItem<'a> {
     fn title(self) -> &'a str {
         match self {
             Self::Login(item) => &item.title,
+            Self::Metadata(item) => &item.title,
             Self::Passkey(item) => &item.display_name,
         }
     }
@@ -1420,25 +1645,22 @@ impl<'a> VaultItem<'a> {
     fn recency(self) -> f64 {
         match self {
             Self::Login(item) => item.recency(),
+            Self::Metadata(item) => {
+                if item.last_used > 0.0 {
+                    item.last_used
+                } else {
+                    item.modified_at
+                }
+            }
             Self::Passkey(item) if item.modified_at > 0.0 => item.modified_at,
             Self::Passkey(item) => item.created_at,
         }
     }
 }
 
-fn find_vault_item<'a>(vault: &'a VaultState, id: &str) -> Result<VaultItem<'a>> {
-    let matches: Vec<_> = vault
-        .credentials
-        .iter()
-        .filter(|item| item.id == id || item.id.starts_with(id))
-        .map(VaultItem::Login)
-        .chain(
-            vault
-                .passkeys
-                .iter()
-                .filter(|item| item.id == id || item.id.starts_with(id))
-                .map(VaultItem::Passkey),
-        )
+fn select_item<'a>(items: impl Iterator<Item = VaultItem<'a>>, id: &str) -> Result<VaultItem<'a>> {
+    let matches: Vec<_> = items
+        .filter(|item| item.id() == id || item.id().starts_with(id))
         .collect();
     match matches.as_slice() {
         [item] => Ok(*item),
@@ -1447,6 +1669,26 @@ fn find_vault_item<'a>(vault: &'a VaultState, id: &str) -> Result<VaultItem<'a>>
             "vault item id prefix {id} is ambiguous"
         ))),
     }
+}
+fn find_vault_item<'a>(vault: &'a VaultState, id: &str) -> Result<VaultItem<'a>> {
+    select_item(
+        vault
+            .credentials
+            .iter()
+            .map(VaultItem::Login)
+            .chain(vault.passkeys.iter().map(VaultItem::Passkey)),
+        id,
+    )
+}
+fn find_index_item<'a>(index: &'a keychain::store::VaultIndex, id: &str) -> Result<VaultItem<'a>> {
+    select_item(
+        index
+            .credentials
+            .iter()
+            .map(VaultItem::Metadata)
+            .chain(index.passkeys.iter().map(VaultItem::Passkey)),
+        id,
+    )
 }
 
 fn find_credential<'a>(credentials: &'a [Credential], id: &str) -> Result<&'a Credential> {
@@ -1585,6 +1827,58 @@ mod tests {
     use keychain::paths::atomic_write_private;
     use keychain::security::{KeyUsage, Purpose};
 
+    #[test]
+    fn protect_is_a_general_command_without_a_passkey_alias() -> Result<()> {
+        let cli = Cli::try_parse_from([
+            "keychain",
+            "protect",
+            "12345678",
+            "--socket",
+            "/run/keychain/test.sock",
+        ])
+        .map_err(|error| Error::Config(error.to_string()))?;
+        assert!(matches!(cli.command, Command::Protect { .. }));
+        assert!(Cli::try_parse_from(["keychain", "passkey", "protect", "12345678"]).is_err());
+        Ok(())
+    }
+    #[test]
+    fn missing_protected_route_cannot_resolve_to_a_software_prefix_match() -> Result<()> {
+        let mut config = Config::default();
+        config.protected_logins.push(keychain::config::LoginRoute {
+            id: "12345678-0000-4000-8000-000000000001".into(),
+            account_fingerprint: String::new(),
+            recipient_id: String::new(),
+            revision: 1,
+            content_binding: String::new(),
+        });
+        let source = Credential {
+            protected: true,
+            id: "12345678-1111-4000-8000-000000000002".into(),
+            domain: "example.com".into(),
+            username: "synthetic".into(),
+            password: "synthetic".into(),
+            title: String::new(),
+            notes: String::new(),
+            totp_uri: String::new(),
+            modified_at: 0.0,
+            last_used: 0.0,
+        };
+        assert!(command_show_login(&source, true).is_err());
+        let item = keychain::broker::login::LoginMetadata::from(&source);
+        let index = keychain::store::VaultIndex {
+            schema_version: 1,
+            source_sha256: String::new(),
+            protected_login_ids: vec![],
+            credentials: vec![item],
+            passkeys: vec![],
+        };
+        assert!(refuse_missing_login_match(&config, &index, "12345678").is_err());
+        assert!(
+            refuse_missing_login_match(&config, &index, "12345678-1111-4000-8000-000000000002")
+                .is_ok()
+        );
+        Ok(())
+    }
     #[test]
     fn visible_inventory_adds_native_credentials_without_hiding_unmigrated_items_or_changing_identity()
     -> Result<()> {

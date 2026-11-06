@@ -11,6 +11,7 @@ pub struct LoginRecord {
     pub revision: u64,
     pub recipient_id: String,
     pub metadata: LoginMetadata,
+    pub content_binding: String,
     pub sealed: Vec<u8>,
     pub verified: bool,
 }
@@ -27,14 +28,21 @@ impl LoginRecord {
                 "protected login identity/policy mismatch".into(),
             ));
         }
-        login_binding(owner, self.revision, &self.recipient_id, &self.metadata)?;
+        login_binding(
+            owner,
+            self.revision,
+            &self.recipient_id,
+            &self.metadata,
+            &self.content_binding,
+        )?;
         Ok(())
     }
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoginSummary {
     pub metadata: LoginMetadata,
+    pub content_binding: String,
     pub revision: u64,
     pub recipient_id: String,
     pub verified: bool,
@@ -43,13 +51,14 @@ impl From<LoginRecord> for LoginSummary {
     fn from(record: LoginRecord) -> Self {
         Self {
             metadata: record.metadata,
+            content_binding: record.content_binding,
             revision: record.revision,
             recipient_id: record.recipient_id,
             verified: record.verified,
         }
     }
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LoginState {
     pub active: Option<LoginSummary>,
@@ -124,7 +133,7 @@ impl Registry {
                 continue;
             }
             let record = self.load_login(id, owner)?;
-            if record.verified {
+            if record.verified && self.synced_record_enabled(id, owner)? {
                 logins.push(record.into());
             }
         }
@@ -207,6 +216,7 @@ impl Registry {
             revision,
             recipient_id: import.recipient_id,
             metadata: import.metadata,
+            content_binding: import.content_binding,
             sealed: import.sealed,
             verified: false,
         };
@@ -251,6 +261,7 @@ impl Registry {
         }
         current.verified = true;
         self.write_login(&current, false)?;
+        self.include_synced_record(&current.metadata.id, current.owner)?;
         self.remove_pending_login(&current.metadata.id)
     }
     pub fn discard_staged_login(&self, id: &str, owner: u32, revision: u64) -> Result<()> {
@@ -311,6 +322,11 @@ mod tests {
         let active = reopened.load_login(&id, 1001)?;
         assert!(active.verified);
         reopened.check_current_login(&active)?;
+        reopened.set_synced_inventory(1001, vec![])?;
+        assert!(reopened.login_metadata(1001)?.is_empty());
+        assert!(reopened.load_login(&id, 1001)?.verified);
+        reopened.set_synced_inventory(1001, vec![id.clone()])?;
+        assert_eq!(reopened.login_metadata(1001)?.len(), 1);
         assert!(reopened.login_state(&id, 1001)?.staged.is_none());
         // A passkey must not capture a login's ID in either creation path.
         let context = super::super::test_support::context()?;
