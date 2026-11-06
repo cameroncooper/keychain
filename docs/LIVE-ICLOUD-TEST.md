@@ -66,6 +66,21 @@ same launcher and exact extension allowlist. This changes only test setup; no
 capture or creation request was replayed. Browser retry and positive acceptance
 remain pending.
 
+### Fresh browser registration after acknowledgment update
+
+The user completed the proposed `keychain-icloud-20261106-4` browser step. New
+transaction `f6e8c203-bf0d-476b-a38a-24a4230e0f5e` has a durable FetchVerified
+upload and a promoted protected credential. A fresh read-only diagnostic confirmed
+the durable upload phase and exact fetched name/type/all requested fields. A
+separate unprivileged broker inventory request found this credential with the
+expected RP and username, confirming it is committed and visible to the browser.
+The biometric agent acknowledged presentation without reporting cancellation.
+
+These are application-side registration and cloud verification results. Explicit
+RP success, fresh Chromium authentication and use from a trusted Apple device
+are being checked separately. No extra signing or capture was started by these
+read-only checks, and production creation remains disabled.
+
 After the manifest correction the browser displayed the storage chooser. Choosing
 iCloud then returned `prompt was not presented`, with no new creation draft. A
 separate display-only request received the expected Visible acknowledgment. The
