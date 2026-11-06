@@ -126,3 +126,8 @@ tests passed separately; the workspace has 201 passing tests and 21 ignored,
 and all 11 browser flow tests pass. Format, strict Clippy and release build pass.
 These checks do not establish live account acceptance, biometric creation,
 registration in Chromium or synchronization to another device.
+
+The subsequent [memory source review](SEP-MEMORY-REVIEW.md) enabled missing
+AES-GCM/GHASH/POLYVAL cleanup features and identifies remaining RFC6979/HMAC and
+compiler scratch limits. Protected main buffers do not establish complete scratch
+erasure. The write flag remains disabled.

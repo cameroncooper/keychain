@@ -291,7 +291,7 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 201 passing tests, twenty-one ignored (three Apple network and eighteen privileged
+Workspace checks: 202 passing tests, twenty-one ignored (three Apple network and eighteen privileged
 integration tests). Nine registry, five coordination and one account-bootstrap test passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
 The separate-UID worker and systemd startup tests also pass (seventeen privileged
@@ -460,3 +460,12 @@ native private-key import, P-384 and multi-user SEP identity isolation remain
 unestablished. Never infer them from warm-reboot success. Never change system
 keybags, fingerprints or xART lineage to repair application failures, and never
 reuse the maintainer's test keys.
+
+The [selected-secret memory review](docs/SEP-MEMORY-REVIEW.md) records concrete
+application/primitive lifetimes, the opt-in ARM POLYVAL backend's cleanup limit,
+and remaining RFC6979/HMAC scratch exposure. AES-GCM/GHASH/POLYVAL cleanup features
+are now enabled for the normal Asahi build. TOTP parsing/generation wipes its
+owned seed/MAC/code buffers on success and error, rejects ambiguous/invalid
+configuration and checks expiry arithmetic. All eighteen RFC 6238 vectors pass.
+These changes do not implement selected password/TOTP broker reveal or prove
+complete crypto stack erasure; both remain required.

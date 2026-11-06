@@ -26,7 +26,7 @@ gtk4 = { version = "0.9", optional = true }
 zbus = "=4.4.0"
 listenfd = "1"
 aes = { version = "0.8", features = ["zeroize"] }
-aes-gcm = "0.10"
+aes-gcm = { version = "0.10", features = ["zeroize"] }
 aes-siv = "0.7"
 async-io = "2"
 base64 = "0.22"
@@ -40,6 +40,8 @@ data-encoding = "2"
 flate2 = "1"
 fs2 = "0.4"
 futures-lite = "2"
+# Enable GCM's transitive key/state cleanup, including the Asahi software backend.
+ghash = { version = "0.5", features = ["zeroize"] }
 hex = "0.4"
 hkdf = "0.12"
 hmac = "0.12"
@@ -50,6 +52,7 @@ p384 = { version = "0.13", features = ["ecdh", "ecdsa", "pkcs8"] }
 p256 = { version = "0.13", features = ["ecdh", "ecdsa", "pkcs8"] }
 pbkdf2 = "0.12"
 plist = "1.7"
+polyval = { version = "0.6", features = ["zeroize"] }
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "gzip", "json", "rustls-tls"] }
 rpassword = "7"
