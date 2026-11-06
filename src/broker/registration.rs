@@ -59,35 +59,9 @@ impl Broker {
                 )?;
                 authorization.check()?;
                 if let Some(excluded) = excluded {
-                    // WebAuthn permits the distinguishable InvalidStateError
-                    // only AFTER a presence gesture. Sign a private, domain-
-                    // separated consent message; never disclose its signature.
-                    let message = format!(
-                        "cameroncooper.keychain/registration-exclusion/v1/{}",
-                        context.binding()
-                    );
-                    let outcome = if excluded.signing_key.backend_id == "sep-native-v1" {
-                        let record = self.registry.load(&excluded.id, self.owner)?;
-                        let provider =
-                            authorization.provider(record.native_key, self.device.clone())?;
-                        sign_native(
-                            &provider,
-                            &excluded.signing_key,
-                            &provider.public_sec1()?,
-                            message.as_bytes(),
-                            authorization.remaining()?,
-                        )?
-                    } else {
-                        let record = self.registry.load_protected(&excluded.id, self.owner)?;
-                        self.sign_protected_record(&record, message.as_bytes(), &authorization)?
-                    };
-                    outcome.into_signature(
-                        &excluded.signing_key,
-                        message.as_bytes(),
-                        AuthorizationRequirement::UserVerification,
-                    )?;
-                    authorization.check()?;
-                    return Err(Error::CredentialExcluded);
+                    // Disclose exclusion only after verified presence; share the
+                    // same policy with the syncable creation integration path.
+                    self.reject_registration_exclusion(&excluded, &context, &authorization)?;
                 }
                 let record = self.registry.prepare_registration(
                     self.owner,

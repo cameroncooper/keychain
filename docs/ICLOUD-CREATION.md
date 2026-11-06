@@ -92,7 +92,7 @@ plans plus the current plan and sixteen send attempts; exhausting a budget stops
 callback while keeping reconciliation available. No raw scalar or reusable UV
 grant is added to the journal.
 
-Sixteen offline coordinator tests cover acceptance/fetch separation, independent
+Seventeen offline coordinator tests cover acceptance/fetch separation, independent
 decryption/public-point checks, pagination, changed bindings, locks/tampering,
 lost responses, explicit retries, precondition failures and checkpoint faults.
 These include real synthetic class-key rotation, late superseded commits,
@@ -154,6 +154,14 @@ disposable software fixtures. The APIs are not yet connected to a production
 network operation or the browser's iCloud choice, and this is not hardware or
 Apple acceptance evidence.
 
+The [broker operation coordinator](ICLOUD-BROKER-COORDINATION.md) now joins these
+stages inside one selected-scalar lifetime, with no second biometric decrypt
+between upload and registration signing. It resumes before preparing ciphertext,
+checks the selected identity against the saved plan, requires explicit uncertain/
+rejected recovery choices and discards canceled network results. Five synthetic
+root integration tests passed. An authenticated cancellable network-worker bridge
+and encoder-memory audit remain unfinished; no new browser IPC route is enabled.
+
 The [atomic write implementation](CLOUDKIT-WRITE-PROTOCOL.md) now encodes the new
 item with fail-if-exists and the exact retained current-key record with
 fail-if-outdated plus request change tag. It fixes account/peer/zone/record scope,
@@ -167,14 +175,15 @@ save path was not executed, and the browser still offers device-only creation.
 The updated release service binaries were installed on 2026-11-06. The existing
 disposable profile passed the installed broker/native-host availability check
 with `--availability-only`; it did not start biometric capture or perform a
-registration, assertion or Apple write. The full workspace has 173 passing
-tests with thirteen intentionally ignored tests; the nine disposable registry tests
-also passed separately as root. Strict Clippy and the release build passed.
+registration, assertion or Apple write. The full workspace has 174 passing
+tests with eighteen intentionally ignored tests; nine disposable registry tests
+and five coordination tests also passed separately as root. Strict Clippy and
+the release build passed.
 
 Remaining integration work:
 
-1. Connect the implemented broker draft preparation and promotion APIs to the
-   production biometric/upload operation. Never activate a draft
+1. Finish the trusted cancellable network-worker connection and memory audit
+   for the implemented selected-scalar coordinator. Never activate a draft
    through generic import verification or convert a native key to exportable storage.
 2. Validate the implemented atomic save/current-key wire protocol against live
    rejection and acceptance, using the retained server identity and tags.

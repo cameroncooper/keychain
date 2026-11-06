@@ -55,6 +55,14 @@ impl NativeAuthorization {
             .filter(|remaining| *remaining >= Duration::from_millis(1))
             .ok_or_else(|| ProviderError::Expired.into())
     }
+    pub(super) fn status(&self, message: &str) -> Result<()> {
+        self.check()?;
+        self.prompt
+            .lock()
+            .map_err(|_| Error::Refused("prompt failed".into()))?
+            .status(message)
+            .map_err(|e| Error::io("desktop prompt status", e))
+    }
     pub(super) fn progress(&self, guidance: keychain_sep_driver::Guidance) -> bool {
         if self.check().is_err() {
             return false;

@@ -3,6 +3,8 @@
 mod native;
 mod protected;
 mod registration;
+mod synced_creation;
+pub use synced_creation::{SyncedCreationRequest, UploadRecovery};
 pub mod registry;
 pub mod session;
 

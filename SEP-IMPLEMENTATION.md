@@ -291,8 +291,8 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 173 passing tests, thirteen ignored (three Apple network and ten privileged
-integration tests). All nine registry tests passed separately as root, including
+Workspace checks: 174 passing tests, eighteen ignored (three Apple network and fifteen privileged
+integration tests). Nine registry and five coordination tests passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
 Nine browser service-worker flow tests also pass. Strict Clippy is clean.
 The broker now exits after an idle interval without interrupting queued/active
@@ -392,7 +392,7 @@ acceptance. The decoder now retains zone/owner, change tags and opaque server
 record bytes. A paginated read adapter and encrypted upload coordinator persist
 prepared ciphertext/identity and attempts, reconcile uncertain outcomes through
 fetch/decrypt verification and require explicit retries after confirmed absence.
-Sixteen coordinator tests pass, including persistence faults and key-pointer changes.
+Seventeen coordinator tests pass, including persistence faults and key-pointer changes.
 After a definite rejection, explicit re-encryption fetches complete absence and
 prepares the same credential against the authenticated current key. Superseded
 ciphertexts remain journaled and recognizable, including a late commit from an
@@ -414,7 +414,15 @@ used or activated via generic verification. Tests cover interruption at each
 transition, changed drafts during signing and response suppression after late
 cancellation; retries retain the key and require new authorization. Normal
 post-creation metadata refresh/rewraps remain supported, while loss of a committed
-record refuses replacement. The production biometric/upload coordination,
+record refuses replacement. A broker coordinator now connects upload preparation,
+reconciliation, verified backup, signing and promotion within one selected-scalar
+lifetime. It does not persist a grant or require a second decrypt for signing;
+normal protected signing shares the same selected-secret implementation. Resume
+precedes ciphertext preparation and explicit policies govern uncertain/rejected
+recovery. Five synthetic complete-operation tests cover cancellation/lost replies,
+identity checks, restart and recovery. The authenticated cancellable network bridge
+and encoder-memory audit remain required before exposing this path over IPC; see
+[coordination limits](docs/ICLOUD-BROKER-COORDINATION.md). The production
 Apple adapter and iCloud browser choice remain unconnected to production flows.
 Atomic save framing is implemented from pinned extracted-schema/client references:
 create-only item, unchanged-pointer tag check, zone-isolated stream and strict

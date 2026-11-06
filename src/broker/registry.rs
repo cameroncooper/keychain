@@ -12,6 +12,8 @@ use crate::{Error, Result};
 mod protected;
 mod registration;
 mod synced_registration;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub(super) use protected::decode_public;
 pub use protected::{
     ProtectedImport, ProtectedRecord, ProtectedSummary, ProtectionState, Recipient, item_binding,

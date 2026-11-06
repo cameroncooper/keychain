@@ -52,6 +52,54 @@ pub(crate) fn verified_for(
     session.verified_upload()
 }
 
+/// A disposable server with authenticated synthetic class keys, no network.
+pub(crate) fn synthetic_io(zone: ZoneIdentity) -> Result<impl UploadIo> {
+    let mut fixture = Fixture::new()?;
+    fixture.io.zone = zone.clone();
+    fixture.io.records = fixture
+        .io
+        .records
+        .iter()
+        .map(|record| {
+            let tag = record
+                .server
+                .as_ref()
+                .and_then(|metadata| metadata.change_tag.as_deref())
+                .ok_or_else(|| invalid("test tag"))?;
+            server_record(record, &zone, tag)
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(fixture.io)
+}
+
+#[test]
+fn resume_before_preparation_never_calls_the_factory_for_an_existing_or_corrupt_journal()
+-> Result<()> {
+    let f = Fixture::new()?;
+    let binding = f.plan.binding().clone();
+    let session = UploadStore::new(&f.directory, &f.backend)?
+        .resume_or_prepare(&binding, || Ok(f.plan.clone()))?;
+    let path = session.path.clone();
+    drop(session);
+    let session = UploadStore::new(&f.directory, &f.backend)?
+        .resume_or_prepare(&binding, || panic!("existing journal re-encrypted"))?;
+    let public = STANDARD
+        .decode(&f.plan.0.public_sec1)
+        .map_err(|_| invalid("test public"))?;
+    session.verify_identity(&binding, &f.plan.0.credential, &public)?;
+    let mut wrong = f.plan.0.credential.clone();
+    wrong.credential_id = URL_SAFE_NO_PAD.encode([9u8; 20]);
+    assert!(session.verify_identity(&binding, &wrong, &public).is_err());
+    drop(session);
+    atomic_write_private(&path, b"corrupt journal")?;
+    assert!(
+        UploadStore::new(&f.directory, &f.backend)?
+            .resume_or_prepare(&binding, || panic!("corrupt journal replaced"))
+            .is_err()
+    );
+    Ok(())
+}
+
 #[test]
 fn prepare_checks_encrypted_identity_before_creating_a_journal() -> Result<()> {
     let mut f = Fixture::new()?;

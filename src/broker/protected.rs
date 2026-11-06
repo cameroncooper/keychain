@@ -190,10 +190,22 @@ impl Broker {
         message: &[u8],
         authorization: &super::native::NativeAuthorization,
     ) -> Result<AuthorizedSignature> {
+        self.with_protected_scalar(record, authorization, |selected| {
+            selected.sign(record, message)
+        })
+    }
+
+    pub(super) fn with_protected_scalar<T>(
+        &self,
+        record: &ProtectedRecord,
+        authorization: &super::native::NativeAuthorization,
+        operation: impl FnOnce(&SelectedScalar<'_>) -> Result<T>,
+    ) -> Result<T> {
         if !self.allow_item_decrypt {
             return Err(ProviderError::UnsupportedPolicy.into());
         }
         authorization.check()?;
+        record.validate(&record.credential.id, self.owner)?;
         let recipient = self.registry.item_key()?;
         if recipient.reference().key_id != record.recipient_id {
             return Err(Error::Security("selected recipient mismatch".into()));
@@ -217,11 +229,85 @@ impl Broker {
         )?;
         authorization.check()?;
         let scalar = item_view(output.as_array(), length, &binding)?;
-        let result = sign_scalar(record, scalar, message)?;
+        let selected = SelectedScalar::from_biometric(record, scalar)?;
+        let result = operation(&selected);
         drop(output);
         authorization.check()?;
-        Ok(result)
+        result
     }
+}
+
+/// Borrowed only inside a single successful biometric decrypt operation. It has
+/// no plaintext accessor, serialization, cache or reusable authorization grant.
+pub(super) struct SelectedScalar<'a> {
+    record: &'a ProtectedRecord,
+    scalar: &'a [u8],
+}
+impl<'a> SelectedScalar<'a> {
+    pub(super) fn from_biometric(record: &'a ProtectedRecord, scalar: &'a [u8]) -> Result<Self> {
+        // This constructor is called only after real driver completion and the
+        // exact item-binding check. Unit fixtures explicitly simulate that step.
+        checked_key(record, scalar)?;
+        Ok(Self { record, scalar })
+    }
+    pub(super) fn sign(
+        &self,
+        record: &ProtectedRecord,
+        message: &[u8],
+    ) -> Result<AuthorizedSignature> {
+        self.verify_record(record)?;
+        sign_scalar(record, self.scalar, message)
+    }
+    pub(super) fn verify_record(&self, record: &ProtectedRecord) -> Result<()> {
+        if serde_json::to_vec(record)? != serde_json::to_vec(self.record)? {
+            return Err(Error::Security(
+                "selected credential changed within the secret operation".into(),
+            ));
+        }
+        Ok(())
+    }
+    pub(super) fn prepare_upload(
+        &self,
+        binding: &crate::apple::ckks::upload::Binding,
+        snapshot: &crate::apple::ckks::upload::Snapshot,
+    ) -> Result<crate::apple::ckks::upload::PreparedUpload> {
+        if self.record.owner != binding.owner
+            || self.record.credential.id != binding.transaction.to_string()
+            || self.record.diagnostic
+        {
+            return Err(Error::Security(
+                "selected scalar does not match the upload transaction".into(),
+            ));
+        }
+        let public = super::registry::decode_public(&self.record.public_sec1)?;
+        let mut private =
+            SecretBuffer::new().map_err(|e| Error::io("sync encoding key memory", e))?;
+        private.as_mut_array()[..65].copy_from_slice(&public);
+        private.as_mut_array()[65..97].copy_from_slice(self.scalar);
+        crate::apple::ckks::upload::PreparedUpload::encrypt_from_snapshot(
+            binding.clone(),
+            self.record.credential.clone(),
+            &private.as_array()[..97],
+            snapshot,
+        )
+    }
+}
+
+fn checked_key(record: &ProtectedRecord, scalar: &[u8]) -> Result<SigningKey> {
+    if scalar.len() != 32 {
+        return Err(Error::InvalidData("invalid selected scalar length".into()));
+    }
+    let key = SigningKey::from_slice(scalar)
+        .map_err(|_| Error::Security("invalid selected P-256 scalar".into()))?;
+    let public = super::registry::decode_public(&record.public_sec1)?;
+    let expected = VerifyingKey::from_sec1_bytes(&public)
+        .map_err(|_| Error::Security("invalid selected public key".into()))?;
+    if key.verifying_key() != &expected {
+        return Err(Error::Security(
+            "selected scalar does not match stored public key".into(),
+        ));
+    }
+    Ok(key)
 }
 
 /// Called only after this transaction's successful biometric decrypt and binding
@@ -237,16 +323,8 @@ fn sign_scalar(
             "invalid selected scalar or signing message bounds".into(),
         ));
     }
-    let key = SigningKey::from_slice(scalar)
-        .map_err(|_| Error::Security("invalid selected P-256 scalar".into()))?;
-    let public = super::registry::decode_public(&record.public_sec1)?;
-    let expected = VerifyingKey::from_sec1_bytes(&public)
-        .map_err(|_| Error::Security("invalid selected public key".into()))?;
-    if key.verifying_key() != &expected {
-        return Err(Error::Security(
-            "selected scalar does not match stored public key".into(),
-        ));
-    }
+    let key = checked_key(record, scalar)?;
+    let expected = *key.verifying_key();
     let signature: Signature = key
         .try_sign(message)
         .map_err(|_| Error::Security("protected software signing failed".into()))?;

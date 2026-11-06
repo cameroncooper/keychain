@@ -477,6 +477,34 @@ impl<'a> UploadStore<'a> {
             }
             return Ok(session);
         }
+        self.start(path, lock, upload)
+    }
+
+    /// Resume under the transaction lock before invoking any encryption factory.
+    /// Missing/corrupt roots or existing journals are never treated as permission
+    /// to generate another ciphertext. Only an absent journal calls `prepare`.
+    pub fn resume_or_prepare(
+        self,
+        binding: &Binding,
+        prepare: impl FnOnce() -> Result<PreparedUpload>,
+    ) -> Result<Session<'a>> {
+        binding.validate()?;
+        let lock = self.lock(binding.transaction)?;
+        let path = self
+            .directory
+            .join(format!("upload-{}.enc", binding.transaction));
+        if path.try_exists().map_err(|e| Error::io(&path, e))? {
+            return self.load(path, lock, binding);
+        }
+        let upload = prepare()?;
+        upload.0.validate()?;
+        if upload.binding() != binding {
+            return Err(invalid("new upload differs from the selected transaction"));
+        }
+        self.start(path, lock, upload)
+    }
+
+    fn start(self, path: PathBuf, lock: File, upload: PreparedUpload) -> Result<Session<'a>> {
         let session = Session {
             store: self,
             path,
@@ -551,6 +579,23 @@ impl<'a> UploadStore<'a> {
     }
 }
 impl Session<'_> {
+    pub fn verify_identity(
+        &self,
+        binding: &Binding,
+        credential: &PasskeyCredential,
+        public: &[u8],
+    ) -> Result<()> {
+        self.check_healthy()?;
+        if &self.journal.plan.binding != binding
+            || &self.journal.plan.credential != credential
+            || self.journal.plan.public_sec1 != STANDARD.encode(public)
+        {
+            return Err(Error::Security(
+                "saved upload differs from the selected credential or request".into(),
+            ));
+        }
+        Ok(())
+    }
     pub fn phase(&self) -> Result<&Phase> {
         self.check_healthy()?;
         Ok(&self.journal.phase)
