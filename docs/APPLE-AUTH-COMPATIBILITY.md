@@ -112,3 +112,34 @@ cached-token success therefore does not establish current access. The response
 does not distinguish expiry from provider/session binding. Fresh local
 authentication through `keychain join --repair` remains the next live recovery
 step; do not reset provisioning or retry escrow to address this HTTP response.
+
+
+## Reproduced GSA-init 503 and login-profile alignment — 2026-11-06
+
+The user retried the retained Prepared trust repair and received HTTP 503 with a
+190-byte HTML body at GSA init. One configured-account, password-free init probe
+reproduced that exact failure. No password proof, factor code, escrow operation,
+trust write or vault/account snapshot was sent/saved by the diagnostic.
+
+The installed local Mac helper passed another offline 31-second OTP clock check;
+the host reports synchronized time, and this command environment has no configured
+HTTP proxy variables. No helper update, identity replacement or reprovisioning was
+performed. These checks do not prove that Apple accepts every future OTP.
+
+The application still used `akd/1.0 CFNetwork/808.1.4` with a plist-only Accept
+header. The pinned provider's actual *login* implementation instead uses
+`akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0` and `Accept: */*`:
+[login device profile](https://github.com/sacca97/os-findmy-e/blob/d4d2a832baf47d1cf43d989879950ac2aec45f47/native/apple-core/src/login/device.rs),
+[login request headers](https://github.com/sacca97/os-findmy-e/blob/d4d2a832baf47d1cf43d989879950ac2aec45f47/native/apple-core/src/login/messages.rs).
+Its provisioning client has a separate user agent; that was not copied into the
+login path. The application now matches these two login settings while retaining
+its service-owned AuthKit client info and the existing HTTP/1.1/no-pooling/close
+policy. The helper still cannot overwrite the service profile.
+
+One password-free init probe then passed using the same retained identity. This
+is a before/after observation, not proof of causality or a guarantee against
+intermittent Apple edge refusals. No automatic 503 retry was added. Full verified
+password proof, 2FA/PET, trust repair and recovered Passwords keys remain unproven;
+the user must retry `./target/release/keychain join --repair` in their terminal.
+Do not reset anisette or spend an escrow attempt to work around a non-plist init
+response. The original peer and repair journal remain retained.

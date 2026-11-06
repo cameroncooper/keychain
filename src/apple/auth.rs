@@ -23,7 +23,10 @@ use crate::secret::zeroize_plist_dictionary;
 use crate::{Error, Result};
 
 const GSA_ENDPOINT: &str = "https://gsa.apple.com/grandslam/GsService2";
-const GSA_USER_AGENT: &str = "akd/1.0 CFNetwork/808.1.4";
+// Match the login (not provisioning) profile in the pinned Mac provider's
+// native/apple-core/src/login/{device,messages}.rs. Each service still owns its
+// profile; helper metadata cannot choose arbitrary HTTP identity headers.
+const GSA_USER_AGENT: &str = "akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0";
 const GSA_CLIENT_INFO: &str = concat!(
     "<MacBookPro13,2> <macOS;13.1;22C65> ",
     "<com.apple.AuthKit/1 (com.apple.akd/1.0)>"
@@ -199,7 +202,7 @@ impl<'a> GsaClient<'a> {
             .client
             .post(GSA_ENDPOINT)
             .header("Content-Type", "text/x-xml-plist")
-            .header("Accept", "text/x-xml-plist")
+            .header("Accept", "*/*")
             .header("User-Agent", GSA_USER_AGENT)
             .header("X-MMe-Client-Info", GSA_CLIENT_INFO)
             .body(encoded)
