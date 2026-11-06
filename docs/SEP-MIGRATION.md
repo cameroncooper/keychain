@@ -76,7 +76,32 @@ record IDs and remaining reboot/retirement gates.
 The installed hardened services also completed migration for disposable profile
 `.sep-check-installed-20261105`, record `da294ad0-4110-4487-a95c-52a0236e0f85`.
 A fresh release native host independently verified the assertion through that
-deployment. Real-profile WebAuthn migration is authorized but has not started:
-sync lost Passwords-key access and the earlier implementation overwrote the cache.
-The [explicit trust-repair path](SYNC-RECOVERY.md) must recover it first. Do not
-treat that failure as a SEP migration failure or remove the source keys to repair it.
+deployment. The real-profile WebAuthn migration was initially held by lost Passwords-key
+access and the earlier empty-cache overwrite. The [explicit trust repair](SYNC-RECOVERY.md)
+subsequently committed and restored the original inventory; the selected real
+migration below then completed. That earlier incident did not justify removing
+source keys or treating the SEP integration as its cause.
+
+
+## Main-profile WebAuthn migration — 2026-11-06
+
+With the user's prior WebAuthn-only scope and renewed fingerprint readiness,
+`keychain protect 89B32928-CAAE-44A0-8255-AFDBD822C7EE` completed against the
+installed `/run/keychain/broker-1001.sock` at revision 1. It used the existing
+webauthn.io credential and retained the software recovery copy. No Apple records
+were changed and no new passkey identity was generated.
+
+Before capture, public metadata for the WebAuthn and Apple.com passkeys was saved
+privately in ignored `.sep-check-main-webauthn-20261106/public-before.json`.
+After commit, fresh `show --json` metadata matched both baselines exactly,
+including their existing credential fingerprints. The unified inventory still
+contains all four restored items. The main config now selects the installed
+broker; the Apple.com passkey itself remains unchanged and unmigrated. It is
+excluded from broker-mode browser use until separately migrated, as agreed.
+
+A fresh main-profile native host then reported biometric availability and exactly
+the expected WebAuthn candidate for a required-UV request at
+`https://webauthn.io`. This inspection requested no signature or biometric capture.
+The Chromium native-host manifest points at the current release executable under
+this repository. Actual browser/RP authentication and post-reboot verification
+remain separate acceptance gates; no source retirement is justified yet.

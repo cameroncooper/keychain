@@ -551,3 +551,12 @@ metadata-only inventory matches the original four record IDs. This satisfies the
 main-profile authentication/recovery prerequisite for the authorized WebAuthn-only
 migration. It does not migrate that credential or establish SEP browser use by
 itself; fingerprint readiness and real browser validation remain separate gates.
+
+
+The authorized main-profile WebAuthn-only migration now completed with a desktop
+fingerprint at revision 1. Its original public metadata/fingerprint and the
+unmigrated Apple.com baseline are unchanged, the software recovery copy is
+retained, and unified inventory keeps all four items. A fresh main-profile native
+host discovers the expected required-UV candidate with biometric availability.
+Real browser/RP authentication, post-reboot validation and source-retirement gates
+remain open; metadata inspection alone does not satisfy them.

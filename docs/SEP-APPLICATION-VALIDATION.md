@@ -294,3 +294,16 @@ The subsequent separately authorized post-cancellation reveal also passed for th
 same revision 2, using a fresh client while the broker remained PID 427569. No
 broker restart or state reset intervened. This adds successful post-cancel use
 to the selected-login hardware evidence; it does not establish reboot persistence.
+
+
+## Main-profile WebAuthn protection — 2026-11-06
+
+After committed trust repair restored the original inventory, the user's
+WebAuthn-only migration completed with a real desktop fingerprint at revision 1.
+The exact existing record is `89B32928-CAAE-44A0-8255-AFDBD822C7EE`; its software
+recovery copy remains. Fresh metadata matches the saved original credential
+fingerprint, RP and labels; the Apple.com baseline is also unchanged. All four
+items remain in unified inventory. A fresh configured native host discovers the
+expected WebAuthn candidate with required UV and biometric availability, without
+capture. See [migration scope and limits](SEP-MIGRATION.md#main-profile-webauthn-migration--2026-11-06).
+Real Chromium/RP authentication and complete-chain reboot checks remain pending.
