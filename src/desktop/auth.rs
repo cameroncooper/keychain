@@ -118,6 +118,7 @@ impl AuthPrompt {
         let id = channel.id;
         if write_frame(&mut channel.stream, &AgentEvent::Visible { id }).is_ok() {
             self.presented = true;
+            eprintln!("keychain-auth-agent: prompt presented");
         } else {
             channel.cancel();
             window.remove_window();
@@ -177,6 +178,7 @@ impl Render for AuthPrompt {
             .track_focus(&self.focus)
             .on_key_down(|event, window, _| {
                 if event.keystroke.key == "escape" {
+                    eprintln!("keychain-auth-agent: prompt canceled by Escape");
                     window.remove_window();
                 }
             })
@@ -337,6 +339,7 @@ fn open_prompt(
         cx,
         |window, cx| {
             window.on_window_should_close(cx, move |_, _| {
+                eprintln!("keychain-auth-agent: prompt window close requested");
                 close.borrow_mut().cancel();
                 true
             });
@@ -349,6 +352,9 @@ fn open_prompt(
                         if window.is_window_active() {
                             view.acknowledge_display(window);
                         } else if view.presented {
+                            eprintln!(
+                                "keychain-auth-agent: prompt canceled after focus loss (activation)"
+                            );
                             // Mapping can briefly change focus before the first frame,
                             // particularly while the browser chooser is closing. No
                             // capture is permitted until presentation is acknowledged.
@@ -519,6 +525,7 @@ pub fn run() -> io::Result<()> {
                             let _ = current.window.update(cx, |_, window, cx| {
                                 current.view.update(cx, |view, _| {
                                     if view.presented && !window.is_window_active() {
+                                        eprintln!("keychain-auth-agent: prompt canceled after focus loss (poll)");
                                         view.channel.borrow_mut().cancel();
                                         window.remove_window();
                                     }

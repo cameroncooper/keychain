@@ -81,6 +81,20 @@ The release build, desktop-agent Clippy and seven prompt protocol tests passed.
 The isolated broker and worker were also restarted after their ten-minute idle
 expiry, with thirty-minute idle limits for this acceptance session.
 
+The next browser attempt briefly showed the fingerprint window, then returned
+`biometric authorization canceled`. A draft for
+`15a9e12b-e517-41df-a87e-f74b3dee46c6` is retained. This is not registration or
+upload success. A display-only window remained presented through three status
+updates without requesting SEP verification. Existing logs did not distinguish
+focus loss, request disconnection, session invalidity or SEP cancellation.
+The agent and broker now log fixed lifecycle/cancellation reasons without account
+labels, origins, item identifiers or credential material. The next manual browser
+attempt is diagnostic; no cancellation checks were weakened or operation replayed.
+The release broker and agent were installed and restarted, preserving previous
+binaries under `/var/lib/keychain-service-backups/update.yyppbbsi`. Native-host
+availability passed without capture. Release build, strict Clippy and 16 broker
+tests passed; 21 privileged/live tests remained ignored.
+
 Use the fresh review with `--review` and a separate root-private request file
 with `--request`; never overwrite the earlier frozen request. Stop if either
 operation is uncertain or the user cancels. Submit the resulting registration

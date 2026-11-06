@@ -37,18 +37,27 @@ pub(super) struct NativeAuthorization {
 impl NativeAuthorization {
     pub(super) fn check(&self) -> Result<()> {
         self.remaining()?;
-        if self.canceled.load(Ordering::Acquire)
-            || !self.session.valid()
-            || self
-                .prompt
-                .lock()
-                .map_err(|_| Error::Refused("prompt failed".into()))?
-                .canceled()
+        let reason = if self.canceled.load(Ordering::Acquire) {
+            Some("request disconnected")
+        } else if !self.session.valid() {
+            Some("desktop session invalid")
+        } else if self
+            .prompt
+            .lock()
+            .map_err(|_| Error::Refused("prompt failed".into()))?
+            .canceled()
         {
+            Some("desktop prompt canceled or disconnected")
+        } else {
+            None
+        };
+        if let Some(reason) = reason {
+            eprintln!("keychain-broker: biometric authorization canceled: {reason}");
             return Err(ProviderError::Canceled.into());
         }
         // Cancellation can arrive during the bounded login1 query above.
         if self.canceled.load(Ordering::Acquire) {
+            eprintln!("keychain-broker: biometric authorization canceled: request disconnected");
             return Err(ProviderError::Canceled.into());
         }
         self.remaining()?;
