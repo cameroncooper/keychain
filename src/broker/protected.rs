@@ -7,16 +7,15 @@ use crate::security::authorization::{
 };
 use crate::security::sep::{ProviderError, envelope::item_view};
 use crate::{Error, Result};
-use keychain_sep_driver::{Guidance, memory::SecretBuffer};
+use keychain_sep_driver::memory::SecretBuffer;
 use p256::ecdsa::{
     Signature, SigningKey, VerifyingKey,
     signature::{Signer, Verifier},
 };
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicBool, Ordering},
 };
-use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 impl Broker {
@@ -130,73 +129,18 @@ impl Broker {
         } else {
             format!("Use your passkey for {}", record.credential.rp_id)
         };
-        let prompt_path =
-            std::path::PathBuf::from(format!("/run/user/{}/keychain-auth.sock", self.owner));
-        let prompt = Arc::new(Mutex::new(
-            crate::prompt::PromptSession::connect(
-                &prompt_path,
-                self.owner,
-                crate::prompt::Presentation {
-                    id,
-                    application: "Keychain".into(),
-                    action,
-                    account: record.credential.username.clone(),
-                },
-            )
-            .map_err(|e| Error::io(&prompt_path, e))?,
-        ));
-        let deadline = Instant::now() + Duration::from_secs(60);
-        let valid = || -> bool {
-            !canceled.load(Ordering::Acquire)
-                && Instant::now() < deadline
-                && session.valid()
-                && prompt.lock().is_ok_and(|p| !p.canceled())
-        };
-        let sign = |message: &[u8]| -> Result<AuthorizedSignature> {
-            if !valid() {
-                return Err(Error::Sep(ProviderError::Canceled));
-            }
-            let recipient = self.registry.item_key()?;
-            if recipient.reference().key_id != record.recipient_id {
-                return Err(Error::Security("selected recipient mismatch".into()));
-            }
-            let binding = item_binding(
-                self.owner,
-                record.revision,
-                &record.recipient_id,
-                &record.credential,
-                &record.public_sec1,
-            )?;
-            // All protection setup must succeed before plaintext can arrive.
-            let mut output =
-                SecretBuffer::new().map_err(|e| Error::io("protected plaintext memory", e))?;
-            let length = recipient.decrypt_selected(
-                &self.device,
-                &record.sealed,
-                output.as_mut_array(),
-                deadline,
-                |guidance| {
-                    if !valid() {
-                        return false;
-                    }
-                    prompt
-                        .lock()
-                        .is_ok_and(|mut p| p.status(guidance_message(guidance)).is_ok())
-                },
-            )?;
-            if !valid() {
-                return Err(Error::Sep(ProviderError::Canceled));
-            }
-            let scalar = item_view(output.as_array(), length, &binding)?;
-            let result = sign_scalar(&record, scalar, message)?;
-            // Drop output and the crypto key before returning; a late cancellation
-            // still discards the result and cannot mark the record verified.
-            drop(output);
-            if !valid() {
-                return Err(Error::Sep(ProviderError::Canceled));
-            }
-            Ok(result)
-        };
+        let authorization = self.native_authorization(
+            crate::prompt::Presentation {
+                id,
+                application: "Keychain".into(),
+                action,
+                account: record.credential.username.clone(),
+            },
+            canceled,
+            session,
+            false,
+        )?;
+        let sign = |message: &[u8]| self.sign_protected_record(&record, message, &authorization);
         let result = if let Some(context) = context {
             let assertion = crate::passkey::assertion_for_origin_with(
                 &record.credential,
@@ -223,26 +167,53 @@ impl Broker {
                 message.as_bytes(),
                 AuthorizationRequirement::UserVerification,
             )?;
-            if !valid() {
-                return Err(Error::Sep(ProviderError::Canceled));
-            }
+            authorization.check()?;
             self.registry.commit_verified(&record)?;
             serde_json::json!({"revision":record.revision,"verified":true})
         };
-        if !valid() {
-            return Err(Error::Sep(ProviderError::Canceled));
-        }
+        authorization.check()?;
         Ok(result)
     }
 }
 
-fn guidance_message(guidance: Guidance) -> &'static str {
-    match guidance {
-        Guidance::WaitingForDevice => "Waiting for the fingerprint reader…",
-        Guidance::Preparing => "Preparing fingerprint reader…",
-        Guidance::PlaceFinger => "Touch the fingerprint reader",
-        Guidance::LiftAndMove => "Lift and reposition your finger",
-        Guidance::HoldStill => "Hold your finger still",
+impl Broker {
+    pub(super) fn sign_protected_record(
+        &self,
+        record: &ProtectedRecord,
+        message: &[u8],
+        authorization: &super::native::NativeAuthorization,
+    ) -> Result<AuthorizedSignature> {
+        if !self.allow_item_decrypt {
+            return Err(ProviderError::UnsupportedPolicy.into());
+        }
+        authorization.check()?;
+        let recipient = self.registry.item_key()?;
+        if recipient.reference().key_id != record.recipient_id {
+            return Err(Error::Security("selected recipient mismatch".into()));
+        }
+        let binding = item_binding(
+            self.owner,
+            record.revision,
+            &record.recipient_id,
+            &record.credential,
+            &record.public_sec1,
+        )?;
+        // Memory protections must succeed before any plaintext arrives.
+        let mut output =
+            SecretBuffer::new().map_err(|e| Error::io("protected plaintext memory", e))?;
+        let length = recipient.decrypt_selected(
+            &self.device,
+            &record.sealed,
+            output.as_mut_array(),
+            authorization.deadline,
+            |guidance| authorization.progress(guidance),
+        )?;
+        authorization.check()?;
+        let scalar = item_view(output.as_array(), length, &binding)?;
+        let result = sign_scalar(record, scalar, message)?;
+        drop(output);
+        authorization.check()?;
+        Ok(result)
     }
 }
 

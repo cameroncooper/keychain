@@ -88,6 +88,7 @@ struct Caller {
 /// All fields are frozen after validation, including Chromium's injected origin.
 /// Parse again at the privileged boundary; a browser inspection is not authority.
 pub struct CreationContext {
+    binding: String,
     rp_id: String,
     rp_name: String,
     origin: String,
@@ -204,6 +205,7 @@ impl CreationContext {
             )?);
         }
         Ok(Self {
+            binding: hex::encode(Sha256::digest(details.as_bytes())),
             rp_id,
             rp_name: options.rp.name,
             origin,
@@ -218,6 +220,10 @@ impl CreationContext {
 
     pub fn rp_id(&self) -> &str {
         &self.rp_id
+    }
+    /// Exact frozen browser request, including the injected origin and challenge.
+    pub(crate) fn binding(&self) -> &str {
+        &self.binding
     }
     pub fn rp_name(&self) -> &str {
         &self.rp_name

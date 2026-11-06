@@ -5,6 +5,15 @@ separate from the maintainer's [driver validation](sep-driver/VALIDATION.md).
 The sections below record successive stages. Earlier temporary-service limits are
 superseded only where the installed-service evidence at the end explicitly says so.
 
+Latest registration update: the deployed release broker and native host passed
+creation inspection with no key creation/capture, both in the installed profile
+and a separate empty root registry with no account state. The isolated service
+is `keychain-native-create-check.service`, registry
+`/var/lib/keychain-native-create-check`, private owner socket
+`/run/keychain-native-create-check/broker.sock`. Actual biometric registration,
+subsequent signing with that native credential, and Chromium/RP acceptance remain
+pending. See [registration test commands and limits](SEP-REGISTRATION.md).
+
 ## Implemented path
 
 `keychain-sep` -> `NativeSepProvider` -> `keychain-sep-driver` -> `/dev/sep-bio`.

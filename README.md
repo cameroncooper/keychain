@@ -133,19 +133,25 @@ extension icon toggles it.
 
 For each `navigator.credentials.get()` request, Chromium supplies its validated caller origin and
 RP ID to the extension. A one-shot native host first returns only matching account labels. The
-extension opens a separate local approval window, and only after approval launches a second
-one-shot host to revalidate the complete request and sign it. The extension has no content script,
+software path opens a local presence-approval window before a second one-shot host revalidates
+the request and signs it. In broker mode, one matching account goes directly to the OS fingerprint
+prompt; multiple accounts first get an account picker. The extension has no content script,
 network permission, password access, or long-running native process.
 
 There are deliberate initial limits:
 
-- Passkey authentication is supported; passkey creation is not.
-- Cross-origin iframe requests and requested WebAuthn extensions are refused.
-- `userVerification: required` is refused. The approval window establishes user presence, but the
-  software backend cannot honestly claim device user verification. A future SEP/PAM/Touch ID
-  verifier can add that capability behind the existing boundary.
+- Device-only creation is implemented through the SEP broker: choose **This device**, then use the
+  OS fingerprint prompt. Native keys stay in the broker registry and appear in `list`/`show`.
+  The current creation path still needs real browser acceptance testing. See
+  [registration lifecycle and limits](docs/SEP-REGISTRATION.md).
+- iCloud-syncable creation and Apple uploads remain unimplemented; the browser never silently
+  substitutes device storage for an iCloud save.
+- Cross-origin iframe requests and unsupported extensions are refused. Creation supports
+  `credProps`; the Chromium caller-origin override is always required.
+- The software backend refuses `userVerification: required`. The SEP broker requires a fresh
+  verified biometric operation for native or protected-scalar signing.
 - Chromium's WebAuthentication Proxy replaces its normal authenticator handling while the badge is
-  `ON`. Requests with no matching synced passkey fail instead of falling back to a hardware key.
+  `ON`. Requests with no matching eligible passkey fail instead of falling back to a hardware key.
   Click the icon to show `OFF` before using Chromium's normal authenticators.
 
 The adapter relies on Chromium's documented
@@ -186,19 +192,19 @@ need persistent P-384 signing, public-key export, ECDH and imported recovered-ke
 
 - Included: Apple Passwords login records, password-manager sidecars and TOTP metadata, plus
   synced ES256 passkeys, explicit WebAuthn assertion signing, an opt-in Chromium adapter, and
-  development SEP broker/desktop-agent and selected-passkey migration paths.
-- Excluded: writes to Apple records, passkey creation, password/TOTP browser autofill, payment
+  development SEP broker/desktop-agent, device-only creation and selected-passkey migration paths.
+- Excluded: writes to Apple records, iCloud-syncable passkey creation, password/TOTP browser autofill, payment
   cards, Hide My Email, background sync and other browser transports.
 - Network TLS verification is always enabled; there is no insecure switch.
 
 See [DESIGN.md](DESIGN.md) for the architecture, protocol boundary, and SEP integration plan.
 The current [SEP completion design](SEP-IMPLEMENTATION.md) covers native signing, biometric item
-protection, the desktop authentication prompt, migration, and future iCloud/device-only creation.
+protection, the desktop authentication prompt, migration, and both iCloud/device-only creation.
 The Rust driver/provider, broker, desktop prompt and synthetic migration/native-host path have
 [application-side hardware evidence](docs/SEP-APPLICATION-VALIDATION.md). Build the optional agent
 with `cargo build --release --features desktop-agent` (requires GTK development files). See
 [service deployment](contrib/SEP-SERVICES.md) and [selected migration](docs/SEP-MIGRATION.md).
-Installed service activation, real browser validation and source retirement remain under development.
+Installed service activation has passed; real browser validation and source retirement remain pending.
 
 See [SEP-INTEGRATION.md](SEP-INTEGRATION.md) for the proven biometric signing mechanism, backend integration guidance,
 and the remaining requirements for SEP-protected keys and passkeys.

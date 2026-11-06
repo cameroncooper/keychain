@@ -10,6 +10,8 @@ pub enum Error {
     AuthenticationRequired(String),
     #[error("operation refused: {0}")]
     Refused(String),
+    #[error("an excluded passkey already exists for this relying party")]
+    CredentialExcluded,
     #[error("security backend error: {0}")]
     Security(String),
     #[error("invalid or unsupported data: {0}")]

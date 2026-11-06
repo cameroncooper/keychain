@@ -291,10 +291,10 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 139 passing tests, five ignored (two Apple network and three privileged
-integration tests). Both registry tests passed separately as root, including
+Workspace checks: 141 passing tests, six ignored (two Apple network and four privileged
+integration tests). All three registry tests passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
-Five browser service-worker flow tests also pass. Strict Clippy is clean.
+Nine browser service-worker flow tests also pass. Strict Clippy is clean.
 The broker now exits after an idle interval without interrupting queued/active
 work. Its temporary-root listener/disconnect lifecycle test passed separately;
 installed socket activation, clean idle exit and new-process reactivation have also passed.
@@ -369,10 +369,18 @@ native SEP result with UV and independently verifying the signature against the
 new public key. Device-bound BE/BS stay zero. Four offline tests cover encoded
 fields and refusal of wrong origin, identity, signature, protection, absent UV,
 unsupported requirements and excluded credentials. These tests use synthetic
-signing outcomes, not hardware authorization. Durable broker creation, browser
-storage selection and registration delivery are not yet connected; the extension
-continues to reject creation until that lifecycle is implemented. iCloud creation,
-upload/fetch reconciliation and other-device verification also remain required.
+signing outcomes, not hardware authorization. Durable broker creation, explicit
+browser storage selection and registration delivery are connected. An encrypted
+intent precedes CREATE, a saved key precedes authorization, and local eligibility
+precedes response delivery. Restart/ambiguous-delivery tests retain the same key;
+an interrupted CREATE without a saved key refuses reuse of the transaction.
+One shared desktop authorization lifetime handles native/protected use and creation.
+Exclusion disclosure requires fresh verified presence before InvalidStateError.
+General list/show merge native broker metadata without hiding unmigrated synced
+items. Real registration/login in Chromium and complete-chain reboot evidence are
+still pending; no hardware creation pass is claimed from these tests. iCloud
+creation, upload/fetch reconciliation and other-device verification remain required.
+See [registration details](docs/SEP-REGISTRATION.md).
 
 Cold power-cycle, suspend/resume, other hardware, enrollment-set invalidation,
 native private-key import, P-384 and multi-user SEP identity isolation remain

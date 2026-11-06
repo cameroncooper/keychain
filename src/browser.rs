@@ -35,6 +35,18 @@ enum HostRequest {
         #[serde(rename = "requestDetailsJson")]
         request_details_json: String,
     },
+    InspectCreation {
+        version: u32,
+        #[serde(rename = "requestDetailsJson")]
+        request_details_json: String,
+    },
+    Create {
+        version: u32,
+        transaction: uuid::Uuid,
+        storage: crate::model::PasskeyProvenance,
+        #[serde(rename = "requestDetailsJson")]
+        request_details_json: String,
+    },
     Assert {
         version: u32,
         #[serde(rename = "requestDetailsJson")]
@@ -189,6 +201,29 @@ fn reply_for_broker_with(
             } => call(crate::broker::Operation::Inspect {
                 request_details_json,
             }),
+            HostRequest::InspectCreation {
+                request_details_json,
+                ..
+            } => call(crate::broker::Operation::InspectCreation {
+                request_details_json,
+            }),
+            HostRequest::Create {
+                transaction,
+                storage,
+                request_details_json,
+                ..
+            } => {
+                let result = call(crate::broker::Operation::Create {
+                    transaction,
+                    storage,
+                    request_details_json,
+                })?;
+                let response_json = result
+                    .get("responseJson")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| Error::Security("broker returned no registration".into()))?;
+                Ok(serde_json::json!({"kind":"registration","responseJson":response_json}))
+            }
             HostRequest::Assert {
                 request_details_json,
                 passkey_id,
@@ -226,8 +261,17 @@ fn parse_host_request(message: &[u8]) -> Result<HostRequest> {
         return Err(Error::InvalidData("native message exceeds limit".into()));
     }
     let request: HostRequest = serde_json::from_slice(message)?;
-    let (version, details) = match &request {
-        HostRequest::Capabilities { version } => (*version, None),
+    let (version, details, creation) = match &request {
+        HostRequest::Capabilities { version } => (*version, None, false),
+        HostRequest::InspectCreation {
+            version,
+            request_details_json,
+        }
+        | HostRequest::Create {
+            version,
+            request_details_json,
+            ..
+        } => (*version, Some(request_details_json), true),
         HostRequest::Inspect {
             version,
             request_details_json,
@@ -236,7 +280,7 @@ fn parse_host_request(message: &[u8]) -> Result<HostRequest> {
             version,
             request_details_json,
             ..
-        } => (*version, Some(request_details_json)),
+        } => (*version, Some(request_details_json), false),
     };
     if version != 1 {
         return Err(Error::InvalidData(format!(
@@ -244,7 +288,26 @@ fn parse_host_request(message: &[u8]) -> Result<HostRequest> {
         )));
     }
     if let Some(details) = details {
-        RequestContext::parse(details)?;
+        if creation {
+            passkey::registration::CreationContext::parse(details)?;
+        } else {
+            RequestContext::parse(details)?;
+        }
+    }
+    if let HostRequest::Create {
+        transaction,
+        storage,
+        ..
+    } = &request
+    {
+        if transaction.get_version_num() != 4 {
+            return Err(Error::InvalidData(
+                "registration transaction must be a UUID v4".into(),
+            ));
+        }
+        if *storage != crate::model::PasskeyProvenance::DeviceBound {
+            return Err(crate::security::sep::ProviderError::UnsupportedPolicy.into());
+        }
     }
     Ok(request)
 }
@@ -256,6 +319,9 @@ fn handle_message(
 ) -> Result<HostResult> {
     let request = parse_host_request(message)?;
     let details = match &request {
+        HostRequest::Create { .. } | HostRequest::InspectCreation { .. } => {
+            return Err(crate::security::sep::ProviderError::UnsupportedPolicy.into());
+        }
         HostRequest::Capabilities { .. } => {
             return Ok(HostResult::Capabilities {
                 user_verification_available: false,
@@ -289,6 +355,9 @@ fn handle_message(
     }
 
     match request {
+        HostRequest::Create { .. } | HostRequest::InspectCreation { .. } => {
+            Err(crate::security::sep::ProviderError::UnsupportedPolicy.into())
+        }
         HostRequest::Capabilities { .. } => Ok(HostResult::Capabilities {
             user_verification_available: false,
         }),
@@ -465,6 +534,8 @@ fn default_user_verification() -> String {
 
 fn error_reply(error: &Error) -> serde_json::Value {
     let name = match error {
+        Error::CredentialExcluded => "InvalidStateError",
+        Error::Sep(crate::security::sep::ProviderError::UnsupportedPolicy) => "NotSupportedError",
         Error::Sep(
             crate::security::sep::ProviderError::Canceled
             | crate::security::sep::ProviderError::Expired
@@ -509,6 +580,61 @@ mod tests {
     use crate::model::VaultState;
     use crate::paths::AppPaths;
     use crate::security::{KeyUsage, SoftwareFileBackend};
+
+    #[test]
+    fn creation_is_broker_only_and_freezes_storage_transaction_and_origin_before_ipc() {
+        let details = json!({"rp":{"id":"example.com","name":"Example"},
+            "user":{"id":"AQ","name":"user","displayName":"User"},
+            "challenge":URL_SAFE_NO_PAD.encode([0u8;32]),
+            "pubKeyCredParams":[{"type":"public-key","alg":-7}],
+            "extensions":{"remoteDesktopClientOverride":{"origin":"https://example.com","sameOriginWithAncestors":true}}});
+        let transaction = uuid::Uuid::new_v4();
+        let mut request = json!({"version":1,"action":"create","transaction":transaction,
+            "storage":"device-bound","requestDetailsJson":details.to_string()});
+        let reply = reply_for_broker_with(request.to_string().as_bytes(), |operation| {
+            let crate::broker::Operation::Create {
+                transaction: seen,
+                storage,
+                request_details_json,
+            } = operation
+            else {
+                panic!("wrong operation")
+            };
+            assert_eq!(seen, transaction);
+            assert_eq!(storage, crate::model::PasskeyProvenance::DeviceBound);
+            assert_eq!(request_details_json, details.to_string());
+            Ok(json!({"responseJson":"{}","recordId":transaction}))
+        });
+        assert_eq!(reply["result"]["kind"], "registration");
+        assert_eq!(reply["result"]["responseJson"], "{}");
+        assert_eq!(
+            Fixture::new().send(request.clone())["error"]["name"],
+            "NotSupportedError"
+        );
+        request["storage"] = json!("synced");
+        let reply = reply_for_broker_with(request.to_string().as_bytes(), |_| {
+            panic!("unsupported storage reached IPC")
+        });
+        assert_eq!(reply["error"]["name"], "NotSupportedError");
+        request["storage"] = json!("device-bound");
+        request["transaction"] = json!(uuid::Uuid::nil());
+        assert!(
+            !reply_for_broker_with(request.to_string().as_bytes(), |_| panic!(
+                "nil transaction reached IPC"
+            ))["ok"]
+                .as_bool()
+                .unwrap_or(true)
+        );
+        request["transaction"] = json!(transaction);
+        let mut invalid = details.clone();
+        invalid["extensions"]["remoteDesktopClientOverride"]["origin"] =
+            json!("https://attacker.example");
+        request["requestDetailsJson"] = json!(invalid.to_string());
+        let reply = reply_for_broker_with(request.to_string().as_bytes(), |_| {
+            panic!("invalid origin reached IPC")
+        });
+        assert_eq!(reply["error"]["name"], "SecurityError");
+    }
 
     #[test]
     fn extension_and_installer_use_the_native_host_name() {

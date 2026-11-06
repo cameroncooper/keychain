@@ -4,6 +4,9 @@ const pendingKey = (requestId) => `pending:${requestId}`;
 const canceledRequests = new Set();
 const processingRequests = new Set();
 const activeNative = new Map();
+const requestKinds = new Map();
+const completedRequests = new Set();
+const selectionWindows = new Map();
 
 function domError(name, message) {
   return { name, message };
@@ -48,13 +51,50 @@ async function ensureProxyState() {
 }
 
 async function completeGetWithError(requestId, error) {
-  if (canceledRequests.has(requestId)) {
-    return;
-  }
+  return completeRequest(requestId, "get", { error });
+}
+
+async function completeRequest(requestId, kind, result) {
+  if (canceledRequests.has(requestId) || completedRequests.has(requestId)) return;
+  completedRequests.add(requestId);
   try {
-    await chrome.webAuthenticationProxy.completeGetRequest({ requestId, error });
+    if (kind === "create") {
+      await chrome.webAuthenticationProxy.completeCreateRequest({ requestId, ...result });
+    } else {
+      await chrome.webAuthenticationProxy.completeGetRequest({ requestId, ...result });
+    }
   } catch (completionError) {
     console.error("Could not complete WebAuthn request", completionError);
+  }
+}
+
+async function openSelection(requestId) {
+  const window = await chrome.windows.create({
+    url: `${APPROVAL_PAGE}?requestId=${encodeURIComponent(requestId)}`,
+    type: "popup", width: 440, height: 560, focused: true,
+  });
+  if (canceledRequests.has(requestId) || completedRequests.has(requestId)) {
+    await chrome.storage.session.remove(pendingKey(requestId));
+    if (window?.id !== undefined) await chrome.windows.remove(window.id);
+  } else if (window?.id !== undefined) {
+    selectionWindows.set(requestId, window.id);
+    const pending = await pendingRequest(requestId);
+    if (pending) {
+      await chrome.storage.session.set({ [pendingKey(requestId)]: { ...pending, windowId: window.id } });
+      if (canceledRequests.has(requestId) || completedRequests.has(requestId)) {
+        await chrome.storage.session.remove(pendingKey(requestId));
+      }
+    } else {
+      await closeSelection(requestId);
+    }
+  }
+}
+
+async function closeSelection(requestId) {
+  const windowId = selectionWindows.get(requestId);
+  selectionWindows.delete(requestId);
+  if (windowId !== undefined) {
+    try { await chrome.windows.remove(windowId); } catch { /* Already closed. */ }
   }
 }
 
@@ -90,6 +130,8 @@ async function callNative(message, requestId) {
 async function handleGet(request) {
   const requestId = request.requestId;
   canceledRequests.delete(requestId);
+  completedRequests.delete(requestId);
+  requestKinds.set(requestId, "get");
   try {
     const reply = await callNative({
       version: 1,
@@ -113,6 +155,7 @@ async function handleGet(request) {
     if (canceledRequests.has(requestId)) return;
     await chrome.storage.session.set({
       [pendingKey(requestId)]: {
+        kind: "get",
         requestId,
         requestDetailsJson: request.requestDetailsJson,
         inspection: reply.result,
@@ -126,13 +169,7 @@ async function handleGet(request) {
       return;
     }
     try {
-      await chrome.windows.create({
-        url: `${APPROVAL_PAGE}?requestId=${encodeURIComponent(requestId)}`,
-        type: "popup",
-        width: 440,
-        height: 560,
-        focused: true,
-      });
+      await openSelection(requestId);
     } catch (error) {
       await chrome.storage.session.remove(pendingKey(requestId));
       throw error;
@@ -159,7 +196,10 @@ async function approveRequest(requestId, passkeyId) {
   try {
     const pending = await pendingRequest(requestId);
     if (!pending) {
-      throw new Error("This passkey request is no longer active");
+      return { ok: false, message: "This passkey request is no longer active" };
+    }
+    if (pending.kind !== "get") {
+      return { ok: false, message: "This is not a sign-in request" };
     }
     const eligible = pending.inspection.candidates.some(
       (candidate) => candidate.id === passkeyId,
@@ -170,6 +210,7 @@ async function approveRequest(requestId, passkeyId) {
 
     // Consume the selection before signing so it cannot be replayed.
     await chrome.storage.session.remove(pendingKey(requestId));
+    await closeSelection(requestId);
     const reply = await callNative({
       version: 1,
       action: "assert",
@@ -193,10 +234,7 @@ async function approveRequest(requestId, passkeyId) {
     if (canceledRequests.has(requestId)) {
       return { ok: false, message: "The website canceled this request" };
     }
-    await chrome.webAuthenticationProxy.completeGetRequest({
-      requestId,
-      responseJson: reply.result.responseJson,
-    });
+    await completeRequest(requestId, "get", { responseJson: reply.result.responseJson });
     return { ok: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -208,12 +246,79 @@ async function approveRequest(requestId, passkeyId) {
 }
 
 async function denyRequest(requestId) {
+  const pending = await pendingRequest(requestId);
+  const kind = pending?.kind || requestKinds.get(requestId);
+  if (!kind) return { ok: false, message: "This request is no longer active" };
+  const completion = completeRequest(requestId, kind, {
+    error: domError("NotAllowedError", "The passkey request was canceled"),
+  });
+  activeNative.get(requestId)?.disconnect();
   await chrome.storage.session.remove(pendingKey(requestId));
-  await completeGetWithError(
-    requestId,
-    domError("NotAllowedError", "The passkey request was not approved"),
-  );
+  await closeSelection(requestId);
+  await completion;
   return { ok: true };
+}
+
+async function handleCreate(request) {
+  const requestId = request.requestId;
+  canceledRequests.delete(requestId);
+  completedRequests.delete(requestId);
+  requestKinds.set(requestId, "create");
+  try {
+    const reply = await callNative({ version: 1, action: "inspectCreation",
+      requestDetailsJson: request.requestDetailsJson }, requestId);
+    if (!reply.ok) {
+      await completeRequest(requestId, "create", { error: reply.error || domError("UnknownError", "Registration is unavailable") });
+      return;
+    }
+    const inspection = reply.result;
+    if (inspection?.kind !== "creationInspection" || !Array.isArray(inspection.storageChoices) ||
+        inspection.storageChoices.length === 0 || inspection.storageChoices.some((choice) => choice !== "device-bound")) {
+      throw new Error("The native host returned invalid registration storage choices");
+    }
+    if (canceledRequests.has(requestId)) return;
+    await chrome.storage.session.set({ [pendingKey(requestId)]: {
+      kind: "create", requestId, requestDetailsJson: request.requestDetailsJson,
+      transaction: crypto.randomUUID(), inspection,
+    } });
+    await openSelection(requestId);
+  } catch (error) {
+    await chrome.storage.session.remove(pendingKey(requestId));
+    await completeRequest(requestId, "create", { error: domError("UnknownError", String(error)) });
+  }
+}
+
+async function createRequest(requestId, storage) {
+  if (processingRequests.has(requestId)) return { ok: false, message: "This request is already being processed" };
+  processingRequests.add(requestId);
+  try {
+    const pending = await pendingRequest(requestId);
+    if (!pending || pending.kind !== "create") return { ok: false, message: "This creation request is no longer active" };
+    if (!pending.inspection.storageChoices.includes(storage)) {
+      return { ok: false, message: "Choose an available storage location" };
+    }
+    // Freeze and consume the application selection before presenting the OS
+    // prompt. A replay cannot create another key or reuse biometric approval.
+    await chrome.storage.session.remove(pendingKey(requestId));
+    await closeSelection(requestId);
+    const reply = await callNative({ version: 1, action: "create", transaction: pending.transaction,
+      storage, requestDetailsJson: pending.requestDetailsJson }, requestId);
+    if (!reply.ok) {
+      await completeRequest(requestId, "create", { error: reply.error || domError("UnknownError", "Registration failed") });
+      return { ok: false, message: reply.error?.message || "Registration failed" };
+    }
+    if (reply.result?.kind !== "registration" || typeof reply.result.responseJson !== "string") {
+      throw new Error("The native host returned an invalid registration");
+    }
+    if (canceledRequests.has(requestId)) return { ok: false, message: "The website canceled this request" };
+    await completeRequest(requestId, "create", { responseJson: reply.result.responseJson });
+    return { ok: true };
+  } catch (error) {
+    await completeRequest(requestId, "create", { error: domError("UnknownError", String(error)) });
+    return { ok: false, message: String(error) };
+  } finally {
+    processingRequests.delete(requestId);
+  }
 }
 
 chrome.webAuthenticationProxy.onGetRequest.addListener((request) => {
@@ -221,10 +326,7 @@ chrome.webAuthenticationProxy.onGetRequest.addListener((request) => {
 });
 
 chrome.webAuthenticationProxy.onCreateRequest.addListener((request) => {
-  void chrome.webAuthenticationProxy.completeCreateRequest({
-    requestId: request.requestId,
-    error: domError("NotSupportedError", "Creating passkeys is not supported yet"),
-  });
+  void handleCreate(request);
 });
 
 async function handleIsUvpaa(request) {
@@ -255,8 +357,32 @@ chrome.webAuthenticationProxy.onRequestCanceled.addListener((requestId) => {
   activeNative.get(requestId)?.disconnect();
   activeNative.delete(requestId);
   void chrome.storage.session.remove(pendingKey(requestId));
+  void closeSelection(requestId);
   void chrome.runtime.sendMessage({ type: "requestCanceled", requestId }).catch(() => {});
 });
+
+chrome.windows.onRemoved.addListener((windowId) => {
+  void cancelClosedSelection(windowId);
+});
+
+async function cancelClosedSelection(windowId) {
+  for (const [requestId, selectedWindow] of selectionWindows) {
+    if (selectedWindow === windowId) {
+      selectionWindows.delete(requestId);
+      await denyRequest(requestId);
+      return;
+    }
+  }
+  // MV3 may suspend the worker while the application chooser is open. Its
+  // persisted kind/window ID must still select completeCreateRequest on close.
+  const pending = await chrome.storage.session.get(null);
+  for (const value of Object.values(pending)) {
+    if (value?.windowId === windowId && Number.isSafeInteger(value.requestId)) {
+      await denyRequest(value.requestId);
+      return;
+    }
+  }
+}
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (sender.id !== chrome.runtime.id || !sender.url?.startsWith(APPROVAL_PAGE)) {
@@ -275,6 +401,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.type === "approve") {
     void approveRequest(requestId, message.passkeyId).then(sendResponse);
+    return true;
+  }
+  if (message.type === "create") {
+    void createRequest(requestId, message.storage).then(sendResponse);
     return true;
   }
   if (message.type === "deny") {

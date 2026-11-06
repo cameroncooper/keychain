@@ -164,8 +164,8 @@ fn run(cli: Cli) -> Result<()> {
             let _lock = StateLock::acquire(&paths)?;
             command_sync(&paths, config, backend, &store)
         }
-        Command::List { query, json } => command_list(query.as_deref(), json, &store),
-        Command::Show { id, json } => command_show(&id, json, &store),
+        Command::List { query, json } => command_list(query.as_deref(), json, &config, &store),
+        Command::Show { id, json } => command_show(&id, json, &config, &store),
         Command::Totp { id } => command_totp(&id, &store),
         Command::Passkey { command } => {
             let _lock = StateLock::acquire(&paths)?;
@@ -741,8 +741,13 @@ fn save_synced_projection(
     Ok(())
 }
 
-fn command_list(query: Option<&str>, json: bool, store: &StateStore<'_>) -> Result<()> {
-    let vault = require_vault(store)?;
+fn command_list(
+    query: Option<&str>,
+    json: bool,
+    config: &Config,
+    store: &StateStore<'_>,
+) -> Result<()> {
+    let vault = visible_vault(config, store)?;
     let query = query.unwrap_or_default();
     let mut items: Vec<_> = credential::search(&vault.credentials, query)
         .into_iter()
@@ -781,6 +786,7 @@ fn command_list(query: Option<&str>, json: bool, store: &StateStore<'_>) -> Resu
                     "display_name": item.display_name,
                     "credential_fingerprint": passkey::credential_fingerprint(item)?,
                     "algorithm": "ES256",
+                    "storage": item.provenance,
                 }),
             });
         }
@@ -800,8 +806,8 @@ fn command_list(query: Option<&str>, json: bool, store: &StateStore<'_>) -> Resu
     Ok(())
 }
 
-fn command_show(id: &str, json: bool, store: &StateStore<'_>) -> Result<()> {
-    let vault = require_vault(store)?;
+fn command_show(id: &str, json: bool, config: &Config, store: &StateStore<'_>) -> Result<()> {
+    let vault = visible_vault(config, store)?;
     match find_vault_item(&vault, id)? {
         VaultItem::Login(item) => command_show_login(item, json),
         VaultItem::Passkey(item) => command_show_passkey(item, json),
@@ -876,12 +882,20 @@ fn command_show_passkey(item: &PasskeyCredential, json: bool) -> Result<()> {
                 "display_name": item.display_name,
                 "credential_fingerprint": fingerprint,
                 "algorithm": "ES256",
+                "storage": item.provenance,
             }))?
         );
         return Ok(());
     }
     println!("id: {}", item.id);
     println!("kind: passkey");
+    println!(
+        "storage: {}",
+        match item.provenance {
+            keychain::model::PasskeyProvenance::DeviceBound => "this device",
+            keychain::model::PasskeyProvenance::Synced => "iCloud",
+        }
+    );
     println!("relying party: {}", credential::printable(&item.rp_id));
     println!("username: {}", credential::printable(&item.username));
     if !item.display_name.is_empty() {
@@ -950,7 +964,7 @@ fn command_passkey_assert(
     backend: &dyn SecurityBackend,
     store: &StateStore<'_>,
 ) -> Result<()> {
-    let vault = require_vault(store)?;
+    let vault = visible_vault(config, store)?;
     let item = find_passkey(&vault.passkeys, id)?;
     eprintln!("Passkey sign-in requested");
     eprintln!("relying party: {}", credential::printable(&item.rp_id));
@@ -1211,6 +1225,56 @@ fn require_vault(store: &StateStore<'_>) -> Result<VaultState> {
     store
         .load_vault()?
         .ok_or_else(|| Error::Config("vault is empty; run `keychain sync`".into()))
+}
+
+/// Local native credentials live in the root broker, independently of account
+/// sync and logout. Merge their metadata without caching it as Apple data or
+/// dropping software credentials that have not been migrated to the broker.
+fn visible_vault(config: &Config, store: &StateStore<'_>) -> Result<VaultState> {
+    let Some(socket) = &config.credential_broker else {
+        return require_vault(store);
+    };
+    let mut vault = store.load_vault()?.unwrap_or_else(|| VaultState {
+        schema_version: 1,
+        synced_at: 0,
+        credentials: vec![],
+        passkeys: vec![],
+    });
+    let native: Vec<PasskeyCredential> = serde_json::from_value(keychain::broker::call(
+        socket,
+        keychain::broker::Operation::ListCredentials,
+    )?)?;
+    merge_native_inventory(&mut vault, native)?;
+    Ok(vault)
+}
+
+fn merge_native_inventory(vault: &mut VaultState, records: Vec<PasskeyCredential>) -> Result<()> {
+    use keychain::model::PasskeyProvenance;
+    let mut seen = std::collections::BTreeSet::new();
+    for record in records {
+        if !seen.insert(record.id.clone()) {
+            return Err(Error::Security("duplicate broker inventory record".into()));
+        }
+        if record.provenance != PasskeyProvenance::DeviceBound {
+            continue;
+        }
+        if let Some(previous) = vault.passkeys.iter_mut().find(|p| p.id == record.id) {
+            if previous.provenance != PasskeyProvenance::DeviceBound
+                || previous.signing_key != record.signing_key
+                || previous.rp_id != record.rp_id
+                || previous.credential_id != record.credential_id
+                || previous.user_handle != record.user_handle
+            {
+                return Err(Error::Security(
+                    "broker native credential collides with a different local identity".into(),
+                ));
+            }
+            *previous = record;
+        } else {
+            vault.passkeys.push(record);
+        }
+    }
+    Ok(())
 }
 
 fn validate_account_binding(account: &AccountState, octagon: &OctagonState) -> Result<()> {
@@ -1520,6 +1584,53 @@ mod tests {
     use clap::Parser;
     use keychain::paths::atomic_write_private;
     use keychain::security::{KeyUsage, Purpose};
+
+    #[test]
+    fn visible_inventory_adds_native_credentials_without_hiding_unmigrated_items_or_changing_identity()
+    -> Result<()> {
+        use keychain::model::PasskeyProvenance;
+        let native = PasskeyCredential {
+            provenance: PasskeyProvenance::DeviceBound,
+            id: uuid::Uuid::new_v4().to_string(),
+            rp_id: "example.com".into(),
+            credential_id: "AQ".into(),
+            user_handle: "Ag".into(),
+            username: "user".into(),
+            display_name: "User".into(),
+            created_at: 0.0,
+            modified_at: 0.0,
+            signing_key: keychain::security::KeyRef {
+                backend_id: "sep-native-v1".into(),
+                key_id: "native".into(),
+                usage: KeyUsage::WebAuthnSigning,
+                algorithm: keychain::security::KeyAlgorithm::P256,
+            },
+        };
+        let mut synced = native.clone();
+        synced.id = uuid::Uuid::new_v4().to_string();
+        synced.provenance = PasskeyProvenance::Synced;
+        synced.signing_key.backend_id = "software-file".into();
+        let mut vault = VaultState {
+            schema_version: 1,
+            synced_at: 0,
+            credentials: vec![],
+            passkeys: vec![synced.clone()],
+        };
+        merge_native_inventory(&mut vault, vec![native.clone()])?;
+        assert_eq!(vault.passkeys, vec![synced.clone(), native.clone()]);
+        let mut updated = native.clone();
+        updated.username = "Updated".into();
+        merge_native_inventory(&mut vault, vec![updated.clone()])?;
+        assert_eq!(vault.passkeys, vec![synced.clone(), updated]);
+        let mut changed = native.clone();
+        changed.credential_id = "Aw".into();
+        assert!(merge_native_inventory(&mut vault, vec![changed]).is_err());
+        let mut colliding = native.clone();
+        colliding.id = synced.id.clone();
+        assert!(merge_native_inventory(&mut vault, vec![colliding]).is_err());
+        assert!(merge_native_inventory(&mut vault, vec![native.clone(), native]).is_err());
+        Ok(())
+    }
 
     #[test]
     fn trust_repair_is_an_explicit_join_option() -> Result<()> {

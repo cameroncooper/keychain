@@ -31,6 +31,23 @@ pub struct StoredSepKey {
 }
 
 impl StoredSepKey {
+    /// Wait only for an exclusive open. Once CREATE starts, never retry it on
+    /// an ambiguous result. No public credential identity has been delivered yet.
+    pub fn create_selected(
+        path: &Path,
+        deadline: Instant,
+        mut progress: impl FnMut(Guidance) -> bool,
+    ) -> Result<Self> {
+        let mut device = acquire_device(deadline, || Device::open(path), &mut progress)?;
+        if !progress(Guidance::Preparing) {
+            return Err(ProviderError::Canceled.into());
+        }
+        if Instant::now() >= deadline {
+            return Err(ProviderError::Expired.into());
+        }
+        Self::create(&mut device)
+    }
+
     pub fn create(device: &mut Device) -> Result<Self> {
         Self::create_for_policy(device, false)
     }

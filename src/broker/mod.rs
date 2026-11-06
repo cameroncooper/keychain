@@ -1,6 +1,8 @@
 //! Privileged selected-credential operations. Transport peers supply UID; request
 //! fields never override key ownership, session policy or stored provenance.
+mod native;
 mod protected;
+mod registration;
 pub mod registry;
 pub mod session;
 
@@ -35,6 +37,15 @@ pub enum Operation {
     Status,
     Capabilities,
     Inspect {
+        request_details_json: String,
+    },
+    ListCredentials,
+    InspectCreation {
+        request_details_json: String,
+    },
+    Create {
+        transaction: Uuid,
+        storage: crate::model::PasskeyProvenance,
         request_details_json: String,
     },
     ItemRecipient,
@@ -101,12 +112,14 @@ pub enum FailureCode {
     Busy,
     Unsupported,
     Refused,
+    CredentialExcluded,
     InvalidRequest,
     Internal,
 }
 fn failure(error: Error) -> Failure {
     use crate::security::sep::ProviderError;
     let code = match &error {
+        Error::CredentialExcluded => FailureCode::CredentialExcluded,
         Error::Sep(ProviderError::Canceled) => FailureCode::Canceled,
         Error::Sep(ProviderError::Expired) => FailureCode::Expired,
         Error::Sep(ProviderError::Busy) => FailureCode::Busy,
@@ -196,6 +209,10 @@ pub fn call_cancelable(
         match error.code {
             FailureCode::Canceled => Error::Sep(crate::security::sep::ProviderError::Canceled),
             FailureCode::Expired => Error::Sep(crate::security::sep::ProviderError::Expired),
+            FailureCode::Unsupported => {
+                Error::Sep(crate::security::sep::ProviderError::UnsupportedPolicy)
+            }
+            FailureCode::CredentialExcluded => Error::CredentialExcluded,
             _ => Error::Refused(error.message),
         }
     })
@@ -334,6 +351,14 @@ impl Broker {
             );
         }
         let operation = match operation {
+            Operation::ListCredentials => {
+                return Ok(serde_json::to_value(
+                    self.registry.browser_credentials(self.owner)?,
+                )?);
+            }
+            Operation::InspectCreation { .. } | Operation::Create { .. } => {
+                return self.execute_registration(id, operation, canceled, session);
+            }
             Operation::Assert {
                 record,
                 request_details_json,
@@ -443,61 +468,18 @@ impl Broker {
                 .map(|c| format!("Use your passkey for {}", c.rp_id))
                 .unwrap_or_else(|| "Sign a disposable test message".into())
         };
-        let prompt_path = PathBuf::from(format!("/run/user/{}/keychain-auth.sock", self.owner));
-        let prompt = Arc::new(Mutex::new(
-            PromptSession::connect(
-                &prompt_path,
-                self.owner,
-                Presentation {
-                    id,
-                    application: "Keychain".into(),
-                    action,
-                    account: record.credential.username.clone(),
-                },
-            )
-            .map_err(|e| Error::io(&prompt_path, e))?,
-        ));
-        let feedback = prompt.clone();
-        let valid_session = Arc::new(session);
-        let ongoing_session = valid_session.clone();
-        let started = Instant::now();
-        let ongoing_caller = canceled.clone();
-        let provider =
-            NativeSepProvider::new(record.native_key, self.device.clone(), move |guidance| {
-                if ongoing_caller.load(Ordering::Acquire)
-                    || started.elapsed() > Duration::from_secs(60)
-                    || !ongoing_session.valid()
-                {
-                    return false;
-                }
-                let Ok(mut display) = feedback.lock() else {
-                    return false;
-                };
-                if display.canceled() {
-                    return false;
-                }
-                display
-                    .status(if cancellation_test {
-                        "Click Cancel or press Escape — do not touch the reader"
-                    } else {
-                        match guidance {
-                            keychain_sep_driver::Guidance::WaitingForDevice => {
-                                "Waiting for the fingerprint reader…"
-                            }
-                            keychain_sep_driver::Guidance::Preparing => {
-                                "Preparing fingerprint reader…"
-                            }
-                            keychain_sep_driver::Guidance::PlaceFinger => {
-                                "Touch the fingerprint reader"
-                            }
-                            keychain_sep_driver::Guidance::LiftAndMove => {
-                                "Lift and reposition your finger"
-                            }
-                            keychain_sep_driver::Guidance::HoldStill => "Hold your finger still",
-                        }
-                    })
-                    .is_ok()
-            })?;
+        let authorization = self.native_authorization(
+            Presentation {
+                id,
+                application: "Keychain".into(),
+                action,
+                account: record.credential.username.clone(),
+            },
+            canceled,
+            session,
+            cancellation_test,
+        )?;
+        let provider = authorization.provider(record.native_key, self.device.clone())?;
         let result = if let Some(context) = context {
             let public = provider.public_sec1()?;
             let assertion = crate::passkey::assertion_for_origin_with(
@@ -529,16 +511,7 @@ impl Broker {
             )?;
             serde_json::json!({"signatureDer": hex::encode(signature), "verified": true})
         };
-        if canceled.load(Ordering::Acquire)
-            || !valid_session.valid()
-            || started.elapsed() > Duration::from_secs(60)
-            || prompt
-                .lock()
-                .map_err(|_| Error::Refused("prompt failed".into()))?
-                .canceled()
-        {
-            return Err(Error::Sep(crate::security::sep::ProviderError::Canceled));
-        }
+        authorization.check()?;
         if cancellation_test {
             return Err(Error::Refused(
                 "cancellation test completed with a fingerprint; no signature delivered".into(),
@@ -562,14 +535,20 @@ impl Broker {
         }
     }
     fn verification_available(&self) -> Result<bool> {
-        use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
-        let credentials = self.registry.browser_credentials(self.owner)?;
-        if !credentials
-            .iter()
-            .any(|c| c.signing_key.backend_id == "sep-native-v1" || self.allow_item_decrypt)
-        {
+        // Native creation is available even before the first credential exists.
+        self.native_creation_available()
+    }
+    fn native_creation_available(&self) -> Result<bool> {
+        if !self.native_ui_available()? {
             return Ok(false);
         }
+        let Ok(device) = keychain_sep_driver::Device::open(&self.device) else {
+            return Ok(false);
+        };
+        Ok(device.info().sensor_present != 0 && device.info().enrolled > 0)
+    }
+    fn native_ui_available(&self) -> Result<bool> {
+        use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
         let path = PathBuf::from(format!("/run/user/{}/keychain-auth.sock", self.owner));
         let Ok(meta) = std::fs::symlink_metadata(&path) else {
             return Ok(false);
@@ -591,10 +570,7 @@ impl Broker {
             return Ok(false);
         }
         drop(agent); // Liveness probe only: never present a dialog or start capture.
-        let Ok(device) = keychain_sep_driver::Device::open(&self.device) else {
-            return Ok(false);
-        };
-        Ok(device.info().sensor_present != 0 && device.info().enrolled > 0)
+        Ok(true)
     }
 }
 

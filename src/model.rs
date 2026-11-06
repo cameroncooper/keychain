@@ -195,7 +195,8 @@ pub struct PasskeyCredential {
     #[serde(default)]
     #[zeroize(skip)]
     pub provenance: PasskeyProvenance,
-    /// The CKKS item UUID. This is our stable local selector.
+    /// CKKS item UUID for synced credentials, broker UUID for device-bound ones.
+    /// This is our stable local selector.
     pub id: String,
     pub rp_id: String,
     /// Base64url without padding, matching WebAuthn's JSON representation.

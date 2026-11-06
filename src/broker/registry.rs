@@ -10,6 +10,7 @@ use crate::security::sep::StoredSepKey;
 use crate::security::{Purpose, SecurityBackend, SoftwareFileBackend};
 use crate::{Error, Result};
 mod protected;
+mod registration;
 pub(super) use protected::decode_public;
 pub use protected::{
     ProtectedImport, ProtectedRecord, ProtectedSummary, ProtectionState, Recipient, item_binding,
@@ -22,6 +23,8 @@ pub struct Record {
     pub owner: u32,
     pub diagnostic: bool,
     pub registered: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    creation_binding: Option<String>,
     pub credential: PasskeyCredential,
     pub native_key: StoredSepKey,
 }
@@ -194,6 +197,7 @@ impl Registry {
             owner,
             diagnostic: true,
             registered: false,
+            creation_binding: None,
             credential: PasskeyCredential {
                 provenance: PasskeyProvenance::DeviceBound,
                 id: id.clone(),
@@ -228,6 +232,9 @@ impl Registry {
             || record.credential.id != id
             || record.credential.signing_key != *record.native_key.reference()
             || record.credential.provenance != PasskeyProvenance::DeviceBound
+            || record.creation_binding.as_ref().is_some_and(|binding| {
+                record.diagnostic || binding.len() != 64 || hex::decode(binding).is_err()
+            })
         {
             return Err(Error::Security(
                 "broker record identity/policy mismatch".into(),

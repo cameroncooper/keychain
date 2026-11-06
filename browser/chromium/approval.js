@@ -7,6 +7,7 @@ const accounts = document.querySelector("#accounts");
 const errorText = document.querySelector("#error");
 const approveButton = document.querySelector("#approve");
 const cancelButton = document.querySelector("#cancel");
+let creation = false;
 
 function showError(message) {
   errorText.textContent = message;
@@ -48,14 +49,27 @@ async function load() {
     return;
   }
   const inspection = reply.pending.inspection;
-  if (inspection.biometric === true) {
+  creation = reply.pending.kind === "create";
+  if (creation) {
+    document.title = "Create a passkey";
+    document.querySelector("h1").textContent = "Save a passkey";
+    document.querySelector("legend").textContent = "Where to save it";
+    document.querySelector("#notice").textContent = "This passkey stays on this device. It is not saved to iCloud and cannot be recovered on another device. Your desktop will ask for a fingerprint.";
+    approveButton.textContent = "Create passkey";
+    inspection.storageChoices.forEach((choice, index) => {
+      if (choice === "device-bound") {
+        accounts.append(accountChoice({ id: choice, displayName: "This device",
+          username: inspection.username || inspection.displayName || "Passkey" }, index === 0));
+      }
+    });
+  } else if (inspection.biometric === true) {
     document.querySelector("h1").textContent = "Choose an account";
     document.querySelector("#notice").textContent = "Your desktop will ask for a fingerprint after you choose an account.";
     approveButton.textContent = "Use passkey";
   }
   site.textContent = inspection.rpId;
   origin.textContent = inspection.origin;
-  inspection.candidates.forEach((candidate, index) => {
+  if (!creation) inspection.candidates.forEach((candidate, index) => {
     accounts.append(accountChoice(candidate, index === 0));
   });
   form.hidden = false;
@@ -66,14 +80,15 @@ form.addEventListener("submit", async (event) => {
   showError("");
   const selected = new FormData(form).get("passkey");
   if (typeof selected !== "string") {
-    showError("Choose an account first.");
+    showError(creation ? "Choose where to save the passkey." : "Choose an account first.");
     return;
   }
   setBusy(true);
   const reply = await chrome.runtime.sendMessage({
-    type: "approve",
+    type: creation ? "create" : "approve",
     requestId,
     passkeyId: selected,
+    storage: selected,
   });
   if (reply?.ok) {
     window.close();
