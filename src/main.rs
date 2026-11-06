@@ -1234,6 +1234,18 @@ fn command_status(
             repair.phase(),
             repair.retained().len()
         );
+        let recovery_state = match repair.candidate().trust_state {
+            OctagonTrustState::IdentityReady => "no recovered sponsor saved",
+            OctagonTrustState::SponsorRecovered { .. } => "recovered sponsor saved",
+            OctagonTrustState::JoinedAwaitingTlkVerification { .. } => {
+                "joined; self recovery pending"
+            }
+            OctagonTrustState::JoinedSponsorRetirementVerified { .. } => {
+                "joined; self recovery verified"
+            }
+            OctagonTrustState::Joined => "joined",
+        };
+        println!("repair recovery checkpoint: {recovery_state}");
         if repair.phase() != keychain::recovery::RepairPhase::Committed {
             println!("resume trust repair: keychain join --repair");
         }

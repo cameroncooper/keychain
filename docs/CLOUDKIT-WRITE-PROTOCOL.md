@@ -75,3 +75,15 @@ Remaining gates:
 No software signing result, simulated server, retained journal or successful
 HTTP status substitutes for these gates. No root/peer/ADI regeneration, escrow
 retry, enrollment change or existing credential overwrite belongs to this work.
+
+
+Read gate update, 2026-11-06: after user-operated fresh authentication, the
+read-only metadata probe successfully validated 14 Passwords records' zone/owner,
+change tags and opaque server encoding. Octagon's recovery records separately
+exposed omitted optional identifier enums; the decoder now accepts omission in
+its typed context and still rejects conflicting explicit values. The recovery
+metadata probe subsequently decoded 20 encrypted shares and 60 sync-key records.
+These are read/format observations only: no atomic save, absence reconciliation,
+TLK unwrap, broker account enrollment or other-device acceptance was performed.
+Live negative/positive writes still require the concrete scoped authorization
+and verification gates above.

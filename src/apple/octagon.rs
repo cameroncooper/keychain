@@ -951,6 +951,63 @@ mod tests {
     use crate::security::SoftwareFileBackend;
 
     #[test]
+    #[ignore = "configured pending repair + network; reads recovery-share metadata only, no escrow/join/write/decryption"]
+    fn live_saved_repair_sponsor_metadata_decodes_without_recovery() -> Result<()> {
+        use crate::apple::anisette::ManagedAnisette;
+        use crate::config::Config;
+        use crate::paths::StateLock;
+        use crate::store::StateStore;
+        keychain_sep_driver::memory::make_process_nondumpable()
+            .map_err(|e| Error::io("recovery metadata check", e))?;
+        let paths = AppPaths::discover()?;
+        let _lock = StateLock::acquire(&paths)?;
+        let config = Config::load(&paths)?;
+        let backend = SoftwareFileBackend::new(paths.clone());
+        let store = StateStore::new(&paths, &backend);
+        let account = store
+            .load_account()?
+            .ok_or_else(|| Error::Config("account missing".into()))?;
+        let device = store
+            .load_device()?
+            .ok_or_else(|| Error::Config("device missing".into()))?;
+        let repair = store
+            .load_trust_repair()?
+            .ok_or_else(|| Error::Config("pending repair missing".into()))?;
+        repair.validate()?;
+        if repair.candidate().account_fingerprint != account_fingerprint(&account) {
+            return Err(Error::Security("repair/account binding mismatch".into()));
+        }
+        let sponsor = sponsor_context(repair.candidate())?;
+        eprintln!(
+            "confirmed recovered sponsor is saved in the repair journal; no escrow request needed"
+        );
+        let helper = config
+            .anisette_helper
+            .ok_or_else(|| Error::Config("anisette helper missing".into()))?;
+        let anisette = ManagedAnisette::start(&helper, &paths)?;
+        let client = OctagonClient::new(&account, &device, &anisette, &backend)?;
+        let raw = client.transport.invoke(
+            "fetchRecoverableTLKShares",
+            &encode_fetch_recoverable_tlkshares_request(&sponsor.peer_id),
+        )?;
+        let parsed = parse_recoverable_tlkshares_response(&raw)?;
+        if parsed.share_records.is_empty() && parsed.synckey_records.is_empty() {
+            return Err(Error::InvalidData(
+                "recovery metadata check returned no records".into(),
+            ));
+        }
+        for record in parsed.share_records.iter().chain(&parsed.synckey_records) {
+            ckks::parse_record(record)?;
+        }
+        eprintln!(
+            "decoded {} encrypted share records and {} sync-key records; no TLK unwrapped or account/vault snapshot saved",
+            parsed.share_records.len(),
+            parsed.synckey_records.len()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn viable_bottle_parser_drops_entries_without_bottle() {
         let bottle = Writer::new().bytes(2, b"OTBottle").finish();
         let entry = Writer::new().string(1, "b1").message(2, &bottle).finish();

@@ -143,3 +143,14 @@ password proof, 2FA/PET, trust repair and recovered Passwords keys remain unprov
 the user must retry `./target/release/keychain join --repair` in their terminal.
 Do not reset anisette or spend an escrow attempt to work around a non-plist init
 response. The original peer and repair journal remain retained.
+
+
+Subsequent user-operated authentication on 2026-11-06 completed password proof,
+SMS verification and escrow sponsor recovery. The refreshed service token then
+passed a read-only check of 14 Passwords records, including zone identity, tags
+and retained encoding. Full sign-in/PET acceptance is therefore no longer merely
+an SRP-init claim. Repair stopped later in the recovery-record decoder, which
+incorrectly required an optional identifier enum. The sponsor is saved, the
+parser is corrected, and [repair continuation](SYNC-RECOVERY.md#recovery-record-identifier-compatibility--2026-11-06)
+can use that checkpoint without another escrow recovery. This does not yet prove
+the replacement peer can decrypt a complete snapshot or be safely promoted.

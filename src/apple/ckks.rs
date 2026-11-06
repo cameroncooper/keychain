@@ -288,10 +288,21 @@ fn parse_zone_identity(raw: &[u8]) -> Result<ZoneIdentity> {
         let raw = unique_bytes(fields, field)?
             .ok_or_else(|| Error::InvalidData("zone identity is incomplete".into()))?;
         let identifier = decode_fields(raw)?;
-        if identifier.get(&2).map(Vec::as_slice) != Some(&[Value::Varint(kind)]) {
-            return Err(Error::InvalidData(
-                "zone identity has the wrong identifier kind".into(),
-            ));
+        // Octagon recovery records omit this optional protobuf enum. The
+        // enclosing RecordZoneIdentifier fixes the part's namespace. An explicit
+        // enum must still match; never normalize conflicting/ambiguous values.
+        if identifier
+            .get(&2)
+            .is_some_and(|values| values.as_slice() != [Value::Varint(kind)])
+        {
+            let actual = match identifier.get(&2).map(Vec::as_slice) {
+                None => "omitted".to_string(),
+                Some([Value::Varint(value)]) => value.to_string(),
+                _ => "ambiguous or wrong wire type".to_string(),
+            };
+            return Err(Error::InvalidData(format!(
+                "zone identity component {field} expects identifier kind {kind}, found {actual}"
+            )));
         }
         let name = unique_bytes(&identifier, 1)?
             .and_then(|value| std::str::from_utf8(value).ok())
@@ -411,6 +422,87 @@ mod tests {
         assert!(missing.server_precondition(&zone).is_err());
         Ok(())
     }
+    #[test]
+    fn omitted_zone_identifier_types_preserve_scope_and_conflicting_types_are_rejected()
+    -> Result<()> {
+        // Independent recovery-style wire fixture: names are present, but the
+        // optional identifier enums may be omitted by Apple's recovery service.
+        let name = |value: &str, kind: Option<u64>| {
+            let writer = Writer::new().string(1, value);
+            match kind {
+                Some(kind) => writer.uint64(2, kind).finish(),
+                None => writer.finish(),
+            }
+        };
+        let record = |zone_name: &[u8], owner: &[u8]| {
+            Writer::new()
+                .string(1, "tag-1")
+                .message(
+                    2,
+                    &Writer::new()
+                        .message(1, &Writer::new().string(1, "synthetic-share").finish())
+                        .message(
+                            2,
+                            &Writer::new()
+                                .message(1, zone_name)
+                                .message(2, owner)
+                                .finish(),
+                        )
+                        .finish(),
+                )
+                .message(3, &Writer::new().string(1, "tlkshare").finish())
+                .bytes(999, b"opaque metadata")
+                .finish()
+        };
+        let expected = ZoneIdentity {
+            name: "Passwords".into(),
+            owner: "test-owner".into(),
+        };
+        for (zone_kind, owner_kind) in [
+            (None, None),
+            (None, Some(7)),
+            (Some(6), None),
+            (Some(6), Some(7)),
+        ] {
+            let raw = record(
+                &name("Passwords", zone_kind),
+                &name("test-owner", owner_kind),
+            );
+            let parsed = parse_record(&raw)?;
+            assert_eq!(
+                parsed.server.as_ref().and_then(|s| s.zone.as_ref()),
+                Some(&expected)
+            );
+            assert_eq!(parsed.server_precondition(&expected)?.encoded_record, raw);
+            let wrong_owner = ZoneIdentity {
+                name: "Passwords".into(),
+                owner: "another-owner".into(),
+            };
+            assert!(parsed.server_precondition(&wrong_owner).is_err());
+        }
+        for invalid in [
+            name("Passwords", Some(1)),
+            name("Passwords", Some(0)),
+            Writer::new()
+                .string(1, "Passwords")
+                .uint64(2, 6)
+                .uint64(2, 6)
+                .finish(),
+            Writer::new()
+                .string(1, "Passwords")
+                .bytes(2, b"private-invalid-kind")
+                .finish(),
+            Writer::new().uint64(2, 6).finish(),
+            name("", None),
+        ] {
+            assert!(parse_record(&record(&invalid, &name("test-owner", None))).is_err());
+        }
+        for invalid in [name("test-owner", Some(6)), name("test-owner", Some(0))] {
+            assert!(parse_record(&record(&name("Passwords", None), &invalid)).is_err());
+        }
+        Ok(())
+    }
+
     #[test]
     fn incomplete_or_unrecognized_pages_cannot_be_empty_snapshots() {
         for raw in [

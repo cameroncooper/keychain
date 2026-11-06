@@ -291,7 +291,7 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 230 passing tests, twenty-five ignored (three Apple network and twenty-two privileged
+Workspace checks: 232 passing tests, twenty-six ignored (four Apple network and twenty-two privileged
 integration tests). Thirteen registry, five coordination and one account-bootstrap test passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
 The separate-UID worker and systemd startup tests also pass (twenty-one privileged
@@ -532,3 +532,14 @@ next prerequisite for real WebAuthn migration: a local status recheck still show
 an empty vault and Prepared trust repair with the prior peer retained. Resume
 that existing repair in the user's terminal; do not create another peer/recipient
 or treat the synthetic success as evidence that iCloud access is restored.
+
+
+Account progress (2026-11-06): the user completed fresh password/SMS verification
+and recovered the escrow sponsor. The Prepared repair now has a saved sponsor;
+no further escrow recovery is needed to resume it. A fresh-token read validated
+14 Passwords records. A strict parser then rejected optional identifier enums
+omitted by Octagon recovery records. The corrected parser preserves exact scope
+and explicit-type rejection, and a read-only probe now decodes 20 encrypted
+shares/60 sync-key records. `status` exposes the safe recovery-checkpoint label.
+The replacement-peer join and complete-snapshot/promotion gates remain open;
+no Apple item write was performed. See [recovery details](docs/SYNC-RECOVERY.md#recovery-record-identifier-compatibility--2026-11-06).

@@ -102,3 +102,41 @@ Recovery and live self-shares use the same sender signature and recipient-key
 checks. Unwrapping class keys follows authenticated parent keys regardless of
 record order, rejects conflicting material, and does not accept orphan keys.
 Do not bypass those checks to recover a partial list.
+
+
+## Recovery-record identifier compatibility — 2026-11-06
+
+The user's renewed sign-in completed password proof and SMS verification, then
+escrow recovery saved the sponsor in the retained Prepared repair journal. The
+subsequent join stopped at `zone identity has the wrong identifier kind` while
+reading `fetchRecoverableTLKShares`, before the new peer join. This was not a
+passcode rejection. A read-only journal check confirms a saved sponsor, and
+`keychain status` now prints its fixed-label recovery checkpoint without keys or
+secret contents.
+
+A read-only CloudKit probe validated zone/tag/opaque metadata for 14 Passwords
+records using the fresh service token. A separate read-only recovery-metadata
+probe reproduced the decoder failure: zone component 1 omitted its optional type
+enum. Full CloudKit records carried explicit enums; recovery records need not.
+The decoder now infers an omitted enum only from the enclosing zone/owner field.
+Explicit conflicting, zero, duplicate or wrong-wire-type enums still fail, as do
+missing/invalid names. Exact zone/owner comparison and opaque bytes are retained;
+no record is reassigned to a caller's expected scope. The optional identifier
+field is documented in the pinned
+[CloudKit schema](https://github.com/doug-leith/ios-protobuf-decoding/blob/231b2467e61d741fdd39e1c99229e90d7e93d4c9/ios_decoder/protos/CloudKitDaemon/ckdp.proto).
+
+The fixed read-only recovery probe decoded 20 encrypted share records and 60
+sync-key records. It did not unwrap a TLK, join a peer, spend an escrow attempt or
+save an account/vault snapshot. A regression fixture covers omitted/mixed enum
+presence, exact server-encoding retention, cross-owner rejection and malformed
+explicit identifiers. The ignored developer probe is:
+
+```sh
+cargo test --lib apple::octagon::tests::live_saved_repair_sponsor_metadata_decodes_without_recovery -- --exact --ignored --nocapture
+```
+
+Resume the existing repair with `./target/release/keychain join --repair`. The
+saved sponsor branch skips new password/2FA/escrow recovery; it retains the same
+candidate and previous peer. Full replacement-peer join, independent complete
+snapshot validation and promotion remain unverified until that continuation
+succeeds. No peer/recipient/root reset or automatic recovery retry was introduced.
