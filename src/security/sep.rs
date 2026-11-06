@@ -22,7 +22,7 @@ pub enum ProviderError {
     PermissionDenied,
     #[error("biometric authorization canceled")]
     Canceled,
-    #[error("fingerprint did not match")]
+    #[error("fingerprint verification was not accepted")]
     Mismatch,
     #[error("requested SEP policy is unsupported")]
     UnsupportedPolicy,

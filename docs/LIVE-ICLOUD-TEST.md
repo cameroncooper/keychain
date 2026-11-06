@@ -2,7 +2,7 @@
 
 ## Fresh registration proposal after the parser fix
 
-No writes are authorized yet for this new transaction:
+The user approved this transaction and readiness for its two fingerprint steps:
 
 - UUID: `b2c70bee-8f52-4b7f-9796-4d77d4c2a520`.
 - RP/origin: `webauthn.io` / `https://webauthn.io`.
@@ -14,11 +14,48 @@ No writes are authorized yet for this new transaction:
   both operation UUIDs known before sending.
 
 The live read-only review verified this UUID absent and authenticated the current
-hierarchy. No new key or site challenge has been generated for it. Obtain the
-site challenge only once the user has approved and is ready for the two specific
-fingerprint operations; lift between prompts. Keep the two attempts and key from
-the earlier transaction below unchanged. This is an explicit fresh registration,
-not replacement of a lost key or permission to replay its uncertain attempts.
+hierarchy. Fresh real site options were then frozen separately. The negative
+attempt passed: both exact request UUIDs were checked against Apple's explicit
+atomic/oplock rejection, the coordinator journal became Rejected, and an
+independent authenticated fetch confirmed absence and the unchanged pointer.
+The exact full outgoing request, reply and negative evidence are retained. This
+closes the negative protocol gate with the corrected parser.
+
+The first positive biometric operation returned EACCES/match-or-authorization
+refusal before any save input was prepared. After separate fresh readiness, its
+retry closed almost immediately with uncertain SEP completion. No positive send
+artifact exists; the journal remains Rejected and no registration response was
+created. GET_INFO still advertised ABI 4/signing/sensor/two prints, but the kernel
+reported sequence-counter/session setup failure and that the sensor did not come
+back online. Capability advertisement is not proof of current sensor health.
+Further captures are paused pending driver/sensor recovery. The key, frozen
+request and successful negative evidence are retained; nothing is regenerated.
+
+The demo challenge expired during this hardware failure. After sensor recovery,
+use a fresh explicitly scoped real registration for the positive/other-device
+gate, without replaying or silently rebinding this frozen request. The completed
+negative protocol test need not be repeated solely because the site nonce expired.
+The earlier transaction's two attempts and key below are also unchanged.
+
+The user subsequently restored the sensor by invoking a separate verification;
+the driver's existing sensor re-registration/bring-up sequence completed. No app
+key, draft or journal was replaced. Application captures have not been retried
+since that restoration report. Driver-error diagnostics now retain the numeric
+errno without printing payloads or free-form errors, and EACCES is described as
+verification not accepted rather than asserting that the wrong finger was used.
+
+The next proposed test uses ordinary Chromium registration for
+`keychain-icloud-20261106-3`, with one normal browser-generated transaction and
+explicit Save to iCloud selection. The completed negative gate need not repeat.
+An isolated browser configuration is staged under
+`.sep-check-icloud-browser-20261106`, routing its native host to
+`/run/keychain-icloud-browser-check-20261106/broker.sock` and the existing isolated
+root registry. No default browser/native-host configuration changes. The browser
+will obtain its challenge at the user's Register action; its selected scope and
+generated UUID are frozen/validated by the normal host/broker before any send.
+This proposed new creation still needs explicit user initiation/approval; the
+production service's creation flag stays off. Do not replay an earlier frozen
+transaction or claim other-device acceptance until actually observed.
 
 Use the fresh review with `--review` and a separate root-private request file
 with `--request`; never overwrite the earlier frozen request. Stop if either

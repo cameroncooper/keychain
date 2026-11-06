@@ -31,6 +31,25 @@ validation. The two existing attempts and their sealed key are retained; the
 second reply alone cannot reconstruct its missing expected compare-operation ID,
 so no rejection checkpoint is invented and the positive gate remains closed.
 
+Fresh transaction `b2c70bee-8f52-4b7f-9796-4d77d4c2a520` subsequently passed the
+live negative gate after explicit approval/readiness: exact request/reply IDs,
+definite atomic/oplock failure, Rejected journal, complete authenticated absence
+and unchanged pointer. Its positive operation failed before sending: first match/
+authorization refusal, then uncertain SEP completion on a separately requested
+retry. The kernel reported sensor session/sequence-counter initialization failure
+and that the sensor did not come back online. All keys/requests/evidence are
+retained; driver recovery, actual positive save and real RP/other-device use remain
+open. ABI/capability GET_INFO success does not close the sensor-health gate.
+
+The user then reported successful verification after the driver's existing sensor
+re-registration/bring-up sequence restored it. No application key or state was
+replaced. App diagnostics now log only the numeric errno on uncertain driver
+errors; EACCES wording covers both match and authorization refusal. A separate
+Chromium profile and root test socket are prepared for a fresh ordinary one-touch
+iCloud registration, using the completed negative gate rather than repeating it.
+Main-profile creation remains disabled and live positive/other-device proof is
+still pending.
+
 This is the application design and implementation order. The current
 [SEP handoff](SEP-INTEGRATION.md), [driver API](docs/sep-driver/README.md),
 [decryption contract](docs/sep-driver/DECRYPTION.md) and

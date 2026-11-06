@@ -318,7 +318,7 @@ fn map_driver(error: DriverError) -> ProviderError {
         DriverError::Expired => ProviderError::Expired,
         DriverError::Unsupported | DriverError::InvalidInput => ProviderError::UnsupportedPolicy,
         DriverError::InvalidResponse => ProviderError::InvalidResponse,
-        DriverError::Ambiguous(_) => ProviderError::AmbiguousCompletion,
+        DriverError::Ambiguous(error) => uncertain_driver_error(&error),
         DriverError::Io(error) => match error.raw_os_error() {
             Some(libc::EBUSY) => ProviderError::Busy,
             Some(libc::EPERM) => ProviderError::PermissionDenied,
@@ -329,9 +329,20 @@ fn map_driver(error: DriverError) -> ProviderError {
                 ProviderError::UnsupportedPolicy
             }
             Some(libc::ENOENT | libc::ENODEV) => ProviderError::Unavailable,
-            _ => ProviderError::AmbiguousCompletion,
+            _ => uncertain_driver_error(&error),
         },
     }
+}
+
+fn uncertain_driver_error(error: &std::io::Error) -> ProviderError {
+    // Numeric diagnostic only: never format driver payloads, key material or
+    // free-form errors. The caller still treats completion as uncertain and
+    // cannot turn this into an automatic capture retry.
+    eprintln!(
+        "SEP driver completion uncertain: errno={}",
+        error.raw_os_error().unwrap_or(0)
+    );
+    ProviderError::AmbiguousCompletion
 }
 
 fn driver_error(error: DriverError) -> Error {
