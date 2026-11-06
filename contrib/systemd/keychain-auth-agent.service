@@ -4,12 +4,15 @@ PartOf=graphical-session.target
 After=graphical-session.target
 
 [Service]
-Type=simple
+Type=dbus
+BusName=cameroncooper.keychain.AuthenticationAgent
+TimeoutStartSec=10
 ExecStart=/usr/libexec/keychain/keychain-auth-agent
 Restart=on-failure
 RestartSec=2
 NoNewPrivileges=yes
 UMask=0077
 
+# Optional eager start; D-Bus activation works without enabling this target link.
 [Install]
 WantedBy=graphical-session.target

@@ -28,7 +28,7 @@ For this machine, UID 1001 is explicitly paired using:
 ```sh
 sudo bash contrib/pair-sep-owner.sh 1001 --item-decrypt
 systemctl --user daemon-reload
-systemctl --user enable --now keychain-auth-agent.service
+systemctl --user start keychain-auth-agent.service
 ```
 
 The pairing helper writes private root-owned `/etc/keychain/sep-owner`, prepares
@@ -47,13 +47,35 @@ agent socket; peer ownership and protocol checks still apply. `ProtectHome=yes`
 would prevent this bind exception; see the upstream
 [systemd execution documentation](https://www.freedesktop.org/software/systemd/man/latest/systemd.exec.html#ProtectHome=).
 
-Enable the user agent with `systemctl --user enable --now keychain-auth-agent`.
-It requires the graphical session environment. Its private runtime socket is
-`$XDG_RUNTIME_DIR/keychain-auth.sock`, guarded by a process lock; stale sockets
-are removed only after obtaining that lock and checking type/ownership.
-The initial implementation uses graphical-session activation, not D-Bus
-activation. It holds no credentials and never opens the SEP device. A future
-on-demand activation mechanism must retain these ownership checks.
+The agent now supports D-Bus activation through the user service
+`cameroncooper.keychain.AuthenticationAgent`, backed by the `Type=dbus` systemd
+user unit. After installation, run `systemctl --user daemon-reload`. No enable
+step is required for on-demand use; the optional graphical-session target link
+continues to permit eager startup. Existing enabled links are not removed by the
+installer. The agent exits successfully after two idle minutes with no active
+prompt, and later requests activate a fresh process. An active prompt/cleanup
+lifetime prevents idle exit.
+
+The unprivileged CLI/native host activates the fixed name in its own checked
+`/run/user/UID/bus` before a prompt-dependent operation or availability query.
+It ignores environment-supplied bus addresses, checks the private runtime and
+socket owner, and bounds the full asynchronous probe/start path to five seconds
+with cancellation checks. Activation alone never presents a dialog or starts
+capture. The bus name is claimed after GTK initialization and listener setup;
+there are no D-Bus authentication/success methods. The broker still checks the
+agent's kernel peer and requires the actual window-visible acknowledgement before
+capture. The user bus on the development machine rejects root connections, so the
+privileged broker never impersonates an owner or spawns a user helper to activate
+it. Direct root diagnostics require an already started agent; the desktop user
+can run `systemctl --user start keychain-auth-agent.service` first.
+
+The agent requires the graphical session environment. Its private runtime socket
+is `$XDG_RUNTIME_DIR/keychain-auth.sock`, guarded by a process lock; stale sockets
+are removed only after obtaining that lock and checking type/ownership. Activation
+failure, unsafe files, headless startup or unavailable UI returns an error; there
+is no invisible capture or forced service restart. Cancellation/timeout can leave
+an otherwise idle agent running until idle exit, but sends no broker credential
+operation. It holds no credentials and never opens the SEP device.
 
 The broker receives its socket through systemd activation and stores encrypted
 registry records and its metadata-encryption root in its private StateDirectory.
@@ -101,3 +123,31 @@ To disable the integration, stop/disable `keychain-broker@1001.socket`, stop
 `keychain-broker@1001.service`, and disable the user agent. Keep the pairing marker,
 registry and recovery copies until a deliberate data-retirement decision; disabling
 services does not erase keys or automatically revert protected references to software.
+
+
+D-Bus activation validation on 2026-11-06 used the installed release binaries:
+with no authentication window present, the old idle agent was stopped. An owner
+native-host `--availability-only` check started PID 371722 through D-Bus and
+returned availability without a window or capture. The service owned
+`cameroncooper.keychain.AuthenticationAgent` as `Type=dbus`. It stopped after
+120 idle seconds, leaving MainPID=0, Result=success and NRestarts=0; systemd recorded
+SIGTERM during D-Bus-name shutdown, so a process-status-zero check alone is not the
+right service-success criterion. A subsequent native-host availability check
+activated PID 373455 and succeeded, again with no prompt. The optional existing
+login-start link was preserved. Previous artifacts are retained at
+`/var/lib/keychain-service-backups/update.pROl23d1`.
+
+Three synthetic activation tests cover in-flight/preexisting cancellation,
+timeout and future destruction, unsafe socket ownership/permissions/symlinks,
+stale sockets and a full disposable socket backlog. `socket2` is a test-only
+reference to the version already in Cargo.lock, used to bound that test backlog;
+it adds no new runtime dependency/version. The tests accept immediate nonblocking
+connect refusal or a bounded timeout; neither permits an ordinary blocking probe.
+No real credential operation, biometric capture or Apple write was used in these
+activation checks.
+
+Final checks for this activation change: all 230 workspace tests passed (25
+intentionally ignored), plus 21 privileged library tests run separately.
+Formatting, strict Clippy, staged unit verification and release builds passed.
+The production credential/write gates remain unchanged. Real prompt/capture,
+biometric cancellation/session-lock and Apple-account acceptance remain open.

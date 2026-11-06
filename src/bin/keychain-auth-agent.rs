@@ -7,7 +7,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use gtk4::{gio, glib, prelude::*};
 use keychain::prompt::{AgentEvent, DisplayEvent, Presentation, read_frame, write_frame};
@@ -138,12 +138,23 @@ fn main() -> glib::ExitCode {
             return glib::ExitCode::FAILURE;
         }
     };
+    if let Err(error) = gtk4::init() {
+        eprintln!("keychain-auth-agent: cannot initialize desktop UI: {error}");
+        return glib::ExitCode::FAILURE;
+    }
     let (sender, receiver) = mpsc::sync_channel(16);
     std::thread::spawn(move || {
         if let Err(error) = listen(listener, sender) {
             eprintln!("keychain-auth-agent: {error}");
         }
     });
+    let _bus = match keychain::prompt::activation::claim_name() {
+        Ok(bus) => bus,
+        Err(error) => {
+            eprintln!("keychain-auth-agent: {error}");
+            return glib::ExitCode::FAILURE;
+        }
+    };
     let app = gtk4::Application::new(
         Some("cameroncooper.keychain.Authentication"),
         gio::ApplicationFlags::NON_UNIQUE,
@@ -151,8 +162,10 @@ fn main() -> glib::ExitCode {
     let _hold = app.hold();
     let active: Rc<RefCell<Option<Active>>> = Rc::new(RefCell::new(None));
     let application = app.clone();
+    let mut last_activity = Instant::now();
     glib::timeout_add_local(Duration::from_millis(25), move || {
         while let Ok(event) = receiver.try_recv() {
+            last_activity = Instant::now();
             match event {
                 Event::Begin(request, stream) => {
                     if active.borrow().is_some() {
@@ -238,6 +251,10 @@ fn main() -> glib::ExitCode {
                     }
                 }
             }
+        }
+        if active.borrow().is_none() && last_activity.elapsed() >= Duration::from_secs(120) {
+            application.quit();
+            return glib::ControlFlow::Break;
         }
         glib::ControlFlow::Continue
     });

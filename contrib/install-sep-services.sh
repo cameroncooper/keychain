@@ -105,6 +105,7 @@ fi
 install_artifact "$source_root/contrib/systemd/keychain-broker@.service" etc/systemd/system/keychain-broker@.service 0644
 install_artifact "$source_root/contrib/systemd/keychain-broker@.socket" etc/systemd/system/keychain-broker@.socket 0644
 install_artifact "$source_root/contrib/systemd/keychain-auth-agent.service" etc/systemd/user/keychain-auth-agent.service 0644
+install_artifact "$source_root/contrib/dbus/cameroncooper.keychain.AuthenticationAgent.service" usr/share/dbus-1/services/cameroncooper.keychain.AuthenticationAgent.service 0644
 if [[ $destdir == / ]]; then
   systemctl daemon-reload
   systemd-analyze verify --man=no /etc/systemd/system/keychain-broker@.service /etc/systemd/system/keychain-broker@.socket /etc/systemd/system/keychain-network-worker.service

@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=cameroncooper.keychain.AuthenticationAgent
+Exec=/usr/libexec/keychain/keychain-auth-agent
+SystemdService=keychain-auth-agent.service

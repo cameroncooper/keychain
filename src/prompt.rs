@@ -14,6 +14,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
+pub mod activation;
+
 const MAX_FRAME: usize = 8192;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

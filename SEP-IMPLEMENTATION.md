@@ -291,7 +291,7 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 227 passing tests, twenty-five ignored (three Apple network and twenty-two privileged
+Workspace checks: 230 passing tests, twenty-five ignored (three Apple network and twenty-two privileged
 integration tests). Thirteen registry, five coordination and one account-bootstrap test passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
 The separate-UID worker and systemd startup tests also pass (twenty-one privileged
@@ -504,3 +504,13 @@ exposed. Native registration now retains its pre-CREATE intent after key storage
 and delivery, so a missing committed key cannot trigger silent replacement.
 Existing saved records backfill that guard when explicitly reopened. These are
 synthetic-tested persistence changes; live biometric/account gates remain open.
+
+
+The session agent now supports user-side D-Bus activation with a Type=dbus user
+unit, a fixed activation name and bounded/cancellable readiness checks. It claims
+the name after GTK/listener setup and exits after two minutes without an active
+prompt. The privileged broker keeps kernel-peer and visible-window checks; bus
+activation cannot grant UV or start capture. Direct root diagnostics still need
+an already running agent. Metadata-only list/status operations do not activate
+it. Availability queries may start the agent process without a window. See
+[activation deployment](contrib/SEP-SERVICES.md) for current installation evidence.

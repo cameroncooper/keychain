@@ -209,6 +209,31 @@ fn call_typed_cancelable<T: DeserializeOwned>(
     if canceled.load(Ordering::Acquire) {
         return Err(Error::Sep(crate::security::sep::ProviderError::Canceled));
     }
+    // Only the owner frontend can use its session bus. Root diagnostics require
+    // an already running agent; the broker never impersonates the user's bus.
+    if keychain_sep_driver::peer::effective_uid() != 0
+        && matches!(
+            operation,
+            Operation::Capabilities
+                | Operation::Inspect { .. }
+                | Operation::InspectCreation { .. }
+                | Operation::Create { .. }
+                | Operation::Assert { .. }
+                | Operation::AssertProtected { .. }
+                | Operation::VerifyProtected { .. }
+                | Operation::VerifyLogin { .. }
+                | Operation::RevealLogin { .. }
+                | Operation::DiagnosticSign { .. }
+                | Operation::DiagnosticCancelTest { .. }
+        )
+    {
+        if let Err(error) = crate::prompt::activation::ensure_running(&canceled) {
+            if canceled.load(Ordering::Acquire) {
+                return Err(Error::Sep(crate::security::sep::ProviderError::Canceled));
+            }
+            return Err(Error::io("desktop authentication agent", error));
+        }
+    }
     let mut stream = UnixStream::connect(socket).map_err(|e| Error::io(socket, e))?;
     if keychain_sep_driver::peer::credentials(&stream)
         .map_err(|e| Error::io(socket, e))?
