@@ -291,7 +291,7 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 165 passing tests, thirteen ignored (three Apple network and ten privileged
+Workspace checks: 173 passing tests, thirteen ignored (three Apple network and ten privileged
 integration tests). All nine registry tests passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
 Nine browser service-worker flow tests also pass. Strict Clippy is clean.
@@ -415,8 +415,13 @@ transition, changed drafts during signing and response suppression after late
 cancellation; retries retain the key and require new authorization. Normal
 post-creation metadata refresh/rewraps remain supported, while loss of a committed
 record refuses replacement. The production biometric/upload coordination,
-Apple write adapter and iCloud browser choice remain unconnected. Atomic save
-wire framing, broker creation/authorization coordination, live fetched/other-device
+Apple adapter and iCloud browser choice remain unconnected to production flows.
+Atomic save framing is implemented from pinned extracted-schema/client references:
+create-only item, unchanged-pointer tag check, zone-isolated stream and strict
+two-operation reply matching. The HTTP write client disables redirect and replay;
+six wire-policy and two loopback tests pass. Live atomic rejection/acceptance is
+still unproven; see [wire evidence and gates](docs/CLOUDKIT-WRITE-PROTOCOL.md).
+Broker creation/authorization coordination, live fetched/other-device
 verification and the remaining reveal/migration gates are still required. A
 read-only live metadata check received HTTP 401 with the cached CloudKit token;
 it did not validate live metadata or save any snapshot. Fresh local authentication

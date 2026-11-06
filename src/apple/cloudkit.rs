@@ -21,6 +21,8 @@ use crate::proto::{
 };
 use crate::{Error, Result};
 
+pub mod atomic;
+
 pub const CKCODE_INVOKE_URL: &str =
     "https://gateway.icloud.com/ckcoderouter/api/client/code/invoke";
 pub const CKDATABASE_SYNC_URL: &str =
@@ -299,6 +301,7 @@ fn collect_response_operations(body: &[u8], request_field: u32) -> Result<CloudK
 pub struct CloudKitTransport<'a> {
     token: String,
     user_id: String,
+    account_fingerprint: String,
     device: DeviceConfig,
     anisette: &'a dyn AnisetteProvider,
     client: Client,
@@ -335,6 +338,7 @@ impl<'a> CloudKitTransport<'a> {
         Ok(Self {
             token,
             user_id,
+            account_fingerprint: super::octagon::account_fingerprint(account),
             device: device.into(),
             anisette,
             client: apple_client(Duration::from_secs(45))?,

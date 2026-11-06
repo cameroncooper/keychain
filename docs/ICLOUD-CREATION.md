@@ -44,8 +44,9 @@ keys. They do not prove CloudKit accepts the record, that another Apple device
 imports it, or that any new biometric creation operation has run.
 
 The upload coordinator in `apple::ckks::upload` is now implemented against an
-explicit `UploadIo` interface. There is no production implementation of its
-atomic-write method yet. `Snapshot::fetch` uses the existing authenticated
+explicit `UploadIo` interface. A concrete Apple adapter is now implemented but
+not invoked by CLI/browser operations; live acceptance and atomicity are not
+yet validated. `Snapshot::fetch` uses the existing authenticated
 CloudKit transport and collects every page with cursor/count/size bounds before
 absence can enable a send or retry. The decoder retains each record's zone,
 owner, change tag and original encoding; unchanged-record checks reject edited
@@ -150,13 +151,23 @@ signing, fresh-process delivery retry, normal post-creation sync updates and
 missing committed records. Their upload receipts come from the real coordinator
 and CKKS encoder/encryptor with a simulated server; signing/decryption uses
 disposable software fixtures. The APIs are not yet connected to a production
-network adapter or the browser's iCloud choice, and this is not hardware or
+network operation or the browser's iCloud choice, and this is not hardware or
 Apple acceptance evidence.
+
+The [atomic write implementation](CLOUDKIT-WRITE-PROTOCOL.md) now encodes the new
+item with fail-if-exists and the exact retained current-key record with
+fail-if-outdated plus request change tag. It fixes account/peer/zone/record scope,
+validates raw reference targets and strictly correlates both replies. Mixed or
+incomplete responses remain uncertain; the dedicated HTTP client follows no
+redirect and performs no automatic retry. Six wire-policy tests and two loopback
+HTTP tests passed. The protocol sources, strict acknowledgement-format limit and
+required live negative/positive tests are documented there. The actual Apple
+save path was not executed, and the browser still offers device-only creation.
 
 The updated release service binaries were installed on 2026-11-06. The existing
 disposable profile passed the installed broker/native-host availability check
 with `--availability-only`; it did not start biometric capture or perform a
-registration, assertion or Apple write. The full workspace has 165 passing
+registration, assertion or Apple write. The full workspace has 173 passing
 tests with thirteen intentionally ignored tests; the nine disposable registry tests
 also passed separately as root. Strict Clippy and the release build passed.
 
@@ -165,11 +176,9 @@ Remaining integration work:
 1. Connect the implemented broker draft preparation and promotion APIs to the
    production biometric/upload operation. Never activate a draft
    through generic import verification or convert a native key to exportable storage.
-2. Implement the atomic save/current-key wire protocol using the retained server
-   identity and tags. Apple's [outgoing operation](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/keychain/ckks/CKKSOutgoingQueueOperation.m)
-   saves items with current-key pointers atomically under the unchanged-record
-   policy. The private protobuf framing for those safeguards is not yet verified;
-   an ordinary create request alone is insufficient.
+2. Validate the implemented atomic save/current-key wire protocol against live
+   rejection and acceptance, using the retained server identity and tags.
+   An ordinary create request alone is insufficient.
 3. Connect the durable coordinator, including its implemented rejected-upload
    re-encryption and retained-ciphertext reconciliation, to the broker/browser
    creation path. Preserve identity and all possibly committed ciphertexts.
@@ -193,5 +202,5 @@ through `keychain join --repair`, rerun the metadata check:
 cargo test --lib apple::cloudkit::tests::live_record_metadata_preserves_server_zone_and_tags -- --ignored --nocapture
 ```
 
-The actual metadata encoding and atomic-save semantics still need live validation;
+The actual metadata encoding and implemented atomic-save framing still need live validation;
 the coordinator or the existing joined Octagon identity cannot substitute for it.
