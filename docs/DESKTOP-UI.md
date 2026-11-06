@@ -204,3 +204,13 @@ keyboard Tab/Space opened Details with full RP and origin, while the driver-stat
 footer remained visible. Switching focus returned Cancel and closed the preview.
 No SEP operation, Apple request or saved credential change occurred. Normal
 inventory still contains the same five items; synced creation stays disabled.
+
+Real GPUI signing acceptance on 2026-11-06: after fresh user readiness, a new
+diagnostic process used the saved disposable SEP key to sign the public message
+`GPUI appearance validation 2026-11-06`. Native biometric signing completed and
+the diagnostic independently verified the signature against the saved public
+key. The user confirmed that the popup was centered and floating, text and theme
+were correct, and it closed after the touch. No saved passkey or Apple request
+was involved. This establishes the new window's successful hardware path; live
+cancellation/cleanup through this window and complete-chain reboot acceptance
+remain separate checks.

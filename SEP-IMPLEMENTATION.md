@@ -617,3 +617,11 @@ not claim completed upload, and cancellation checks never display a touch reques
 as their heading. Private wire version 2 is a coordinated broker/agent update;
 legacy prose-based presentation is rejected. See docs/DESKTOP-UI.md. This is not
 additional proof of the outstanding live SEP/reboot or Apple-write gates.
+
+The new GPUI prompt subsequently passed a real disposable native-signing check
+after fresh user readiness. A fresh process reopened the saved key and verified
+the biometric signature for a new public message. The user confirmed the centered
+floating window, readable themed contents and dismissal after touch. This closes
+the new prompt's successful signing/appearance gate, without using saved passkeys
+or contacting Apple. Cancellation/cleanup through the new window and the other
+remaining hardware/reboot and iCloud-write gates still need their own evidence.

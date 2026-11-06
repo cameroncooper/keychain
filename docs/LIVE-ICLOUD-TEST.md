@@ -39,8 +39,10 @@ fingerprint readiness remain pending.
 
 ## Execution gates
 
-1. Finish the pending disposable-signature check through the new GPUI window.
-   Wait for fresh user readiness before opening the fingerprint reader.
+1. The disposable-signature check through the new GPUI window passed after fresh
+   user readiness. The saved key's signature verified independently, and the user
+   confirmed centering/floating, readability/theme and automatic dismissal.
+   Further captures still require fresh readiness for their specific operation.
 2. The diagnostic harness is `examples/icloud-write-check.rs`. Its offline tests
    cover one-byte tag alteration with opaque-field retention, scope/cancellation
    refusal and no replay after rejection, uncertainty or unexpected acceptance.
