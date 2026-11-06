@@ -122,6 +122,57 @@ is needed before resuming real biometric tests; the earlier focus issue remains
 open separately. A successful fresh browser registration and other-device use
 are still unverified.
 
+### Save acknowledgment failure after successful biometric use
+
+After the user restored the sensor again, the next browser registration reached
+Apple's save response. Transaction `b8ec5eee-a593-4a5e-bb2c-99f1d74edd97` failed
+the acknowledgment's identity/content comparison. Its journal remains Attempted;
+the normal browser flow did not retain the raw reply, so the exact failing
+operation/field cannot be identified retrospectively from that response.
+
+A root-only read-only diagnostic fetched the complete authenticated zone. The
+record exists with the exact requested name and type, no missing requested fields
+and no differing requested fields. No save, SEP capture or journal transition
+was performed by that inspection. This confirms the encrypted upload is present;
+it is not yet a cryptographic backup receipt or completed RP registration.
+
+Acknowledgments now allow omitted fields but still reject conflicting returned
+fields, wrong identity/type/zone/tag and mismatched operation IDs. They retain
+the actual sparse server record rather than synthesizing requested fields. The
+coordinator still requires a complete independent fetch, exact ciphertext and
+decrypted credential/public-key verification before issuing backup evidence or
+signing/promoting registration. New offline tests cover sparse acknowledgment,
+tampered fetched data and read-only pending inspection. Fixed diagnostic logs
+distinguish item/pointer identity mismatches from returned-content conflicts.
+
+`examples/icloud-pending-check.rs` inspects an existing root-owned draft and its
+upload journal without needing or replacing the expired browser request. Its
+optional `--reconcile` verifies the already stored encrypted credential and only
+checkpoints the local upload journal. A wrapping UploadIo refuses every save;
+neither mode regenerates the key or produces a registration signature.
+
+The exact existing transaction was reconciled with that no-save wrapper. The
+complete fetched ciphertext decrypted and matched its retained credential and
+public key. Its local journal is now FetchVerified; a fresh diagnostic process
+confirmed that durable phase and another exact field comparison. No browser
+registration was promoted or signed, and no additional save or fingerprint was
+requested. The expired RP challenge is not replaced or rebound to this draft.
+
+The updated release broker was installed with its predecessor retained under
+`/var/lib/keychain-service-backups/update.gades2x3`; only the isolated browser
+broker was restarted, keeping production creation disabled. All 231 library tests
+passed (26 privileged/live tests ignored), and strict Clippy passed for the
+library, broker and new example. The application-only focus trace showed the
+fingerprint window remained focused throughout the successful biometric step;
+focus returned to Chromium after the save-response error.
+
+A fresh manual registration for `keychain-icloud-20261106-4` is proposed to
+verify the revised acknowledgment handling end to end. Actual sparse live reply
+contents have not been captured, so the exact reason for the earlier comparison
+failure remains inferred. Contradictory replies will still be refused, with fixed
+operation-specific diagnostics. Successful RP registration and other-device use
+remain pending.
+
 Use the fresh review with `--review` and a separate root-private request file
 with `--request`; never overwrite the earlier frozen request. Stop if either
 operation is uncertain or the user cancels. Submit the resulting registration

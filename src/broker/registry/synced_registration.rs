@@ -48,6 +48,11 @@ impl SyncedCreation {
 }
 
 impl Registry {
+    /// Read an existing sealed draft without preparing, promoting or authorizing it.
+    pub fn load_synced_creation(&self, id: &str, owner: u32) -> Result<SyncedCreation> {
+        self.read_synced_creation(id, owner).map(SyncedCreation)
+    }
+
     fn synced_creation_filename(&self, id: &str, intent: bool) -> Result<PathBuf> {
         self.filename(id)?;
         Ok(self.directory.join(if intent {

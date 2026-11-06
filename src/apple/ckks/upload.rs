@@ -461,7 +461,8 @@ struct Journal {
     superseded: Vec<PlanData>,
 }
 
-/// The accepted record must include its server encoding, tag and zone. A
+/// The accepted acknowledgment must include its server encoding, tag and zone;
+/// omitted fields are not proof of contents. Independent fetch/decrypt is mandatory. A
 /// precondition failure guarantees the ENTIRE atomic operation was rejected.
 pub enum SaveOutcome {
     Accepted(Record),
@@ -498,6 +499,16 @@ pub struct Session<'a> {
     journal: Journal,
     _lock: File,
     healthy: bool,
+}
+
+/// Diagnostic metadata only; not a backup receipt or permission to retry a save.
+#[derive(Debug, Serialize)]
+pub struct SnapshotComparison {
+    pub present: bool,
+    pub exact_name: bool,
+    pub same_type: bool,
+    pub missing_fields: Vec<String>,
+    pub differing_fields: Vec<String>,
 }
 impl<'a> UploadStore<'a> {
     pub fn new(directory: &Path, backend: &'a dyn SecurityBackend) -> Result<Self> {
@@ -653,6 +664,39 @@ impl<'a> UploadStore<'a> {
     }
 }
 impl Session<'_> {
+    /// Compare a complete authenticated fetch without modifying the upload journal.
+    /// Never returns field values, encrypted bodies or decrypted credential data.
+    pub fn compare_snapshot(&self, snapshot: &Snapshot) -> Result<SnapshotComparison> {
+        self.check_healthy()?;
+        if snapshot.zone != self.journal.plan.binding.zone {
+            return Err(invalid("inspection snapshot differs from upload zone"));
+        }
+        let expected = &self.journal.plan.record;
+        let record = snapshot.records.iter().find(|record| {
+            record.name == expected.name
+                || Uuid::parse_str(&record.name).ok() == Some(self.journal.plan.binding.transaction)
+        });
+        let mut result = SnapshotComparison {
+            present: record.is_some(),
+            exact_name: record.is_some_and(|record| record.name == expected.name),
+            same_type: record.is_some_and(|record| record.record_type == expected.record_type),
+            missing_fields: vec![],
+            differing_fields: vec![],
+        };
+        if let Some(record) = record {
+            for (key, value) in &expected.fields {
+                match record.fields.get(key) {
+                    None => result.missing_fields.push(key.clone()),
+                    Some(saved) if saved != value => result.differing_fields.push(key.clone()),
+                    Some(_) => (),
+                }
+            }
+        }
+        result.missing_fields.sort();
+        result.differing_fields.sort();
+        Ok(result)
+    }
+
     pub fn verify_identity(
         &self,
         binding: &Binding,
@@ -814,13 +858,9 @@ impl Session<'_> {
             SaveOutcome::Accepted(record) => {
                 if record.name != self.journal.plan.record.name
                     || record.record_type != "item"
-                    || self
-                        .journal
-                        .plan
-                        .record
-                        .fields
-                        .iter()
-                        .any(|(key, value)| record.fields.get(key) != Some(value))
+                    || self.journal.plan.record.fields.iter().any(|(key, value)| {
+                        record.fields.get(key).is_some_and(|saved| saved != value)
+                    })
                 {
                     return Err(Error::Security(
                         "save acknowledgment did not identify the prepared record".into(),

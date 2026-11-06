@@ -501,6 +501,26 @@ fn mixed_partial_indeterminate_and_auth_failures_never_become_definite_rejection
 }
 
 #[test]
+fn sparse_acknowledgments_preserve_only_the_actual_returned_fields() -> Result<()> {
+    let save = fixture()?;
+    let mut item = save.item.clone();
+    item.fields.clear();
+    let mut pointer = save.pointer.clone();
+    pointer.fields.clear();
+    let SaveOutcome::Accepted(record) = save.parse_response(&frame(&[
+        reply(&save, 0, 1, None, Some(&item))?,
+        reply(&save, 1, 1, None, Some(&pointer))?,
+    ]))?
+    else {
+        return Err(invalid("sparse acknowledgments were not accepted"));
+    };
+    assert_eq!(record.name, save.item.name);
+    assert!(record.fields.is_empty());
+    record.server_precondition(&save.zone)?;
+    Ok(())
+}
+
+#[test]
 fn success_with_wrong_record_contents_or_contradictory_tags_is_refused() -> Result<()> {
     let save = fixture()?;
     let pointer = reply(&save, 1, 1, None, Some(&save.pointer))?;

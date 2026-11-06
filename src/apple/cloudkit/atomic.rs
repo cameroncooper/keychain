@@ -1,7 +1,7 @@
 //! Restricted CKKS create + unchanged-current-key save adapter. The framing is
 //! independently implemented from published schema facts; live atomicity and
-//! Apple acceptance remain explicit validation gates. No browser/CLI path
-//! enables these writes yet. See docs/CLOUDKIT-WRITE-PROTOCOL.md for provenance.
+//! Apple acceptance remain explicit validation gates. Writes require the broker's
+//! explicit creation policy. See docs/CLOUDKIT-WRITE-PROTOCOL.md for provenance.
 
 use super::*;
 use crate::apple::ckks::upload::{Binding, SaveOutcome, Snapshot, UploadIo};
@@ -446,13 +446,20 @@ impl AtomicSave {
                 } else {
                     &self.pointer
                 };
-                if record.name != expected.name
-                    || record.record_type != expected.record_type
-                    || expected
-                        .fields
-                        .iter()
-                        .any(|(key, value)| record.fields.get(key) != Some(value))
+                if record.name != expected.name || record.record_type != expected.record_type {
+                    eprintln!("CloudKit save acknowledgment: operation {index} identity mismatch");
+                    return Err(invalid("saved record differs from the requested identity"));
+                }
+                // A save acknowledgment may omit unchanged/requested fields.
+                // Never synthesize them into the server record: the coordinator
+                // requires a complete independent fetch and decrypt before UV
+                // signing, promotion or a backup receipt can be returned.
+                if expected
+                    .fields
+                    .iter()
+                    .any(|(key, value)| record.fields.get(key).is_some_and(|saved| saved != value))
                 {
+                    eprintln!("CloudKit save acknowledgment: operation {index} conflicting fields");
                     return Err(invalid(
                         "saved record differs from the requested identity or contents",
                     ));

@@ -385,6 +385,7 @@ impl Fixture {
             tamper_fetch: false,
             fail_fetch: false,
             poison_ack: None,
+            sparse_ack: false,
         };
         Ok(Self {
             _root: root,
@@ -408,6 +409,7 @@ struct FakeIo {
     tamper_fetch: bool,
     fail_fetch: bool,
     poison_ack: Option<Arc<AtomicBool>>,
+    sparse_ack: bool,
 }
 impl UploadIo for FakeIo {
     fn fetch_zone(
@@ -467,11 +469,15 @@ impl UploadIo for FakeIo {
         if let Some(denied) = &self.poison_ack {
             denied.store(true, Ordering::Release);
         }
-        Ok(SaveOutcome::Accepted(
-            self.remote
-                .clone()
-                .ok_or_else(|| invalid("no simulated server record"))?,
-        ))
+        let mut ack = self
+            .remote
+            .clone()
+            .ok_or_else(|| invalid("no simulated server record"))?;
+        if self.sparse_ack {
+            ack.fields.clear();
+            ack = server_record(&ack, zone, "saved-1")?;
+        }
+        Ok(SaveOutcome::Accepted(ack))
     }
 }
 
@@ -1041,6 +1047,35 @@ fn verified_backup_registration_requires_matching_receipt_and_fresh_protected_si
 }
 
 #[test]
+fn inspection_compares_fields_without_advancing_or_sending() -> Result<()> {
+    let mut f = Fixture::new()?;
+    let session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
+    let absent = f.io.fetch_zone(&f.plan.binding().zone, &|| Ok(()))?;
+    assert!(!session.compare_snapshot(&absent)?.present);
+    let mut snapshot = absent;
+    let mut record = f.plan.0.record.clone();
+    record.name = record.name.to_uppercase();
+    let key = record
+        .fields
+        .keys()
+        .next()
+        .cloned()
+        .ok_or_else(|| invalid("fixture fields"))?;
+    record.fields.remove(&key);
+    snapshot.records.push(record);
+    let comparison = session.compare_snapshot(&snapshot)?;
+    assert!(comparison.present && comparison.same_type);
+    assert!(!comparison.exact_name);
+    assert_eq!(comparison.missing_fields, vec![key]);
+    assert!(comparison.differing_fields.is_empty());
+    assert_eq!(session.phase()?, &Phase::Prepared);
+    assert!(f.io.writes.is_empty());
+    snapshot.zone.owner = "different-owner".into();
+    assert!(session.compare_snapshot(&snapshot).is_err());
+    Ok(())
+}
+
+#[test]
 fn accepted_upload_requires_independent_fetch_and_reopens_without_another_write() -> Result<()> {
     let mut f = Fixture::new()?;
     let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
@@ -1119,6 +1154,25 @@ fn changed_pointer_or_atomic_rejection_preserves_key_without_sending_again() -> 
             f.plan.0.credential.signing_key
         );
         assert_eq!(f.io.writes.len(), usize::from(reject_at_server));
+    }
+    Ok(())
+}
+
+#[test]
+fn sparse_ack_requires_complete_independent_fetch_and_cannot_hide_tampering() -> Result<()> {
+    for tamper in [false, true] {
+        let mut f = Fixture::new()?;
+        f.io.sparse_ack = true;
+        f.io.tamper_fetch = tamper;
+        let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
+        assert_eq!(session.advance(&mut f.io, &|| Ok(())).is_ok(), !tamper);
+        assert_eq!(session.verified_upload().is_ok(), !tamper);
+        assert_eq!(f.io.writes.len(), 1);
+        if tamper {
+            assert!(matches!(session.phase()?, Phase::Accepted { .. }));
+        } else {
+            assert!(matches!(session.phase()?, Phase::FetchVerified { .. }));
+        }
     }
     Ok(())
 }
