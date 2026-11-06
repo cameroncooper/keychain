@@ -15,6 +15,23 @@ const SAVE_URL: &str = "https://gateway.icloud.com/ckdatabase/api/client/record/
 const SAVE: u32 = 210;
 const MAX_SAVE_BODY: usize = 2 * 1024 * 1024;
 
+/// Offline validation of both the coordinator and worker's exact save shape.
+/// Generates no key, sends nothing, and confers no write/backup authorization.
+pub fn validate_create_request(
+    device: &DeviceConfig,
+    binding: &Binding,
+    attempt: Uuid,
+    item: &Record,
+    pointer: &Record,
+) -> Result<()> {
+    binding.validate()?;
+    if item.name != binding.transaction.to_string() {
+        return Err(invalid("item differs from reviewed transaction"));
+    }
+    let save = AtomicSave::new(device, attempt, &binding.zone, item, pointer)?;
+    AtomicSave::validate_prepared(device, binding, &save.body)
+}
+
 /// Account/peer/zone/record scope fixed before any network operation. Networking
 /// stays outside the privileged biometric broker; callers supply roots from
 /// verified Octagon shares, never from an unauthenticated CloudKit record.
@@ -141,7 +158,11 @@ impl AppleUploadIo<'_, '_> {
         if body.is_empty() || body.len() > MAX_SAVE_BODY {
             return Err(invalid("prepared save stream exceeds bounds"));
         }
-        AtomicSave::validate_prepared(&self.transport.device, &self.binding, body)?;
+        AtomicSave::validate_prepared(&self.transport.device, &self.binding, body).inspect_err(
+            |_| {
+                eprintln!("CloudKit save refused before HTTP: request validation");
+            },
+        )?;
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
         encoder
             .write_all(body)
@@ -149,11 +170,24 @@ impl AppleUploadIo<'_, '_> {
         let compressed = encoder
             .finish()
             .map_err(|e| Error::io("CloudKit save compression", e))?;
-        let headers = self.transport.headers(SECURITYD_BUNDLE, None)?;
+        let headers = self
+            .transport
+            .headers(SECURITYD_BUNDLE, None)
+            .inspect_err(|_| {
+                eprintln!("CloudKit save failed before HTTP: anisette/header preparation");
+            })?;
         let response = apply_headers(self.client.post(SAVE_URL), &headers)?
             .body(compressed)
-            .send()?;
+            .send()
+            .inspect_err(|_| {
+                eprintln!("CloudKit save failed: transport error; outcome uncertain");
+            })?;
         let status = response.status();
+        if !status.is_success() {
+            // Only fixed operation/stage and numeric status: never log account
+            // payloads, token headers, server descriptions or free-form errors.
+            eprintln!("CloudKit save failed: HTTP {}", status.as_u16());
+        }
         if status == reqwest::StatusCode::UNAUTHORIZED {
             return Err(Error::AuthenticationRequired("CloudKit rejected the upload token; refresh authentication before reconciling this attempt".into()));
         }
@@ -164,8 +198,12 @@ impl AppleUploadIo<'_, '_> {
                 "CloudKit save returned HTTP {status}; reconcile before retrying"
             )));
         }
-        let bytes = response_bytes(response)?;
-        maybe_gunzip(&bytes)
+        let bytes = response_bytes(response).inspect_err(|_| {
+            eprintln!("CloudKit save failed: response read/size; outcome uncertain");
+        })?;
+        maybe_gunzip(&bytes).inspect_err(|_| {
+            eprintln!("CloudKit save failed: response decompression; outcome uncertain");
+        })
     }
 }
 
@@ -575,4 +613,4 @@ fn invalid(message: &str) -> Error {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

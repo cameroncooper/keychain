@@ -3,7 +3,11 @@
 This implements part of milestone 6 in [the SEP completion plan](../SEP-IMPLEMENTATION.md).
 The browser iCloud choice is connected behind a default-off deployment flag;
 the installed service still offers device-only creation. No Apple record writes
-or live uploads were performed. Local preparation and staging do not access the network.
+were proven accepted. One scoped negative save attempt completed biometric unlock
+and local encryption but remains uncertain; its key/journal are retained and an
+independent fetch showed absence. The positive gate remains closed. See
+[live-test evidence](LIVE-ICLOUD-TEST.md). Local preparation and staging do not
+access the network.
 
 `passkey::encode_sync_item` prepares a synchronizable P-256 software-key plist
 from a trusted caller's credential and X9.63 private representation. It preserves

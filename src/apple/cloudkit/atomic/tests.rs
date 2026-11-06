@@ -43,6 +43,19 @@ fn device() -> DeviceConfig {
     }
 }
 
+pub(crate) fn worker_save_fixture() -> Result<(DeviceConfig, Binding, Record, Record)> {
+    let save = fixture()?;
+    let binding = Binding {
+        owner: 1001,
+        account_fingerprint: format!("SHA256:{}", B64.encode([1; 32])),
+        peer_id: format!("SHA256:{}", B64.encode([2; 32])),
+        transaction: Uuid::parse_str(&save.item.name).map_err(|_| invalid("test transaction"))?,
+        request_sha256: "ab".repeat(32),
+        zone: save.zone.clone(),
+    };
+    Ok((device(), binding, save.item, save.pointer))
+}
+
 #[test]
 fn worker_checks_raw_request_scope_and_canonical_create_cas_before_http() -> Result<()> {
     let original = fixture()?;

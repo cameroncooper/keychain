@@ -3,7 +3,8 @@
 Implemented 2026-11-06 in `apple::cloudkit::atomic`. The concrete `AppleUploadIo`
 adapter implements the upload coordinator's read/write interface. The broker's
 creation path is connected behind a default-off deployment flag; the installed
-production service leaves that flag off. No live Apple write has been performed.
+production service leaves that flag off. One scoped negative save was attempted;
+its result remains uncertain and no accepted write has been proven.
 This is implemented framing and policy validation, with Apple acceptance and
 atomicity still requiring the live gates below.
 
@@ -97,4 +98,11 @@ administrator example has default inspection and one-send negative/positive
 modes, with offline replay/uncertainty/scope tests. It saves the exact diagnostic
 ciphertext and altered pointer before a send; the normal encrypted coordinator
 journal also retains the staged credential and upload state. Scope approval and
-fresh biometric readiness remain pending. No write mode has been executed.
+fresh biometric readiness were obtained for the first negative attempt. It
+returned uncertainty, with an Attempted journal and retained key/request. A fresh
+authenticated fetch proved absence and unchanged pointer at that observation;
+it did not prove a definite rejection. The positive gate remains closed. The
+updated diagnostic captures any raw reply privately before parsing and preserves
+underlying errors; the worker emits only fixed failure stages/numeric HTTP status.
+An additional negative attempt needs separate approval and explicit confirmed-
+absence recovery with the same key/ciphertext. It has not been executed.

@@ -33,6 +33,9 @@ struct Args {
     /// Required for either write mode. Also requires explicit human coordination.
     #[arg(long)]
     confirm_record: Option<Uuid>,
+    /// For an explicitly approved retry, confirm the original uncertain attempt.
+    #[arg(long)]
+    confirm_attempt: Option<Uuid>,
     #[arg(long, default_value = "/dev/sep-bio")]
     device: PathBuf,
 }
@@ -40,6 +43,7 @@ struct Args {
 enum Mode {
     Inspect,
     Negative,
+    RetryNegative,
     Positive,
 }
 #[derive(Deserialize)]
@@ -66,6 +70,14 @@ struct AttemptEvidence<'a> {
     zone: &'a ZoneIdentity,
     item: &'a Record,
     pointer: &'a Record,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SavedAttempt {
+    attempt: Uuid,
+    zone: ZoneIdentity,
+    item: Record,
+    pointer: Record,
 }
 fn refused(message: &str) -> Error {
     Error::Refused(message.into())
@@ -141,6 +153,7 @@ struct ScopedIo<'a> {
     rejected: bool,
     ciphertext_sha256: Option<String>,
     attempt_path: PathBuf,
+    expected_ciphertext_sha256: Option<String>,
 }
 impl ScopedIo<'_> {
     fn check_pointer(&self, pointer: &Record) -> Result<()> {
@@ -192,6 +205,16 @@ impl UploadIo for ScopedIo<'_> {
             return Err(refused("probe permits one send for the reviewed UUID only"));
         }
         self.check_pointer(pointer)?;
+        let ciphertext_sha256 = hash(serde_json::to_vec(item)?);
+        if self
+            .expected_ciphertext_sha256
+            .as_ref()
+            .is_some_and(|expected| expected != &ciphertext_sha256)
+        {
+            return Err(refused(
+                "confirmed-absence retry changed the retained ciphertext",
+            ));
+        }
         let altered = if self.negative {
             Some(wrong_tag(pointer, zone)?)
         } else {
@@ -199,7 +222,7 @@ impl UploadIo for ScopedIo<'_> {
         };
         // Freeze before IO, even if it fails or returns an ambiguous response.
         self.attempted = true;
-        self.ciphertext_sha256 = Some(hash(serde_json::to_vec(item)?));
+        self.ciphertext_sha256 = Some(ciphertext_sha256);
         // The diagnostic deliberately alters a precondition outside the normal
         // encrypted coordinator journal. Retain the exact attempted ciphertext
         // and pointer input BEFORE sending, including on loss of the reply.
@@ -278,6 +301,46 @@ fn run(args: Args) -> Result<()> {
     };
     if args.mode == Mode::Inspect {
         println!("scope/request valid; no worker, key creation, capture or save started");
+        let journal_path = args
+            .registry
+            .join(format!("upload-{}.enc", binding.transaction));
+        if journal_path
+            .try_exists()
+            .map_err(|e| Error::io(&journal_path, e))?
+        {
+            let session = registry.uploads()?.resume(&binding)?;
+            let phase = match session.phase()? {
+                Phase::Prepared => "prepared",
+                Phase::Attempted { .. } => "attempted/uncertain",
+                Phase::Accepted { .. } => "accepted",
+                Phase::FetchVerified { .. } => "fetch-verified",
+                Phase::Rejected => "rejected",
+            };
+            println!("saved upload phase: {phase}");
+        }
+        let attempted = args.registry.join(format!(
+            "probe-attempt-negative-{}.json",
+            binding.transaction
+        ));
+        if attempted
+            .try_exists()
+            .map_err(|e| Error::io(&attempted, e))?
+        {
+            let saved: SavedAttempt = serde_json::from_slice(&private_read(&attempted)?)?;
+            if saved.zone != binding.zone {
+                return Err(refused("saved attempt belongs to another zone"));
+            }
+            keychain::apple::cloudkit::atomic::validate_create_request(
+                &account.device(),
+                &binding,
+                saved.attempt,
+                &saved.item,
+                &saved.pointer,
+            )?;
+            println!(
+                "saved negative request passes offline coordinator/worker wire validation; not resent"
+            );
+        }
         return Ok(());
     }
     if args.confirm_record != Some(binding.transaction) {
@@ -289,7 +352,8 @@ fn run(args: Args) -> Result<()> {
     let proof_path = args
         .registry
         .join(format!("negative-{}.json", binding.transaction));
-    if args.mode == Mode::Negative
+    let negative = matches!(args.mode, Mode::Negative | Mode::RetryNegative);
+    if negative
         && proof_path
             .try_exists()
             .map_err(|e| Error::io(&proof_path, e))?
@@ -297,6 +361,40 @@ fn run(args: Args) -> Result<()> {
         return Err(refused(
             "negative probe already completed; do not replay it",
         ));
+    }
+    let mut expected_ciphertext_sha256 = None;
+    if args.mode == Mode::Negative {
+        let saved = args.registry.join(format!(
+            "probe-attempt-negative-{}.json",
+            binding.transaction
+        ));
+        if saved.try_exists().map_err(|e| Error::io(&saved, e))? {
+            return Err(refused(
+                "negative request already attempted; inspect/reconcile and explicitly approve any retry",
+            ));
+        }
+    }
+    if args.mode == Mode::RetryNegative {
+        let saved_path = args.registry.join(format!(
+            "probe-attempt-negative-{}.json",
+            binding.transaction
+        ));
+        let saved: SavedAttempt = serde_json::from_slice(&private_read(&saved_path)?)?;
+        if args.confirm_attempt != Some(saved.attempt)
+            || saved.zone != binding.zone
+            || saved.item.name != binding.transaction.to_string()
+        {
+            return Err(refused(
+                "retry requires --confirm-attempt matching the original uncertain request",
+            ));
+        }
+        let session = registry.uploads()?.resume(&binding)?;
+        if !matches!(session.phase()?, Phase::Attempted { attempt } if *attempt == saved.attempt) {
+            return Err(refused(
+                "only the specifically confirmed uncertain attempt may be retried",
+            ));
+        }
+        expected_ciphertext_sha256 = Some(hash(serde_json::to_vec(&saved.item)?));
     }
     if args.mode == Mode::Positive {
         let proof: NegativeEvidence = serde_json::from_slice(&private_read(&proof_path)?)?;
@@ -327,23 +425,36 @@ fn run(args: Args) -> Result<()> {
         &check,
     )?;
     let mut inner = registry.account_upload_io(review.owner, client, &check)?;
+    let response_directory = args.registry.clone();
+    inner.audit_save_responses(move |attempt, response| {
+        keychain::paths::create_private_exclusive(
+            &response_directory.join(format!("save-response-{attempt}.bin")),
+            response,
+        )
+    });
     let mut io = ScopedIo {
         inner: &mut inner,
         zone: binding.zone.clone(),
         review: review.proposed_record,
-        negative: args.mode == Mode::Negative,
+        negative,
         attempted: false,
         rejected: false,
         ciphertext_sha256: None,
-        attempt_path: args.registry.join(format!(
-            "probe-attempt-{}-{}.json",
-            if args.mode == Mode::Negative {
-                "negative"
-            } else {
-                "positive"
-            },
-            binding.transaction
-        )),
+        attempt_path: if args.mode == Mode::RetryNegative {
+            args.registry.join(format!(
+                "probe-attempt-negative-retry-{}-{}.json",
+                binding.transaction,
+                args.confirm_attempt
+                    .ok_or_else(|| refused("missing confirmed attempt"))?
+            ))
+        } else {
+            args.registry.join(format!(
+                "probe-attempt-{}-{}.json",
+                if negative { "negative" } else { "positive" },
+                binding.transaction
+            ))
+        },
+        expected_ciphertext_sha256,
     };
     io.check_absence(&check)?;
     let mut broker = Broker::new(registry, review.owner, args.device, false);
@@ -355,6 +466,8 @@ fn run(args: Args) -> Result<()> {
             request_details_json: details,
             recovery: if args.mode == Mode::Positive {
                 UploadRecovery::ReencryptRejected
+            } else if args.mode == Mode::RetryNegative {
+                UploadRecovery::RetryConfirmedAbsent
             } else {
                 UploadRecovery::Reconcile
             },
@@ -362,11 +475,16 @@ fn run(args: Args) -> Result<()> {
         &mut io,
         Arc::new(AtomicBool::new(false)),
     );
-    if args.mode == Mode::Negative {
+    if negative {
         if outcome.is_ok() || !io.attempted || !io.rejected {
-            return Err(refused(
-                "negative probe incomplete/uncertain; retain state and do not resend",
-            ));
+            let detail = outcome
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_else(|| "unexpected registration success".into());
+            return Err(refused(&format!(
+                "negative probe incomplete/uncertain (attempted={}, explicit_rejection={}): {detail}; retain state and do not resend",
+                io.attempted, io.rejected,
+            )));
         }
         io.check_absence(&check)?;
         if broker.registry.uploads()?.resume(&binding)?.phase()? != &Phase::Rejected {
@@ -532,6 +650,7 @@ mod tests {
                 rejected: false,
                 ciphertext_sha256: None,
                 attempt_path: directory.path().join("attempt.json"),
+                expected_ciphertext_sha256: None,
             };
             let result = io.create_atomic(Uuid::new_v4(), &zone, &item, &pointer, &|| Ok(()));
             assert_eq!(result.is_ok(), outcome == 0);
@@ -583,6 +702,7 @@ mod tests {
             rejected: false,
             ciphertext_sha256: None,
             attempt_path: directory.path().join("attempt.json"),
+            expected_ciphertext_sha256: None,
         };
         assert!(
             io.create_atomic(Uuid::new_v4(), &zone, &item, &pointer, &|| Err(refused(
@@ -596,6 +716,41 @@ mod tests {
                 .is_err()
         );
         item.name = Uuid::new_v4().to_string();
+        assert!(
+            io.create_atomic(Uuid::new_v4(), &zone, &item, &pointer, &|| Ok(()))
+                .is_err()
+        );
+        assert!(!io.attempted);
+        assert_eq!(fake.calls, 0);
+        assert!(!directory.path().join("attempt.json").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn confirmed_absence_retry_cannot_replace_the_original_ciphertext() -> Result<()> {
+        let (zone, pointer, mut item, review) = fixture()?;
+        let directory = tempfile::tempdir().map_err(|e| Error::io("fixture directory", e))?;
+        let expected = hash(serde_json::to_vec(&item)?);
+        item.fields.insert(
+            "data".into(),
+            keychain::apple::ckks::FieldValue::Bytes(vec![9; 48]),
+        );
+        let mut fake = Fake {
+            calls: 0,
+            outcome: 0,
+            seen: None,
+        };
+        let mut io = ScopedIo {
+            inner: &mut fake,
+            zone: zone.clone(),
+            review,
+            negative: true,
+            attempted: false,
+            rejected: false,
+            ciphertext_sha256: None,
+            attempt_path: directory.path().join("attempt.json"),
+            expected_ciphertext_sha256: Some(expected),
+        };
         assert!(
             io.create_atomic(Uuid::new_v4(), &zone, &item, &pointer, &|| Ok(()))
                 .is_err()

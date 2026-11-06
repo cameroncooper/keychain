@@ -1,8 +1,9 @@
 # Disposable iCloud creation acceptance test
 
 Prepared 2026-11-06. The user approved this scoped test after the explicit
-write-approval request. No Apple save has been sent. Each biometric operation
-still requires separately coordinated readiness.
+write-approval request. The first negative save attempt ran and remains uncertain;
+there is no proven accepted save or completed registration. Each further biometric
+operation still requires separately coordinated readiness.
 
 ## Fixed scope
 
@@ -40,11 +41,31 @@ options were obtained from webauthn.io for the scoped username, with required UV
 resident platform credential, ES256 and no existing excluded credentials. The
 complete request plus bridge origin was frozen as the root-only `request.json`
 in that directory and passed the installed helper's non-capturing inspection.
-No draft, attempt, negative evidence or registration response exists yet. The
-first write test is waiting for fresh fingerprint readiness. A site challenge
-is time-sensitive; if it expires before key preparation, obtain a new challenge
-explicitly before staging a key. Once a draft/intent exists, preserve its frozen
-request and key rather than changing the request to work around a failure.
+The first negative attempt completed biometric item unlock, sealed-key staging
+and encrypted CKKS preparation, then stopped without a definite rejection result.
+Its immutable draft/intent, encrypted upload journal and exact attempted
+ciphertext/pointer are retained. The journal is Attempted, not Rejected. An
+independent complete authenticated fetch confirmed that the UUID was absent and
+the exact original pointer unchanged. Offline validation of the retained request
+also passes both coordinator and worker wire checks. Neither observation proves
+that the original operation was explicitly rejected; the positive gate stays shut.
+
+The original uncertain attempt is `d8f7ff89-ab59-4714-a7a2-a7e9703f99b8`.
+The first diagnostic obscured its underlying error and did not retain its reply;
+the exact failure cannot be reconstructed. The updated harness preserves the
+underlying error, optionally saves received replies privately before parsing,
+and has a separately confirmed one-send retry mode. Worker failure logs contain
+only fixed stages/numeric HTTP status, never account data or free-form errors.
+No retry has been run or authorized yet.
+
+Do not refresh the frozen request now that a draft exists. The demo's published
+[registration implementation](https://github.com/duo-labs/webauthn.io/blob/15d77cd9059618e0cb8c863303531fdcf7ee5a3a/_app/homepage/services/registration.py)
+stores challenges for twice the advertised timeout. Our request advertised 60
+seconds; that two-minute lifetime elapsed during diagnosis. Retain this key and
+request for protocol investigation. After the negative gate is proven, prepare
+a fresh real browser registration under its own explicit transaction/scope for
+the positive/other-device acceptance test. Do not upload this expired registration
+merely to call the test complete or transfer its approval to a different UUID.
 
 ## Execution gates
 
@@ -75,8 +96,11 @@ request and key rather than changing the request to work around a failure.
    rejection and a fresh authenticated complete fetch proving this UUID absent
    and the original pointer unchanged. An error, HTTP success, mixed reply or
    unexpected item presence stops the test; none permits an automatic retry.
-7. With a fresh authorized operation, use the same staged credential identity
-   and the explicit rejected-upload recovery policy for the positive attempt.
+7. Only with a still-valid RP request, use a fresh authorized operation and the
+   same staged credential identity. This invocation's challenge has expired:
+   hold its positive leg and prepare the separately scoped fresh registration
+   described above after the protocol gate passes. For a valid request, use the
+   explicit rejected-upload recovery policy for the positive attempt.
    Require both acknowledgements and independent authenticated fetch/decryption
    before registration delivery or a backup claim. A new fingerprint may be
    required: the negative attempt does not retain a reusable biometric grant.
@@ -141,9 +165,18 @@ signing save only the public registration response in the private registry.
 Transfer that response to the real site's still-valid registration transaction;
 the diagnostic itself does not submit it to the RP or launch a browser as root.
 
-Both write modes require a kernel-authenticated, already-running enrolled worker.
+All write modes require a kernel-authenticated, already-running enrolled worker.
 The root diagnostic should run with the broker's AF_UNIX-only network restriction;
 Apple HTTP and anisette remain in the dedicated service. An uncertain result
 retains the attempt inputs, sealed key and encrypted coordinator journal. The
-helper refuses a positive resend of an Attempted journal: investigate/reconcile
-separately, without deleting state or changing the UUID to hide uncertainty.
+helper refuses a positive resend of an Attempted journal. Default inspection
+now reports the saved phase and validates an existing attempted request entirely
+offline. No inspector opens the fingerprint reader or contacts Apple.
+
+After separate approval for an additional negative attempt, `--mode retry-negative`
+also requires `--confirm-attempt d8f7ff89-ab59-4714-a7a2-a7e9703f99b8`, as well as
+the original confirmation UUID. It requires that exact Attempted journal and a
+fresh authenticated absence/pointer check, uses RetryConfirmedAbsent with the
+same sealed key and ciphertext, and keeps the original attempt file. A new
+attempt artifact and any received raw reply are saved privately. It permits one
+send only; uncertainty never enables an automatic resend or a positive save.

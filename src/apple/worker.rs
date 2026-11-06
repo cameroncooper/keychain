@@ -589,8 +589,16 @@ pub struct WorkerUploadIo<'a> {
     device: DeviceConfig,
     roots: Vec<RecoveredTlk>,
     initial: Option<Snapshot>,
+    save_response_audit: Option<SaveResponseAudit<'a>>,
 }
+type SaveResponseAudit<'a> = Box<dyn FnMut(Uuid, &[u8]) -> Result<()> + 'a>;
 impl<'a> WorkerUploadIo<'a> {
+    /// Administrator diagnostic opt-in. The response is still untrusted and
+    /// must pass the normal parser and independent fetch verification. A failed
+    /// audit closes the channel and leaves an attempted write uncertain.
+    pub fn audit_save_responses(&mut self, audit: impl FnMut(Uuid, &[u8]) -> Result<()> + 'a) {
+        self.save_response_audit = Some(Box::new(audit));
+    }
     /// Only a validated root-registry Account can choose the unwrap identity.
     /// The worker returns signed/wrapped records, never authoritative root keys.
     pub(crate) fn for_account(
@@ -635,6 +643,7 @@ impl<'a> WorkerUploadIo<'a> {
                 device: account.device(),
                 roots,
                 initial: Some(snapshot),
+                save_response_audit: None,
             }),
             Err(error) => {
                 client.channel.close();
@@ -655,6 +664,7 @@ impl<'a> WorkerUploadIo<'a> {
             device,
             roots: authenticated_roots,
             initial: None,
+            save_response_audit: None,
         })
     }
 }
@@ -699,16 +709,17 @@ impl UploadIo for WorkerUploadIo<'_> {
             return Err(invalid("save differs from fixed scope"));
         }
         let save = AtomicSave::new(&self.device, attempt, zone, record, pointer)?;
-        let result = save
-            .parse_response(
-                &self
-                    .client
-                    .exchange_checked(Kind::Save, &save.body, check)?,
-            )
-            .and_then(|outcome| {
-                check()?;
-                Ok(outcome)
-            });
+        let result = (|| {
+            let response = self
+                .client
+                .exchange_checked(Kind::Save, &save.body, check)?;
+            if let Some(audit) = &mut self.save_response_audit {
+                audit(attempt, &response)?;
+            }
+            let outcome = save.parse_response(&response)?;
+            check()?;
+            Ok(outcome)
+        })();
         if result.is_err() {
             self.client.channel.close();
         }

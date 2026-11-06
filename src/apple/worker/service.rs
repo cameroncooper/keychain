@@ -457,7 +457,9 @@ pub fn run(config: ServiceConfig) -> Result<()> {
     let result = loop {
         match listener.accept() {
             Ok((stream, _)) => {
-                // Never log account payloads/errors. Failed/aborted attempts
+                // Never log account payloads or free-form errors. Fixed save
+                // failure stages/numeric HTTP statuses contain no account data.
+                // Failed/aborted attempts
                 // are reconciled by the broker's durable journal, not replayed.
                 let _ = serve_account(
                     stream,

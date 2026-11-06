@@ -62,6 +62,57 @@ fn binding() -> Binding {
 fn until() -> Instant {
     Instant::now() + Duration::from_secs(3)
 }
+
+#[test]
+fn malformed_save_reply_is_audited_before_parsing_and_audit_failure_cannot_enable_resend()
+-> Result<()> {
+    for audit_fails in [false, true] {
+        let (device, binding, item, pointer) =
+            crate::apple::cloudkit::atomic::tests::worker_save_fixture()?;
+        let check = || Ok(());
+        let (client, server) = pair(&binding, &check, until())?;
+        let received = std::cell::RefCell::new(Vec::new());
+        let attempt = Uuid::new_v4();
+        let mut io = WorkerUploadIo {
+            client,
+            device,
+            roots: vec![],
+            initial: None,
+            save_response_audit: None,
+        };
+        io.audit_save_responses(|id, bytes| {
+            assert_eq!(id, attempt);
+            received.borrow_mut().extend_from_slice(bytes);
+            if audit_fails {
+                return Err(invalid("synthetic audit failure"));
+            }
+            Ok(())
+        });
+        let zone = binding.zone.clone();
+        let worker = thread::spawn(move || {
+            let check = || Ok(());
+            let mut channel = Channel::new(server, binding, until(), &check)?;
+            assert_eq!(channel.read(0)?.0, Kind::Save);
+            channel.write(0, Kind::Save, b"synthetic malformed save response")?;
+            assert!(channel.read(1).is_err());
+            Ok(())
+        });
+        let error = io
+            .create_atomic(attempt, &zone, &item, &pointer, &check)
+            .err()
+            .ok_or_else(|| invalid("malformed reply unexpectedly accepted"))?;
+        assert_eq!(&*received.borrow(), b"synthetic malformed save response");
+        if audit_fails {
+            assert!(error.to_string().contains("synthetic audit failure"));
+        }
+        assert!(
+            io.create_atomic(Uuid::new_v4(), &zone, &item, &pointer, &check)
+                .is_err()
+        );
+        join(worker)?;
+    }
+    Ok(())
+}
 pub(crate) fn pair<'a>(
     binding: &Binding,
     check: &'a dyn Fn() -> Result<()>,

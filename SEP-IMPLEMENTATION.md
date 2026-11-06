@@ -15,8 +15,13 @@ other-device acceptance gates remain open. Details are in
 The [disposable iCloud test](docs/LIVE-ICLOUD-TEST.md) is now prepared with a fixed
 new UUID and a private live pointer/absence review. The isolated administrator
 harness has passed offline controls and non-capturing inspection; its sealed SEP
-item recipient is provisioned. Write-scope approval and fingerprint readiness
-are pending. No iCloud write or new-passkey creation has been performed.
+item recipient is provisioned. After scope approval and fresh readiness, one
+negative attempt completed biometric unlock/local key staging and encryption but
+returned an uncertain save result. The journal/key/ciphertext are retained; an
+independent authenticated fetch showed the UUID absent and pointer unchanged.
+There is no definite rejection or accepted-save/registration proof, so the positive
+gate stays shut. Additional negative retry approval/readiness is separate; the
+updated diagnostic preserves errors/replies and cannot automatically resend.
 
 This is the application design and implementation order. The current
 [SEP handoff](SEP-INTEGRATION.md), [driver API](docs/sep-driver/README.md),
