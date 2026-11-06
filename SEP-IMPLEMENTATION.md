@@ -485,8 +485,9 @@ commits that exact successor through one biometric-decrypt lifetime, then displa
 only requested fields. Root staging replacement pins the old pending tag; recovery
 retains superseded ciphertexts and refuses known loss/rollback. Tests cover repeated
 changes, lost replies, publication faults, concurrent pending commit, bounded history
-and cancellation before/after commit. Real biometric reveal/update still needs
-completion; synthetic stand-ins do not prove one-fingerprint hardware behavior.
+and cancellation before/after commit. The later live synthetic run below now
+establishes selected hardware reveal/update and user-confirmed one-operation UX;
+real migration, session-lock/expiry and reboot acceptance still need completion.
 Reviewed pure crypto/parser/serializer operations now run on a temporary locked,
 dump-excluded, non-inherited stack with guard pages. The caller joins and wipes
 its full usable mapping on success or Rust unwind; setup failure never runs the
@@ -514,3 +515,13 @@ activation cannot grant UV or start capture. Direct root diagnostics still need
 an already running agent. Metadata-only list/status operations do not activate
 it. Availability queries may start the agent process without a window. See
 [activation deployment](contrib/SEP-SERVICES.md) for current installation evidence.
+
+
+Live login progress (2026-11-06): the isolated synthetic record now passes initial
+biometric verification, all-fields reveal, and revision 2 verification/commit/reveal
+in one decrypt lifetime. The user confirmed the desktop UX and single-operation
+update. A fresh client process then revealed the same saved revision; a separate
+Cancel/Escape test returned no successful field response, preserved revision 2 and
+left the reader available. See [exact evidence and limits](docs/SEP-LOGIN-REVEAL.md#live-synthetic-login-acceptance--2026-11-06).
+This does not establish real CLI migration, session-lock/expiry, broker restart,
+reboot, browser or Apple-account/write acceptance. The complete goal remains open.

@@ -103,7 +103,17 @@ fn reveal_and_check(socket: &Path, import: &LoginImport, updated: bool) -> Resul
     Ok(())
 }
 
-pub(super) fn check(socket: &Path, state_path: &Path) -> Result<()> {
+fn expect_canceled(reply: keychain::Result<RevealedLogin>) -> Result<()> {
+    match reply {
+        Err(keychain::Error::Sep(keychain::security::sep::ProviderError::Canceled)) => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(_) => {
+            Err("cancellation check unexpectedly revealed fields; no values were logged".into())
+        }
+    }
+}
+
+pub(super) fn check(socket: &Path, state_path: &Path, cancel_check: bool) -> Result<()> {
     keychain_sep_driver::memory::make_process_nondumpable()?;
     let owner = keychain_sep_driver::peer::effective_uid();
     if owner == 0 || !socket.is_absolute() {
@@ -112,6 +122,9 @@ pub(super) fn check(socket: &Path, state_path: &Path) -> Result<()> {
     let recipient: Recipient =
         serde_json::from_value(keychain::broker::call(socket, Operation::ItemRecipient)?)?;
     let fresh = !state_path.try_exists()?;
+    if fresh && cancel_check {
+        return Err("cancellation check requires the existing verified synthetic state".into());
+    }
     let state: State = if fresh {
         let id = uuid::Uuid::new_v4().to_string();
         let initial = LoginImport::seal(owner, &recipient, 0, &fixture(id.clone(), false))?;
@@ -147,6 +160,38 @@ pub(super) fn check(socket: &Path, state_path: &Path) -> Result<()> {
     let id = &state.initial.metadata.id;
     println!("synthetic login record: {id}");
     let mut current = load_state(socket, id)?;
+    if cancel_check {
+        if !current
+            .active
+            .as_ref()
+            .is_some_and(|s| matches(s, &state.updated, true))
+            || current.staged.is_some()
+        {
+            return Err(
+                "cancellation check requires the unchanged committed synthetic revision 2".into(),
+            );
+        }
+        println!("Cancellation check: DO NOT TOUCH the reader; click Cancel or press Escape.");
+        expect_canceled(reveal(
+            socket,
+            &selection(&state.updated),
+            RevealField::All,
+            Arc::new(AtomicBool::new(false)),
+        ))?;
+        let after = load_state(socket, id)?;
+        if !after
+            .active
+            .as_ref()
+            .is_some_and(|s| matches(s, &state.updated, true))
+            || after.staged.is_some()
+        {
+            return Err("synthetic state changed during cancellation".into());
+        }
+        println!(
+            "verified desktop cancellation: no successful field response; revision 2 unchanged"
+        );
+        return Ok(());
+    }
     if fresh {
         if current.active.is_some() || current.staged.is_some() {
             return Err("synthetic record unexpectedly exists".into());
@@ -272,6 +317,13 @@ mod tests {
             .unwrap_or_else(|| panic!("missing fixture code"))
             .code = "00000000".into();
         assert!(check_reply(&second, true, 59, 60).is_err());
+    }
+    #[test]
+    fn cancellation_check_requires_cancel_and_refuses_success_or_timeout() {
+        use keychain::security::sep::ProviderError;
+        assert!(expect_canceled(Err(ProviderError::Canceled.into())).is_ok());
+        assert!(expect_canceled(Err(ProviderError::Expired.into())).is_err());
+        assert!(expect_canceled(Ok(reply(59))).is_err());
     }
     #[test]
     fn rejects_missing_fields_and_changed_notes() {

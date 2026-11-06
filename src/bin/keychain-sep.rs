@@ -29,6 +29,9 @@ enum Command {
         /// Private synthetic ciphertext/selection state, retained for reruns.
         #[arg(long)]
         state: PathBuf,
+        /// Expect desktop Cancel/Escape, with no touch and no revealed fields.
+        #[arg(long)]
+        cancel_check: bool,
     },
     /// Hold a real fprintd claim while the broker waits, then release and verify
     /// the disposable migrated credential. Does not enroll or remove prints.
@@ -110,7 +113,11 @@ fn main() {
 }
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
-        Command::BrokerLoginCheck { socket, state } => login::check(&socket, &state)?,
+        Command::BrokerLoginCheck {
+            socket,
+            state,
+            cancel_check,
+        } => login::check(&socket, &state, cancel_check)?,
         Command::FprintdCoexistenceCheck { record, socket } => fprintd::check(record, socket)?,
         Command::BrokerMigrationCheck { socket, profile } => {
             use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};

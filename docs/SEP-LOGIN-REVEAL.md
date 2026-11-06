@@ -196,8 +196,9 @@ fresh-process reopen, interrupted cleanup, stale/missing revisions, login/passke
 namespace collision, metadata-purpose confusion and missing-root refusal. Its
 synthetic decrypt is explicitly a test stand-in, not hardware authorization.
 
-Real biometric login verification/reveal/update, cancellation/session-lock/expiry
-and fresh-process/reboot acceptance remain required. No password/TOTP browser autofill or Apple write is
+The synthetic hardware runs below now cover biometric verification/reveal/update,
+desktop cancellation and fresh-client persistence. Real-credential CLI migration,
+session-lock/expiry/disconnect, restarted-broker and reboot acceptance remain required. No password/TOTP browser autofill or Apple write is
 claimed from this service implementation.
 
 Installed validation on 2026-11-06: 223 workspace tests passed with 23 intentionally
@@ -272,12 +273,12 @@ explicit production verification before this diagnostic continues; it is never
 silently replaced. No recovery data or committed records are automatically deleted.
 
 Offline diagnostic tests cover TOTP-window rollover, stale/wrong codes, wrong
-password version and missing/changed output fields. The command has been built
-but **not run against hardware**; its presence does not satisfy biometric,
-cancellation, session-lock or reboot acceptance. CLI migration and source-journal
-publication still need their own real acceptance checks.
+password version and missing/changed output fields. The hardware runs below
+establish selected synthetic verification/reveal/update and fresh-client behavior.
+CLI migration/source-journal publication, session-lock and reboot persistence
+still need their own acceptance checks.
 
-Isolated fixture prepared on 2026-11-06 (no capture yet):
+Isolated fixture prepared on 2026-11-06 (subsequently exercised below):
 
 - Unit: `keychain-login-check.service` (transient, one-hour idle exit).
 - Root registry: `/var/lib/keychain-login-check-20261106`.
@@ -304,3 +305,43 @@ Check the unit and socket first; preparation is not evidence they remain live.
 If idle exit/reboot removes the transient unit/socket, restore the broker against
 the retained registry and owner before using the same client state. Do not create
 a replacement recipient or discard state to make a persistence check pass.
+
+
+## Live synthetic login acceptance — 2026-11-06
+
+With explicit user readiness, the retained isolated recipient
+`77ab7ff4-2da7-4151-b4e0-c1fa4a6cee5d` and record
+`2ae732a0-e4ba-4840-89c8-f32965e27b8f` passed through the installed root broker and
+D-Bus desktop agent against the real SEP. The idle transient broker was restored
+against its existing registry before the run; no new recipient was created.
+The client state is `.sep-check-login-20261106/check.json`, mode 0600.
+
+1. Initial biometric decrypt/content verification committed revision 1.
+2. A new biometric operation revealed the published synthetic password/notes and
+   a current TOTP. The client compared the values without logging them.
+3. A staged revision 2 was verified, committed and revealed inside one biometric
+   decrypt lifetime. The client re-read root state and confirmed active revision 2
+   with no pending record. The user confirmed that the desktop prompts behaved as
+   expected, including one fingerprint operation for this update-and-reveal.
+4. With separate readiness, another invocation from a fresh client process
+   revealed the same committed revision 2 and correctly checked all fields/TOTP.
+5. With explicit instructions/readiness to press Cancel/Escape without touching,
+   `--cancel-check` received the typed Canceled result, no successful field
+   response, and verified that the active revision remained 2 with no pending
+   mutation. A subsequent no-prompt broker status returned `sepDevice: available`.
+
+Cancellation mode requires existing client state and unchanged committed revision
+2; it never initializes, verifies or updates another item. Unexpected success,
+timeout or another error fails the check and logs no field values. A synthetic
+unit test checks those distinct outcomes. To deliberately test desktop cancellation:
+
+```sh
+./target/release/keychain-sep broker-login-check   --socket /run/keychain-login-check-20261106/broker.sock   --state "$PWD/.sep-check-login-20261106/check.json" --cancel-check
+```
+
+Do not touch the reader for that mode, even though the normal production reveal
+prompt offers fingerprint guidance. These runs did not read a real login, perform
+Apple requests, alter enrollment/keybags, retire a source copy or test a reboot.
+A fresh client process is not evidence of a restarted broker or full reboot.
+Real CLI migration, session lock/expiry/disconnect, durable recovery-copy
+retirement, browser/account integration and reboot gates remain open.

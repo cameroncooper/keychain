@@ -274,3 +274,18 @@ has now been built and selected on Asahi. Real-account SRP init passed through t
 installed adapter without any password proof, and its 31-second OTP freshness check
 passed offline. These are not full login or trust-repair evidence. The Prepared
 repair journal and old keys remain; see [authentication details](APPLE-AUTH-COMPATIBILITY.md).
+
+
+## Selected login/TOTP hardware run — 2026-11-06
+
+The isolated installed broker/desktop agent completed real SEP decrypt for a
+published synthetic login: initial verification, all-fields reveal, then revision
+2 verification/commit/reveal within one biometric lifetime. The user confirmed the
+expected prompts and single-operation update UX. A separately authorized fresh
+client process revealed revision 2 again. A separately authorized Cancel/Escape
+check returned Canceled, no successful fields and unchanged revision 2; no-prompt
+status then reported the reader available. Exact fixture IDs, command and limits
+are recorded in [login acceptance](SEP-LOGIN-REVEAL.md#live-synthetic-login-acceptance--2026-11-06).
+This supersedes the earlier absence of any hardware login/TOTP reveal evidence,
+not the remaining real-account migration, session-lock, browser or reboot gates.
+No Apple requests, real credential reveal or source-copy retirement occurred.
