@@ -66,6 +66,21 @@ same launcher and exact extension allowlist. This changes only test setup; no
 capture or creation request was replayed. Browser retry and positive acceptance
 remain pending.
 
+After the manifest correction the browser displayed the storage chooser. Choosing
+iCloud then returned `prompt was not presented`, with no new creation draft. A
+separate display-only request received the expected Visible acknowledgment. The
+agent's initial focus tracking could cancel during window mapping before any
+drawn frame was acknowledged, including while the browser chooser closes. Focus
+loss now cancels only after presentation has been acknowledged; acknowledgment
+still requires a drawn, visible, focused window, and capture remains blocked until
+then. The browser path needs a fresh manual retry to verify this diagnosis.
+The rebuilt agent was installed with its predecessor retained under
+`/var/lib/keychain-service-backups/update.p_hq94rq`, then restarted. A new
+display-only request received Visible without starting reader verification.
+The release build, desktop-agent Clippy and seven prompt protocol tests passed.
+The isolated broker and worker were also restarted after their ten-minute idle
+expiry, with thirty-minute idle limits for this acceptance session.
+
 Use the fresh review with `--review` and a separate root-private request file
 with `--request`; never overwrite the earlier frozen request. Stop if either
 operation is uncertain or the user cancels. Submit the resulting registration

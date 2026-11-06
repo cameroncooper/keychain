@@ -105,7 +105,6 @@ struct AuthPrompt {
     details: bool,
     first_frame: bool,
     presented: bool,
-    was_active: bool,
     _activation: Subscription,
     _appearance: Subscription,
 }
@@ -119,7 +118,6 @@ impl AuthPrompt {
         let id = channel.id;
         if write_frame(&mut channel.stream, &AgentEvent::Visible { id }).is_ok() {
             self.presented = true;
-            self.was_active = true;
         } else {
             channel.cancel();
             window.remove_window();
@@ -349,10 +347,12 @@ fn open_prompt(
                 let activation =
                     cx.observe_window_activation(window, |view: &mut AuthPrompt, window, _| {
                         if window.is_window_active() {
-                            view.was_active = true;
                             view.acknowledge_display(window);
-                        } else if view.was_active {
-                            // Switching away ends this operation; returning never resumes capture.
+                        } else if view.presented {
+                            // Mapping can briefly change focus before the first frame,
+                            // particularly while the browser chooser is closing. No
+                            // capture is permitted until presentation is acknowledged.
+                            // After that, switching away always ends the operation.
                             view.channel.borrow_mut().cancel();
                             window.remove_window();
                         }
@@ -371,7 +371,6 @@ fn open_prompt(
                     details: false,
                     first_frame: false,
                     presented: false,
-                    was_active: window.is_window_active(),
                     _activation: activation,
                     _appearance: appearance,
                 }
@@ -519,7 +518,7 @@ pub fn run() -> io::Result<()> {
                         if let Some(current) = active.as_ref() {
                             let _ = current.window.update(cx, |_, window, cx| {
                                 current.view.update(cx, |view, _| {
-                                    if view.was_active && !window.is_window_active() {
+                                    if view.presented && !window.is_window_active() {
                                         view.channel.borrow_mut().cancel();
                                         window.remove_window();
                                     }
