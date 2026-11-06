@@ -57,6 +57,15 @@ This proposed new creation still needs explicit user initiation/approval; the
 production service's creation flag stays off. Do not replay an earlier frozen
 transaction or claim other-device acceptance until actually observed.
 
+The first manual browser attempt returned the site's generic authenticator error
+before any chooser or desktop prompt. No new creation draft appeared. The isolated
+browser's native-host manifest had been staged under its XDG config directory,
+but Chromium resolves `NativeMessagingHosts` under its actual `--user-data-dir`.
+The manifest was copied into that isolated user-data directory, preserving the
+same launcher and exact extension allowlist. This changes only test setup; no
+capture or creation request was replayed. Browser retry and positive acceptance
+remain pending.
+
 Use the fresh review with `--review` and a separate root-private request file
 with `--request`; never overwrite the earlier frozen request. Stop if either
 operation is uncertain or the user cancels. Submit the resulting registration
