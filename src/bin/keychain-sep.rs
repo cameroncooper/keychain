@@ -8,6 +8,8 @@ use keychain::security::sep::{NativeSepProvider, StoredSepKey, sign_native};
 use keychain_sep_driver::{Device, Guidance};
 #[path = "keychain-sep/fprintd.rs"]
 mod fprintd;
+#[path = "keychain-sep/login.rs"]
+mod login;
 
 #[derive(Parser)]
 #[command(about = "Diagnose real SEP biometric signing using disposable application keys")]
@@ -19,6 +21,15 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Opt-in synthetic login/TOTP verification, reveal and single-capture update.
+    /// First run may prompt three times; reruns check the same persisted item.
+    BrokerLoginCheck {
+        #[arg(long)]
+        socket: PathBuf,
+        /// Private synthetic ciphertext/selection state, retained for reruns.
+        #[arg(long)]
+        state: PathBuf,
+    },
     /// Hold a real fprintd claim while the broker waits, then release and verify
     /// the disposable migrated credential. Does not enroll or remove prints.
     FprintdCoexistenceCheck {
@@ -99,6 +110,7 @@ fn main() {
 }
 fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
+        Command::BrokerLoginCheck { socket, state } => login::check(&socket, &state)?,
         Command::FprintdCoexistenceCheck { record, socket } => fprintd::check(record, socket)?,
         Command::BrokerMigrationCheck { socket, profile } => {
             use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};

@@ -232,3 +232,47 @@ Installed broker/native-host availability passed without capture; both pinned
 VerifyLogin and RevealLogin refused a synthetic passkey ID before opening an
 authorization prompt. ListLogins still contained no real login records. The real
 reader, browser, fresh-process and reboot acceptance gates remain unproven.
+
+## Opt-in synthetic hardware check
+
+The diagnostic binary now provides a repeatable check with published synthetic
+password/notes and the RFC 6238 SHA-1 seed. Run it only when ready to interact with
+the desktop prompt:
+
+```sh
+./target/release/keychain-sep broker-login-check \
+  --socket /absolute/path/to/broker.sock \
+  --state /absolute/path/to/synthetic-login-check.json
+```
+
+Run as the paired desktop user. This adds one synthetic login to the selected
+broker; use a disposable broker registry/socket to keep it outside normal
+inventory. It does not replace the synced inventory, read a real credential,
+contact Apple or change any creation flag. An existing item recipient and
+`--allow-item-decrypt` deployment are required. The state file is created privately
+before import and contains frozen metadata/ciphertext/selections, with no real
+password, seed or account tokens. It must be retained with the selected registry.
+
+The first successful run uses three separately labeled biometric operations:
+initial verification, initial all-fields reveal, then a pending update committed
+and revealed within one decrypt lifetime. Only touch when the desktop prompt asks.
+The check verifies password/notes, locally generates the expected TOTP for
+the returned expiry window (allowing a period boundary during capture), and checks
+durable active revision/pending cleanup after the update. It logs no revealed
+fields or code. It does not count fingerprints or claim success from a UI event.
+Observe that update/reveal requires only one successful biometric operation.
+
+A later invocation with the same state/socket checks revision 2 in a fresh client
+process, using another new biometric operation. Repeat after reboot to validate
+that persistence chain. Lost replies resume by reading exact root state; changed
+metadata/recipient/revision/content or a missing previously prepared record
+refuses recreation. Cancellation/errors stop the invocation, with no automatic
+capture retry. A leftover initial pending file after a failed cleanup can require
+explicit production verification before this diagnostic continues; it is never
+silently replaced. No recovery data or committed records are automatically deleted.
+
+Offline diagnostic tests cover TOTP-window rollover, stale/wrong codes, wrong
+password version and missing/changed output fields. The command has been built
+but **not run against hardware**; its presence does not satisfy biometric,
+cancellation, session-lock or reboot acceptance. CLI migration and source-journal
+publication still need their own real acceptance checks.
