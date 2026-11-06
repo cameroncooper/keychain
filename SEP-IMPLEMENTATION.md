@@ -623,5 +623,12 @@ after fresh user readiness. A fresh process reopened the saved key and verified
 the biometric signature for a new public message. The user confirmed the centered
 floating window, readable themed contents and dismissal after touch. This closes
 the new prompt's successful signing/appearance gate, without using saved passkeys
-or contacting Apple. Cancellation/cleanup through the new window and the other
-remaining hardware/reboot and iCloud-write gates still need their own evidence.
+or contacting Apple.
+
+Escape cancellation and post-cancel reuse then also passed through an isolated
+diagnostic broker: the user confirmed Escape, the caller received Canceled with
+no signature, and a separately authorized normal touch returned a verified
+signature through the same broker PID/invocation, without a sensor or service
+restart. The temporary fixture was removed after stopping that isolated unit.
+The other remaining hardware/reboot and iCloud-write gates still need their own
+evidence; this is not proof of every cancellation trigger.

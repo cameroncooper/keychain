@@ -213,4 +213,16 @@ key. The user confirmed that the popup was centered and floating, text and theme
 were correct, and it closed after the touch. No saved passkey or Apple request
 was involved. This establishes the new window's successful hardware path; live
 cancellation/cleanup through this window and complete-chain reboot acceptance
-remain separate checks.
+were separate checks at that point.
+
+Real cancellation and reuse subsequently passed through an isolated broker with
+only the saved disposable wrapped key enrolled. After fresh readiness, the user
+pressed Escape in the Cancellation check window. The caller received Canceled
+and no signature. Following separate readiness, a normal signing request through
+the same broker PID and systemd invocation returned an independently verified
+native biometric signature for `GPUI post-cancellation reader reuse 2026-11-06`.
+The broker and sensor were not restarted between these operations. The isolated
+unit was then stopped and its temporary registry removed; the original disposable
+key file is retained. No saved passkey or Apple request was involved. This proves
+the Escape cancellation/reuse path, not the separate mouse-Cancel, session-lock,
+agent-exit, expiry or reboot cases.
