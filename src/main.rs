@@ -451,17 +451,38 @@ fn repair_octagon(
 ) -> Result<()> {
     use keychain::recovery::{RepairPhase, TrustRepair};
     let mut journal = TrustRepair::prepare(store, account, device, backend)?;
+    let mut current_account = account.clone();
     if journal.phase() == RepairPhase::Prepared {
         eprintln!("Repairing Octagon trust; existing peer keys and cached items are retained.");
+        let mut escrow_pet = None;
+        if journal.candidate().trust_state == OctagonTrustState::IdentityReady {
+            // A provider change can invalidate old service tokens. This recovery
+            // already needs a fresh PET: refresh the account in the same SRP/2FA
+            // exchange, retain its PET only in memory, and keep the active peer.
+            let (account, refreshed_device, _active_peer, pet) = authenticate_and_prepare(
+                Some(current_account.username.clone()),
+                anisette,
+                backend,
+                store,
+            )?;
+            if &refreshed_device != device {
+                return Err(Error::Security(
+                    "device identity changed during trust repair".into(),
+                ));
+            }
+            validate_account_binding(&account, journal.candidate())?;
+            current_account = account;
+            escrow_pet = Some(pet);
+        }
         join_octagon(
             requested_label,
-            account,
+            &current_account,
             device,
             anisette,
             backend,
             store,
             journal.candidate().clone(),
-            None,
+            escrow_pet,
             true,
         )?;
         journal = store
@@ -473,13 +494,13 @@ fn repair_octagon(
         ) {
             return Ok(());
         }
-        let client = octagon::OctagonClient::new(account, device, anisette, backend)?;
+        let client = octagon::OctagonClient::new(&current_account, device, anisette, backend)?;
         eprintln!("Verifying a complete sync with the replacement peer alone…");
         let projection = client.sync_self_credentials(journal.candidate())?;
         save_synced_projection(projection, config, backend, store)?;
         journal = journal.snapshot_verified(store)?;
     }
-    let client = octagon::OctagonClient::new(account, device, anisette, backend)?;
+    let client = octagon::OctagonClient::new(&current_account, device, anisette, backend)?;
     let journal = journal.commit(store, |state| client.retire_verified_sponsor(state))?;
     println!("Octagon trust repaired as {}", journal.candidate().peer_id);
     println!("Verified a complete snapshot; previous peer keys are retained locally.");

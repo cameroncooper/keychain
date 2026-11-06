@@ -9,6 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use reqwest::blocking::Client;
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
 use crate::paths::AppPaths;
 use crate::{Error, Result};
@@ -29,6 +30,18 @@ const MAX_HEADER_RESPONSE: u64 = 64 * 1024;
 
 pub trait AnisetteProvider {
     fn headers(&self) -> Result<BTreeMap<String, String>>;
+    fn resync(&self, _sim: &str) -> Result<()> {
+        Err(Error::Apple(
+            "this anisette provider cannot answer Apple's explicit resync request".into(),
+        ))
+    }
+    /// ADI material and machine metadata, without the helper's suggested client
+    /// profile. Each Apple service chooses its own endpoint-appropriate identity.
+    fn validation_headers(&self) -> Result<BTreeMap<String, String>> {
+        let mut headers = self.headers()?;
+        headers.retain(|name, _| !name.eq_ignore_ascii_case("X-Mme-Client-Info"));
+        Ok(headers)
+    }
 }
 
 pub fn validate_helper(path: &Path) -> Result<PathBuf> {
@@ -108,7 +121,25 @@ impl ManagedAnisette {
             .map_err(|error| Error::io(paths.runtime_dir.join("anisette-port"), error))?
             .port();
         drop(listener);
+        // The new local Mac adapter requires this per-launch nonce. Older
+        // compatible helpers ignore the extra header/environment variable.
+        let nonce = zeroize::Zeroizing::new(format!(
+            "{}{}",
+            uuid::Uuid::new_v4().simple(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {}", nonce.as_str()))
+            .map_err(|_| Error::InvalidData("invalid local anisette authorization".into()))?;
+        authorization.set_sensitive(true);
+        let client = Client::builder()
+            .default_headers(HeaderMap::from_iter([(AUTHORIZATION, authorization)]))
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_secs(2))
+            .timeout(Duration::from_secs(5))
+            .build()?;
         let child = Command::new(&helper)
+            .env("KEYCHAIN_ANISETTE_NONCE", nonce.as_str())
             .arg("--host")
             .arg("127.0.0.1")
             .arg("--port")
@@ -121,10 +152,6 @@ impl ManagedAnisette {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|error| Error::io(&helper, error))?;
-        let client = Client::builder()
-            .connect_timeout(Duration::from_secs(2))
-            .timeout(Duration::from_secs(5))
-            .build()?;
         let mut managed = Self {
             endpoint: format!("http://127.0.0.1:{port}/"),
             child,
@@ -155,6 +182,41 @@ impl ManagedAnisette {
 }
 
 impl AnisetteProvider for ManagedAnisette {
+    fn resync(&self, sim: &str) -> Result<()> {
+        if sim.is_empty() || sim.len() > 4096 {
+            return Err(Error::InvalidData(
+                "anisette resync data exceeds bounds".into(),
+            ));
+        }
+        let response = self
+            .client
+            .post(format!("{}v1/resync", self.endpoint))
+            .timeout(Duration::from_secs(45))
+            .json(&serde_json::json!({"sim":sim}))
+            .send()?;
+        if !response.status().is_success() {
+            return Err(Error::Apple(format!(
+                "anisette resync returned HTTP {}",
+                response.status()
+            )));
+        }
+        let mut bytes = zeroize::Zeroizing::new(Vec::new());
+        response
+            .take(MAX_HEADER_RESPONSE + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| Error::io("anisette resync", error))?;
+        if bytes.len() as u64 > MAX_HEADER_RESPONSE {
+            return Err(Error::InvalidData(
+                "anisette resync response exceeds bounds".into(),
+            ));
+        }
+        let result: serde_json::Value = serde_json::from_slice(&bytes)?;
+        if result.get("resynced").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(Error::Apple("anisette resync was not confirmed".into()));
+        }
+        Ok(())
+    }
+
     fn headers(&self) -> Result<BTreeMap<String, String>> {
         let response = self.client.get(&self.endpoint).send()?;
         if !response.status().is_success() {

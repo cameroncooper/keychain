@@ -28,6 +28,11 @@ This builds the CLI and the one-shot `keychain-browser-host` native-messaging bi
 self-contained apart from an anisette helper. The current integration expects
 a native `anisette-v3-server`-compatible executable with `--host`, `--port`, `--adi-path`, and
 `--skip-server-startup` options. The CLI never downloads or installs that executable.
+The [local Mac anisette helper](helpers/mac-anisette/README.md) implements that interface
+in Rust using local macOS CoreADI emulation on Asahi. It is a separate process;
+no Mac or public anisette server is required. It replaces the Android helper on the
+development machine; see [authentication compatibility](docs/APPLE-AUTH-COMPATIBILITY.md)
+for the validation limits.
 
 ## Set up and use
 

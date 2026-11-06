@@ -291,7 +291,7 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 132 passing tests, four ignored (Apple network and three privileged
+Workspace checks: 135 passing tests, five ignored (two Apple network and three privileged
 integration tests). Both registry tests passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
 Five browser service-worker flow tests also pass. Strict Clippy is clean.
@@ -352,6 +352,13 @@ promotion. Interruption tests pass; live repair still requires user-entered escr
 credentials. See [sync and trust recovery](docs/SYNC-RECOVERY.md). Do not infer that
 Apple authentication failure, SEP service failure or local key loss caused this
 incident: authentication succeeded and signed peer metadata included an exclusion.
+
+Fresh GSA authentication then exposed the old Android anisette provider's rejection.
+A separate Rust Mac-CoreADI emulator helper now runs locally on Asahi; it provisioned
+one isolated identity and passed real-account SRP init through the application before
+and after being installed/selected. Password proof, 2FA/PET and real repair remain
+pending user input. The prior ADI profile and Prepared journal are retained. See
+[authentication compatibility](docs/APPLE-AUTH-COMPATIBILITY.md).
 
 Cold power-cycle, suspend/resume, other hardware, enrollment-set invalidation,
 native private-key import, P-384 and multi-user SEP identity isolation remain

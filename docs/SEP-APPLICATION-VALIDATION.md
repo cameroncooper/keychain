@@ -251,10 +251,17 @@ old peer-key retention and complete independent replacement-snapshot verificatio
 the affected account still needs the user to run escrow recovery locally. See
 [sync recovery](SYNC-RECOVERY.md). Do not report the real cache or trust as repaired.
 
-Latest workspace checks: 132 passed, four ignored; five browser-flow tests pass
+Latest workspace checks: 135 passed, five ignored; five browser-flow tests pass
 and strict workspace/all-target Clippy is clean. The new repair tests inject
 interruption around promotion, sponsor retirement and the final journal rename.
 They establish offline transition behavior, not live Apple acceptance. The full
 SEP plan remains incomplete: real browser/migration/reboot gates, protected
 password/TOTP reveal, retirement/recovery and both registration/storage choices
 still require work.
+
+The fresh escrow sign-in gate exposed an obsolete anisette/provider compatibility
+failure, separate from SEP. A standalone local Rust Mac-CoreADI emulator helper
+has now been built and selected on Asahi. Real-account SRP init passed through the
+installed adapter without any password proof, and its 31-second OTP freshness check
+passed offline. These are not full login or trust-repair evidence. The Prepared
+repair journal and old keys remain; see [authentication details](APPLE-AUTH-COMPATIBILITY.md).

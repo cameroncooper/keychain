@@ -1,0 +1,25 @@
+[package]
+name = "keychain-anisette-mac"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+publish = false
+description = "On-demand local macOS CoreADI emulator adapter for keychain"
+
+[workspace]
+
+[dependencies]
+apple-core = { git = "https://github.com/sacca97/os-findmy-e", rev = "d4d2a832baf47d1cf43d989879950ac2aec45f47" }
+clap = { version = "4.5", features = ["derive"] }
+fs2 = "0.4"
+libc = "0.2"
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+subtle = "2"
+tokio = { version = "1", features = ["rt", "time", "net"] }
+uuid = { version = "1", features = ["v4"] }
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"

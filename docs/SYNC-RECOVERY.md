@@ -88,7 +88,7 @@ Software tests exercise preparation/checkpoint retention, account/identity
 mismatch, purpose binding and interruption before retirement, after retirement,
 and after active-state commit. These do not establish that Apple accepts a live
 repair or that another device will retain the new peer indefinitely. The affected
-real account has not yet run this repair; its cache remains empty pending recovery.
+real account has not yet completed this repair; its cache remains empty pending recovery.
 
 ## Diagnostics
 

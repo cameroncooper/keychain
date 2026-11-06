@@ -17,16 +17,16 @@ use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::anisette::AnisetteProvider;
-use super::http::apple_client;
+use super::http::{apple_client, apple_unpooled_client};
 use crate::model::{AccountState, DeviceIdentity, MobileMeState};
 use crate::secret::zeroize_plist_dictionary;
 use crate::{Error, Result};
 
 const GSA_ENDPOINT: &str = "https://gsa.apple.com/grandslam/GsService2";
-const GSA_USER_AGENT: &str = "akd/1.0 CFNetwork/978.0.7 Darwin/18.7.0";
+const GSA_USER_AGENT: &str = "akd/1.0 CFNetwork/808.1.4";
 const GSA_CLIENT_INFO: &str = concat!(
-    "<MacBookPro13,2> <Mac OS X;10.15.2;19C57> ",
-    "<com.apple.AuthKit/1 (com.apple.dt.Xcode/3594.4.19)>"
+    "<MacBookPro13,2> <macOS;13.1;22C65> ",
+    "<com.apple.AuthKit/1 (com.apple.akd/1.0)>"
 );
 const LOGIN_DELEGATES_URL: &str = "https://setup.icloud.com/setup/iosbuddy/loginDelegates";
 const ACCOUNT_SETTINGS_URL: &str = "https://setup.icloud.com/setup/get_account_settings";
@@ -100,7 +100,7 @@ pub fn identity_headers(
         ),
         ("X-Apple-I-SRL-NO".into(), device.serial.clone()),
     ]);
-    headers.extend(anisette.headers()?);
+    headers.extend(anisette.validation_headers()?);
     Ok(headers)
 }
 
@@ -108,6 +108,13 @@ pub struct GsaClient<'a> {
     device: &'a DeviceIdentity,
     anisette: &'a dyn AnisetteProvider,
     client: Client,
+}
+
+struct SecretCpd(Dictionary);
+impl Drop for SecretCpd {
+    fn drop(&mut self) {
+        zeroize_plist_dictionary(&mut self.0);
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -143,7 +150,7 @@ impl<'a> GsaClient<'a> {
         Ok(Self {
             device,
             anisette,
-            client: apple_client(Duration::from_secs(20))?,
+            client: apple_unpooled_client(Duration::from_secs(20))?,
         })
     }
 
@@ -158,12 +165,24 @@ impl<'a> GsaClient<'a> {
         for (key, value) in identity_headers(self.device, self.anisette)? {
             cpd.insert(key, Value::String(value));
         }
+        // The helper supplies ADI validation material, not our GSA client
+        // identity. Keep CPD and the HTTP header consistent even with an older
+        // helper whose default branding still advertises Xcode.
+        cpd.insert(
+            "X-Mme-Client-Info".into(),
+            Value::String(GSA_CLIENT_INFO.into()),
+        );
         Ok(cpd)
     }
 
-    fn request(&self, parameters: Dictionary) -> Result<Dictionary> {
+    fn request(&self, parameters: Dictionary, cpd: &Dictionary) -> Result<Dictionary> {
+        let operation = match parameters.get("o").and_then(Value::as_string) {
+            Some("init") => "GSA init",
+            Some("complete") => "GSA complete",
+            _ => "GSA request",
+        };
         let mut request = Dictionary::new();
-        request.insert("cpd".into(), Value::Dictionary(self.cpd()?));
+        request.insert("cpd".into(), Value::Dictionary(cpd.clone()));
         request.extend(parameters);
         let body = Value::Dictionary(Dictionary::from_iter([
             (
@@ -180,18 +199,17 @@ impl<'a> GsaClient<'a> {
             .client
             .post(GSA_ENDPOINT)
             .header("Content-Type", "text/x-xml-plist")
-            .header("Accept", "*/*")
+            .header("Accept", "text/x-xml-plist")
             .header("User-Agent", GSA_USER_AGENT)
             .header("X-MMe-Client-Info", GSA_CLIENT_INFO)
             .body(encoded)
             .send()?;
-        let parsed = plist_response(response)?;
-        parsed
-            .as_dictionary()
-            .and_then(|outer| outer.get("Response"))
-            .and_then(Value::as_dictionary)
-            .cloned()
-            .ok_or_else(|| Error::InvalidData("GSA response has no Response dictionary".into()))
+        let mut parsed = plist_response(response, operation)?
+            .into_dictionary()
+            .ok_or_else(|| Error::InvalidData("GSA response is not a dictionary".into()))?;
+        let result = parsed.remove("Response").and_then(Value::into_dictionary);
+        zeroize_plist_dictionary(&mut parsed);
+        result.ok_or_else(|| Error::InvalidData("GSA response has no Response dictionary".into()))
     }
 
     pub fn authenticate(
@@ -316,12 +334,12 @@ impl<'a> GsaClient<'a> {
         }
     }
 
-    fn authenticate_once(&self, username: &str, password: &str, stage: &str) -> Result<AuthResult> {
+    fn initialize_srp(&self, username: &str) -> Result<(GsaSrp, Dictionary, SecretCpd)> {
         let mut private = Zeroizing::new([0_u8; 256]);
         rand::rngs::OsRng.fill_bytes(&mut *private);
         private[0] |= 0x80;
-        let mut srp = GsaSrp::new(username, private.as_slice())?;
-        let init = self.request(Dictionary::from_iter([
+        let srp = GsaSrp::new(username, private.as_slice())?;
+        let parameters = Dictionary::from_iter([
             (String::from("A2k"), Value::Data(srp.public_a())),
             (
                 String::from("ps"),
@@ -332,9 +350,35 @@ impl<'a> GsaClient<'a> {
             ),
             (String::from("u"), Value::String(username.into())),
             (String::from("o"), Value::String("init".into())),
-        ]))?;
-        let protocol = string(&init, "sp")
-            .ok_or_else(|| Error::Apple(format!("{stage}: GSA init failed: {}", status(&init))))?;
+        ]);
+        let mut cpd = SecretCpd(self.cpd()?);
+        let mut init = self.request(parameters.clone(), &cpd.0)?;
+        if let Some(sim) = requested_resync(&init)? {
+            // Only Apple's explicit pre-password 434 request authorizes this
+            // one bounded retry. No identity is regenerated and no proof,
+            // second-factor or escrow operation is replayed.
+            self.anisette.resync(&sim)?;
+            cpd = SecretCpd(self.cpd()?);
+            init = self.request(parameters, &cpd.0)?;
+        }
+        Ok((srp, init, cpd))
+    }
+
+    fn authenticate_once(&self, username: &str, password: &str, stage: &str) -> Result<AuthResult> {
+        let (mut srp, init, cpd) = self.initialize_srp(username)?;
+        let protocol = string(&init, "sp").ok_or_else(|| {
+            let hint = if integer(dictionary(&init, "Status").unwrap_or(&init), "ec").ok()
+                == Some(-80045)
+            {
+                "; check anisette/client compatibility rather than retrying the password"
+            } else {
+                ""
+            };
+            Error::Apple(format!(
+                "{stage}: GSA init failed before password proof: {}{hint}",
+                status(&init)
+            ))
+        })?;
         if protocol != "s2k" && protocol != "s2k_fo" {
             return Err(Error::InvalidData(format!(
                 "unsupported Apple password protocol {protocol}"
@@ -350,12 +394,16 @@ impl<'a> GsaClient<'a> {
         let mut encrypted_password = encrypt_password(password, salt, iterations, &protocol);
         let proof = srp.process_challenge(salt, server, encrypted_password.as_slice())?;
         encrypted_password.zeroize();
-        let complete = self.request(Dictionary::from_iter([
-            (String::from("c"), Value::String(challenge)),
-            (String::from("M1"), Value::Data(proof.client_proof.to_vec())),
-            (String::from("u"), Value::String(username.into())),
-            (String::from("o"), Value::String("complete".into())),
-        ]))?;
+        let complete = self.request(
+            Dictionary::from_iter([
+                (String::from("c"), Value::String(challenge)),
+                (String::from("M1"), Value::Data(proof.client_proof.to_vec())),
+                (String::from("u"), Value::String(username.into())),
+                (String::from("o"), Value::String("complete".into())),
+            ]),
+            &cpd.0,
+        )?;
+        drop(cpd);
         let server_proof = data(&complete, "M2").map_err(|_| {
             Error::Apple(format!(
                 "{stage}: GSA complete failed: {}",
@@ -369,7 +417,12 @@ impl<'a> GsaClient<'a> {
         }
         let encrypted_spd = data(&complete, "spd")?;
         let plain = decrypt_spd(proof.session_key.as_slice(), encrypted_spd)?;
-        let spd = Value::from_reader(Cursor::new(plain.as_slice()))?
+        let spd = Value::from_reader(Cursor::new(plain.as_slice()))
+            .map_err(|error| {
+                Error::InvalidData(format!(
+                    "{stage}: authenticated GSA session data is not a valid property list: {error}"
+                ))
+            })?
             .into_dictionary()
             .ok_or_else(|| Error::InvalidData("GSA spd is not a dictionary".into()))?;
         Ok(AuthResult {
@@ -734,7 +787,7 @@ fn login_mobileme(
     let response = apply_headers(client.post(LOGIN_DELEGATES_URL), &headers)?
         .body(plist_xml(&body)?)
         .send()?;
-    let value = plist_response(response)?;
+    let value = plist_response(response, "loginDelegates")?;
     let root = value
         .as_dictionary()
         .ok_or_else(|| Error::InvalidData("loginDelegates response is not a dictionary".into()))?;
@@ -789,7 +842,7 @@ pub fn refresh_account_settings(
         .body(Vec::new())
         .send()?;
     let status_code = response.status();
-    let value = plist_response(response)?;
+    let value = plist_response(response, "account settings")?;
     let root = value.as_dictionary().ok_or_else(|| {
         Error::InvalidData("account settings response is not a dictionary".into())
     })?;
@@ -1092,9 +1145,45 @@ fn plist_xml(value: &Value) -> Result<Vec<u8>> {
     Ok(out)
 }
 
-fn plist_response(response: Response) -> Result<Value> {
-    let bytes = response_bytes(response)?;
-    Ok(Value::from_reader(Cursor::new(bytes))?)
+fn plist_response(response: Response, operation: &str) -> Result<Value> {
+    let status = response.status().as_u16();
+    let content = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let content_kind = if content.contains("html") {
+        "HTML"
+    } else if content.contains("json") {
+        "JSON"
+    } else if content.contains("xml") || content.contains("plist") {
+        "plist/XML"
+    } else if content.starts_with("text/") {
+        "text"
+    } else {
+        "unrecognized content"
+    };
+    let bytes = Zeroizing::new(response_bytes(response)?);
+    parse_auth_plist(operation, status, content_kind, &bytes)
+}
+
+fn parse_auth_plist(
+    operation: &str,
+    status: u16,
+    content_kind: &str,
+    bytes: &[u8],
+) -> Result<Value> {
+    let value = Value::from_reader(Cursor::new(bytes)).map_err(|error| {
+        // Never include the body: successful authentication responses contain
+        // tokens. Only fixed metadata and parser event kinds are diagnostic.
+        Error::Apple(format!("{operation}: HTTP {status} returned {content_kind} ({} bytes), not a valid Apple property list: {error}", bytes.len()))
+    })?;
+    if value.as_dictionary().is_none() {
+        return Err(Error::Apple(format!(
+            "{operation}: HTTP {status} returned {content_kind}, not an Apple property-list dictionary"
+        )));
+    }
+    Ok(value)
 }
 
 fn response_bytes(response: Response) -> Result<Vec<u8>> {
@@ -1172,6 +1261,31 @@ fn status(response: &Dictionary) -> String {
     )
 }
 
+fn requested_resync(response: &Dictionary) -> Result<Option<String>> {
+    let status = dictionary(response, "Status").unwrap_or(response);
+    if integer(status, "hsc").ok() != Some(434) || integer(status, "ec").ok() != Some(-22421) {
+        return Ok(None);
+    }
+    let sim = match status.get("X-Apple-I-MD-DATA") {
+        Some(Value::Data(bytes)) if !bytes.is_empty() && bytes.len() <= 3072 => B64.encode(bytes),
+        Some(Value::String(value)) if !value.is_empty() && value.len() <= 4096 => {
+            let bytes = B64
+                .decode(value)
+                .map_err(|_| Error::InvalidData("invalid anisette resync encoding".into()))?;
+            if bytes.is_empty() {
+                return Err(Error::InvalidData("empty anisette resync data".into()));
+            }
+            value.clone()
+        }
+        _ => {
+            return Err(Error::InvalidData(
+                "Apple requested anisette resync without bounded SIM data".into(),
+            ));
+        }
+    };
+    Ok(Some(sim))
+}
+
 fn basic(username: &str, password: &str) -> String {
     format!("Basic {}", B64.encode(format!("{username}:{password}")))
 }
@@ -1206,6 +1320,147 @@ fn unix_now() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resync_requires_explicit_pre_password_status_and_bounded_valid_sim() -> Result<()> {
+        let response = |ec: i64, hsc: i64, sim: Value| {
+            Dictionary::from_iter([(
+                String::from("Status"),
+                Value::Dictionary(Dictionary::from_iter([
+                    (String::from("ec"), Value::Integer(ec.into())),
+                    (String::from("hsc"), Value::Integer(hsc.into())),
+                    (String::from("X-Apple-I-MD-DATA"), sim),
+                ])),
+            )])
+        };
+        let sim = Value::Data(vec![1; 36]);
+        assert_eq!(
+            requested_resync(&response(-22421_i64, 434_i64, sim.clone()))?,
+            Some(B64.encode([1; 36]))
+        );
+        assert!(requested_resync(&response(-80045, 434, sim.clone()))?.is_none());
+        assert!(requested_resync(&response(-22421, 200, sim))?.is_none());
+        assert!(requested_resync(&response(-22421, 434, Value::Data(vec![0; 3073]))).is_err());
+        assert!(
+            requested_resync(&response(-22421, 434, Value::String("invalid!".into()))).is_err()
+        );
+        Ok(())
+    }
+
+    struct LegacyAnisette;
+    impl AnisetteProvider for LegacyAnisette {
+        fn headers(&self) -> Result<BTreeMap<String, String>> {
+            Ok(BTreeMap::from([
+                (
+                    "X-MMe-Client-Info".into(),
+                    "obsolete Xcode suggestion".into(),
+                ),
+                ("x-mme-client-info".into(), "second casing".into()),
+                ("X-Apple-I-MD".into(), "synthetic-otp".into()),
+                ("X-Apple-I-MD-M".into(), "synthetic-machine".into()),
+            ]))
+        }
+    }
+
+    #[test]
+    fn service_client_identity_cannot_be_overwritten_by_anisette_suggestions() -> Result<()> {
+        let provider = LegacyAnisette;
+        let device = DeviceIdentity {
+            schema_version: 1,
+            device_id: "device".into(),
+            serial: "serial".into(),
+            local_user_uuid: "user".into(),
+        };
+        let headers = identity_headers(&device, &provider)?;
+        assert_eq!(
+            headers.get("X-Apple-I-MD").map(String::as_str),
+            Some("synthetic-otp")
+        );
+        assert!(
+            headers
+                .keys()
+                .all(|name| !name.eq_ignore_ascii_case("x-mme-client-info"))
+        );
+        let client = GsaClient::new(&device, &provider)?;
+        let cpd = client.cpd()?;
+        assert_eq!(
+            cpd.get("X-Mme-Client-Info").and_then(Value::as_string),
+            Some(GSA_CLIENT_INFO)
+        );
+        assert!(!GSA_CLIENT_INFO.contains("Xcode"));
+        let headers = client.two_factor_headers("test", "test")?;
+        assert_eq!(
+            headers.get("X-Mme-Client-Info").map(String::as_str),
+            Some(GSA_CLIENT_INFO)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn non_plist_auth_errors_report_stage_and_http_status_without_body() {
+        let body = b"Access denied synthetic-sensitive-response";
+        let error = parse_auth_plist("GSA init", 403, "text", body)
+            .err()
+            .unwrap_or_else(|| panic!("non-plist response accepted"))
+            .to_string();
+        assert!(error.contains("GSA init: HTTP 403"));
+        assert!(!error.contains("synthetic-sensitive-response"));
+        assert!(
+            parse_auth_plist("GSA complete", 200, "plist/XML", b"<plist><dict/></plist>").is_ok()
+        );
+        assert!(parse_auth_plist("GSA init", 403, "text", b"Forbidden").is_err());
+    }
+
+    #[test]
+    #[ignore = "requires configured account and network; sends SRP init only, no password proof or escrow attempt"]
+    fn live_srp_init_without_password_or_escrow() -> Result<()> {
+        keychain_sep_driver::memory::make_process_nondumpable()
+            .map_err(|error| Error::io("live-test process protection", error))?;
+        use crate::apple::anisette::ManagedAnisette;
+        use crate::config::Config;
+        use crate::paths::{AppPaths, StateLock};
+        use crate::security::SoftwareFileBackend;
+        use crate::store::StateStore;
+        let paths = AppPaths::discover()?;
+        let _lock = StateLock::acquire(&paths)?;
+        let config = Config::load(&paths)?;
+        let backend = SoftwareFileBackend::new(paths.clone());
+        let store = StateStore::new(&paths, &backend);
+        let account = store
+            .load_account()?
+            .ok_or_else(|| Error::Config("live check needs an existing account".into()))?;
+        let device = store
+            .load_device()?
+            .ok_or_else(|| Error::Config("live check needs an existing device".into()))?;
+        let helper = std::env::var_os("KEYCHAIN_TEST_ANISETTE_HELPER")
+            .map(std::path::PathBuf::from)
+            .or(config.anisette_helper)
+            .ok_or_else(|| Error::Config("anisette is not configured".into()))?;
+        let helper_paths = match std::env::var_os("KEYCHAIN_TEST_ANISETTE_PROFILE") {
+            Some(root) => {
+                let root = std::path::PathBuf::from(root);
+                AppPaths::new(
+                    root.join("config"),
+                    root.join("state"),
+                    root.join("runtime"),
+                )?
+            }
+            None => paths.clone(),
+        };
+        let anisette = ManagedAnisette::start(&helper, &helper_paths)?;
+        let (_, init, _cpd) =
+            GsaClient::new(&device, &anisette)?.initialize_srp(&account.username)?;
+        if !matches!(string(&init, "sp").as_deref(), Some("s2k" | "s2k_fo")) {
+            return Err(Error::Apple(format!(
+                "GSA init refused before any password proof: {}",
+                status(&init)
+            )));
+        }
+        assert!(!data(&init, "s")?.is_empty());
+        assert!(!data(&init, "B")?.is_empty());
+        assert!(!required_string(&init, "c")?.is_empty());
+        Ok(())
+    }
 
     #[test]
     fn no_username_srp_x_keeps_colon() {

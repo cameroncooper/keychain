@@ -168,7 +168,7 @@ pub fn ensure_cloudkit_user_id(
             ))
         ),
     );
-    headers.extend(anisette.headers()?);
+    headers.extend(anisette.validation_headers()?);
     let client = apple_client(Duration::from_secs(30))?;
     let response = apply_headers(
         client
@@ -356,7 +356,7 @@ impl<'a> CloudKitTransport<'a> {
         if let Some(routing_hint) = routing_hint {
             headers.insert("x-cloudkit-functionroutinghint".into(), routing_hint.into());
         }
-        headers.extend(self.anisette.headers()?);
+        headers.extend(self.anisette.validation_headers()?);
         Ok(headers)
     }
 

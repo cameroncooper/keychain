@@ -23,7 +23,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use super::anisette::AnisetteProvider;
 use super::cuttlefish::{SignedBlob, encode_voucher};
-use super::http::apple_client;
+use super::http::apple_unpooled_client;
 use super::octagon_keys::{VOUCHER_SIG_TYPE, prefixed_data};
 use crate::proto::{Writer, decode_fields, first_bytes, first_string};
 use crate::security::{KeyRef, KeyUsage, SecurityBackend};
@@ -364,7 +364,7 @@ impl<'a> EscrowRecovery<'a> {
             email: email.into(),
             pet: pet.into(),
             anisette,
-            client: apple_client(Duration::from_secs(45))?,
+            client: apple_unpooled_client(Duration::from_secs(45))?,
         })
     }
 
@@ -377,7 +377,7 @@ impl<'a> EscrowRecovery<'a> {
             ("x-apple-i-device-type".into(), "1".into()),
             ("Content-Type".into(), "application/x-apple-plst".into()),
         ]);
-        headers.extend(self.anisette.headers()?);
+        headers.extend(self.anisette.validation_headers()?);
         headers.insert("X-Mme-Client-Info".into(), ESCROW_CLIENT_INFO.into());
         Ok(headers)
     }
