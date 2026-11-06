@@ -1,13 +1,20 @@
 use std::io::{self, Read, Write};
 use std::path::Path;
 
-use keychain::browser::{MAX_NATIVE_MESSAGE_BYTES, reply_for_message};
+use keychain::browser::{
+    MAX_NATIVE_MESSAGE_BYTES, reply_for_broker_message_cancelable, reply_for_message,
+};
+use keychain::config::Config;
 use keychain::paths::AppPaths;
-use keychain::security::SoftwareFileBackend;
+use keychain::security::backend_for_config;
 use keychain::store::StateStore;
 use keychain::{Error, Result};
 
 fn main() {
+    if let Err(error) = keychain_sep_driver::memory::make_process_nondumpable() {
+        eprintln!("keychain-browser-host: could not protect process memory: {error}");
+        std::process::exit(1);
+    }
     if let Err(error) = run() {
         eprintln!("keychain-browser-host: {error}");
         std::process::exit(1);
@@ -17,9 +24,23 @@ fn main() {
 fn run() -> Result<()> {
     let message = read_frame(&mut io::stdin())?;
     let paths = AppPaths::discover()?;
-    let backend = SoftwareFileBackend::new(paths.clone());
-    let store = StateStore::new(&paths, &backend);
-    let reply = reply_for_message(&message, &backend, &store);
+    let config = Config::load(&paths)?;
+    let reply = if let Some(socket) = &config.credential_broker {
+        // connectNative keeps stdin open while a request is active. EOF or any
+        // second message cancels this one operation; there is no reusable grant.
+        let canceled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let signal = canceled.clone();
+        std::thread::spawn(move || {
+            let mut byte = [0];
+            let _ = io::stdin().read(&mut byte);
+            signal.store(true, std::sync::atomic::Ordering::Release);
+        });
+        reply_for_broker_message_cancelable(&message, socket, canceled)
+    } else {
+        let backend = backend_for_config(&config, &paths)?;
+        let store = StateStore::new(&paths, backend.as_ref());
+        reply_for_message(&message, backend.as_ref(), &store)
+    };
     let encoded = serde_json::to_vec(&reply)?;
     write_frame(&mut io::stdout(), &encoded)
 }

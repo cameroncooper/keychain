@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    #[error("SEP operation error: {0}")]
+    Sep(#[from] crate::security::sep::ProviderError),
     #[error("configuration error: {0}")]
     Config(String),
     #[error("authentication required: {0}")]

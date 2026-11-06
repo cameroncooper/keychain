@@ -254,26 +254,47 @@ fn decrypt_tlkshare(
 pub fn unwrap_class_keys(
     sync_keys: &[Record],
     tlks: &BTreeMap<String, Zeroizing<Vec<u8>>>,
-) -> BTreeMap<String, Zeroizing<Vec<u8>>> {
-    let mut keys = BTreeMap::new();
+) -> Result<BTreeMap<String, Zeroizing<Vec<u8>>>> {
+    let mut children: BTreeMap<&str, Vec<&Record>> = BTreeMap::new();
     for sync_key in sync_keys {
-        let Some(parent) = sync_key.string("parentkeyref") else {
-            continue;
-        };
-        let Some(tlk) = tlks.get(parent) else {
-            continue;
-        };
-        let Some(wrapped) = sync_key.string("wrappedkey") else {
-            continue;
-        };
-        let Ok(wrapped) = B64.decode(wrapped) else {
-            continue;
-        };
-        if let Ok(key) = aes_siv_unwrap(tlk, &wrapped, &[]) {
-            keys.insert(sync_key.name.clone(), key);
+        if let Some(parent) = sync_key.string("parentkeyref") {
+            children.entry(parent).or_default().push(sync_key);
         }
     }
-    keys
+    let mut keys = tlks.clone();
+    let mut ready = std::collections::VecDeque::from_iter(tlks.keys().cloned());
+    while let Some(parent) = ready.pop_front() {
+        for sync_key in children.get(parent.as_str()).into_iter().flatten() {
+            let Some(wrapped) = sync_key.string("wrappedkey") else {
+                continue;
+            };
+            let Ok(wrapped) = B64.decode(wrapped) else {
+                continue;
+            };
+            let parent_key = keys
+                .get(&parent)
+                .ok_or_else(|| Error::Security("resolved key parent disappeared".into()))?;
+            let Ok(key) = aes_siv_unwrap(parent_key, &wrapped, &[]) else {
+                continue;
+            };
+            if key.len() != 64 {
+                return Err(Error::InvalidData(
+                    "CKKS sync key has invalid length".into(),
+                ));
+            }
+            if let Some(existing) = keys.get(&sync_key.name) {
+                if existing.as_slice() != key.as_slice() {
+                    return Err(Error::Security(
+                        "conflicting authenticated CKKS sync keys".into(),
+                    ));
+                }
+            } else {
+                ready.push_back(sync_key.name.clone());
+                keys.insert(sync_key.name.clone(), key);
+            }
+        }
+    }
+    Ok(keys)
 }
 
 #[derive(Clone, Debug)]
@@ -293,36 +314,48 @@ pub fn decrypt_items(
     class_keys: &BTreeMap<String, Zeroizing<Vec<u8>>>,
 ) -> Vec<DecryptedItem> {
     let mut decrypted = Vec::new();
+    let mut failures: BTreeMap<&str, usize> = BTreeMap::new();
     for item in items {
         let Some(parent) = item.string("parentkeyref") else {
+            *failures.entry("missing-parent-reference").or_default() += 1;
             continue;
         };
         let Some(class_key) = class_keys.get(parent) else {
+            *failures.entry("missing-class-key").or_default() += 1;
             continue;
         };
         let (Some(data), Some(wrapped)) = (item.bytes("data"), item.string("wrappedkey")) else {
+            *failures.entry("missing-data-or-wrapped-key").or_default() += 1;
             continue;
         };
         let Ok(wrapped) = B64.decode(wrapped) else {
+            *failures.entry("invalid-wrapped-key-encoding").or_default() += 1;
             continue;
         };
         let Ok(item_key) = aes_siv_unwrap(class_key, &wrapped, &[]) else {
+            *failures.entry("item-key-unwrap").or_default() += 1;
             continue;
         };
         let Ok(aad) = authenticated_data_v2(item, parent) else {
+            *failures.entry("item-associated-data").or_default() += 1;
             continue;
         };
         let Ok(plaintext) = decrypt_item(&item_key, data, &aad) else {
+            *failures.entry("item-authentication").or_default() += 1;
             continue;
         };
         let Ok(Value::Dictionary(fields)) = Value::from_reader(Cursor::new(plaintext.as_slice()))
         else {
+            *failures.entry("item-plist-decode").or_default() += 1;
             continue;
         };
         decrypted.push(DecryptedItem {
             record_id: item.name.clone(),
             fields,
         });
+    }
+    if std::env::var_os("KEYCHAIN_TRACE_SYNC").is_some() {
+        eprintln!("CKKS item failure counts: {failures:?}");
     }
     decrypted
 }
@@ -337,20 +370,138 @@ pub fn build_credentials(
             .map(Vec::as_slice)
             .unwrap_or_default(),
         &tlks,
-    );
-    let items = decrypt_items(
-        records_by_type
-            .get("item")
+    )?;
+    let encrypted_items = records_by_type
+        .get("item")
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let items = decrypt_items(encrypted_items, &class_keys);
+    if std::env::var_os("KEYCHAIN_TRACE_SYNC").is_some() {
+        let missing = encrypted_items
+            .iter()
+            .filter_map(|item| item.string("parentkeyref"))
+            .filter(|parent| !class_keys.contains_key(*parent))
+            .collect::<BTreeSet<_>>();
+        let sync_keys = records_by_type
+            .get("synckey")
             .map(Vec::as_slice)
-            .unwrap_or_default(),
-        &class_keys,
-    );
-    credential::from_items(&items)
+            .unwrap_or_default();
+        let represented = missing
+            .iter()
+            .filter(|parent| sync_keys.iter().any(|key| key.name == ***parent))
+            .count();
+        let case_matches = missing
+            .iter()
+            .filter(|parent| {
+                class_keys
+                    .keys()
+                    .any(|key| key.eq_ignore_ascii_case(parent))
+            })
+            .count();
+        eprintln!(
+            "CKKS missing class-key references: distinct={} represented_in_sync_keys={} case_matches={}",
+            missing.len(),
+            represented,
+            case_matches
+        );
+        for parent in missing {
+            for key in sync_keys.iter().filter(|key| key.name == parent) {
+                let ancestor = key.string("parentkeyref");
+                eprintln!(
+                    "CKKS unresolved class key: parent_is_authenticated={} parent_has_sync_record={} self_wrapped={}",
+                    ancestor.is_some_and(|id| class_keys.contains_key(id)),
+                    ancestor.is_some_and(|id| sync_keys.iter().any(|key| key.name == id)),
+                    ancestor == Some(parent)
+                );
+            }
+        }
+        eprintln!(
+            "CKKS decrypt: tlks={} class_keys={} encrypted={} decrypted={}",
+            tlks.len(),
+            class_keys.len(),
+            encrypted_items.len(),
+            items.len()
+        );
+    }
+    if items.len() != encrypted_items.len() {
+        return Err(Error::Security(format!(
+            "could decrypt only {} of {} CKKS items; preserving the cached vault",
+            items.len(),
+            encrypted_items.len()
+        )));
+    }
+    let projection = credential::from_items(&items)?;
+    if std::env::var_os("KEYCHAIN_TRACE_SYNC").is_some() {
+        eprintln!(
+            "CKKS projected: credentials={} passkeys={}",
+            projection.credentials.len(),
+            projection.passkeys.len()
+        );
+    }
+    Ok(projection)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn wrapped_sync_key(id: &str, parent: &str, parent_key: &[u8], key: &[u8]) -> Record {
+        use aes_siv::KeyInit;
+        let mut cipher = aes_siv::siv::Aes256Siv::new_from_slice(parent_key)
+            .unwrap_or_else(|e| panic!("SIV: {e}"));
+        let wrapped = cipher
+            .encrypt(std::iter::empty::<&[u8]>(), key)
+            .unwrap_or_else(|e| panic!("wrap: {e}"));
+        Record {
+            name: id.into(),
+            record_type: "synckey".into(),
+            fields: BTreeMap::from([
+                ("parentkeyref".into(), FieldValue::Reference(parent.into())),
+                ("wrappedkey".into(), FieldValue::String(B64.encode(wrapped))),
+            ]),
+        }
+    }
+    #[test]
+    fn key_hierarchy_resolves_authenticated_indirection_without_order_dependence() {
+        let seed = [1; 64];
+        let middle = [2; 64];
+        let leaf = [3; 64];
+        let records = vec![
+            wrapped_sync_key("classA", "old-tlk", &middle, &leaf),
+            wrapped_sync_key("old-tlk", "root", &seed, &middle),
+            wrapped_sync_key("root", "root", &seed, &seed),
+            wrapped_sync_key("orphan", "unknown", &[4; 64], &[5; 64]),
+        ];
+        let keys = unwrap_class_keys(
+            &records,
+            &BTreeMap::from([("root".into(), Zeroizing::new(seed.to_vec()))]),
+        )
+        .unwrap_or_else(|e| panic!("graph: {e}"));
+        assert_eq!(
+            keys.get("classA").map(|k| k.as_slice()),
+            Some(leaf.as_slice())
+        );
+        assert!(!keys.contains_key("orphan"));
+        let conflicting = vec![wrapped_sync_key("root", "root", &seed, &leaf)];
+        assert!(
+            unwrap_class_keys(
+                &conflicting,
+                &BTreeMap::from([("root".into(), Zeroizing::new(seed.to_vec()))])
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn undecryptable_items_cannot_be_published_as_a_successful_empty_projection() {
+        let records = BTreeMap::from([(
+            "item".into(),
+            vec![Record {
+                name: "encrypted-item".into(),
+                record_type: "item".into(),
+                fields: BTreeMap::new(),
+            }],
+        )]);
+        assert!(build_credentials(&records, BTreeMap::new()).is_err());
+    }
     use crate::apple::crypto::ecies_encrypt;
     use crate::apple::cuttlefish::{encode_serialized_key, tlkshare_signing_data};
     use crate::apple::nska::archive_ies_ciphertext;

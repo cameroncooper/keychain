@@ -13,6 +13,7 @@ use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::model::PasskeyCredential;
+use crate::security::authorization::AuthorizationRequirement;
 use crate::security::{KeyUsage, SecurityBackend};
 use crate::{Error, Result};
 
@@ -50,10 +51,25 @@ impl fmt::Debug for RecoveredPasskey {
 }
 
 impl RecoveredPasskey {
+    fn metadata(&self, signing_key: crate::security::KeyRef) -> PasskeyCredential {
+        PasskeyCredential {
+            provenance: crate::model::PasskeyProvenance::Synced,
+            id: self.record_id.clone(),
+            rp_id: self.rp_id.clone(),
+            credential_id: URL_SAFE_NO_PAD.encode(&self.credential_id),
+            user_handle: URL_SAFE_NO_PAD.encode(&self.user_handle),
+            username: self.username.clone(),
+            display_name: self.display_name.clone(),
+            created_at: self.created_at,
+            modified_at: self.modified_at,
+            signing_key,
+        }
+    }
     pub fn import(self, backend: &dyn SecurityBackend) -> Result<PasskeyCredential> {
         let signing_key =
             backend.import_p256_x963(KeyUsage::WebAuthnSigning, &self.private_x963)?;
         Ok(PasskeyCredential {
+            provenance: crate::model::PasskeyProvenance::Synced,
             id: self.record_id,
             rp_id: self.rp_id,
             credential_id: URL_SAFE_NO_PAD.encode(self.credential_id),
@@ -65,6 +81,127 @@ impl RecoveredPasskey {
             signing_key,
         })
     }
+}
+
+/// Reconcile a complete synced snapshot while retaining native local-only keys.
+/// Protected scalar identities are checked against broker metadata and are never
+/// imported back into the software key database during subsequent syncs.
+pub fn reconcile_synced_passkeys(
+    recovered: Vec<RecoveredPasskey>,
+    previous: &[PasskeyCredential],
+    backend: &dyn SecurityBackend,
+    socket: Option<&std::path::Path>,
+) -> Result<Vec<PasskeyCredential>> {
+    reconcile_with(
+        recovered,
+        previous,
+        backend,
+        socket.is_some(),
+        |operation| {
+            let socket = socket.ok_or_else(|| {
+                Error::Config("protected passkeys require their configured broker for sync".into())
+            })?;
+            crate::broker::call(socket, operation)
+        },
+    )
+}
+
+fn reconcile_with(
+    recovered: Vec<RecoveredPasskey>,
+    previous: &[PasskeyCredential],
+    backend: &dyn SecurityBackend,
+    has_broker: bool,
+    mut call: impl FnMut(crate::broker::Operation) -> Result<serde_json::Value>,
+) -> Result<Vec<PasskeyCredential>> {
+    use crate::broker::{Operation, registry::ProtectionState};
+    use crate::model::PasskeyProvenance;
+    use base64::engine::general_purpose::STANDARD;
+    let mut result = Vec::with_capacity(recovered.len() + previous.len());
+    let mut seen = std::collections::BTreeSet::new();
+    for recovered in recovered {
+        if !seen.insert(recovered.record_id.clone()) {
+            return Err(Error::InvalidData("duplicate synced passkey record".into()));
+        }
+        let previous = previous.iter().find(|p| p.id == recovered.record_id);
+        if let Some(previous) = previous {
+            if previous.provenance == PasskeyProvenance::DeviceBound {
+                return Err(Error::Security(
+                    "synced record collides with a local device-bound credential".into(),
+                ));
+            }
+            if crate::protection::is_broker_key(&previous.signing_key) {
+                if !has_broker {
+                    return Err(Error::Config(
+                        "protected passkeys require their configured broker for sync".into(),
+                    ));
+                }
+                let state: ProtectionState =
+                    serde_json::from_value(call(Operation::ProtectionState {
+                        record: previous.id.clone(),
+                    })?)?;
+                let active = state.active.ok_or_else(|| {
+                    Error::Refused(
+                        "protected credential is missing; refusing software fallback".into(),
+                    )
+                })?;
+                let metadata = recovered.metadata(previous.signing_key.clone());
+                let public = STANDARD.encode(
+                    recovered
+                        .private_x963
+                        .get(..65)
+                        .ok_or_else(|| Error::InvalidData("truncated synced passkey".into()))?,
+                );
+                if state.staged.is_some()
+                    || !active.verified
+                    || active.diagnostic
+                    || !crate::protection::same_identity(&metadata, previous)
+                    || !crate::protection::same_identity(&metadata, &active.credential)
+                    || active.public_sec1 != public
+                    || active.credential.signing_key != metadata.signing_key
+                {
+                    return Err(Error::Refused(
+                        "synced identity changed or protected migration is incomplete".into(),
+                    ));
+                }
+                let updated = call(Operation::RefreshProtectedMetadata {
+                    credential: Box::new(metadata.clone()),
+                    public_sec1: public,
+                    revision: active.revision,
+                })?;
+                if updated.get("updated").and_then(serde_json::Value::as_bool) != Some(true) {
+                    return Err(Error::Security(
+                        "broker did not confirm metadata refresh".into(),
+                    ));
+                }
+                result.push(metadata);
+                continue;
+            }
+        }
+        result.push(recovered.import(backend)?);
+    }
+    for local in previous
+        .iter()
+        .filter(|p| p.provenance == PasskeyProvenance::DeviceBound)
+    {
+        result.push(local.clone());
+    }
+    if has_broker {
+        let records = result
+            .iter()
+            .filter(|p| {
+                p.provenance == PasskeyProvenance::Synced
+                    && crate::protection::is_broker_key(&p.signing_key)
+            })
+            .map(|p| p.id.clone())
+            .collect();
+        let updated = call(Operation::SetSyncedInventory { records })?;
+        if updated.get("updated").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(Error::Security(
+                "broker did not confirm synced inventory".into(),
+            ));
+        }
+    }
+    Ok(result)
 }
 
 pub fn from_item(record_id: &str, fields: &Dictionary) -> Result<Option<RecoveredPasskey>> {
@@ -146,30 +283,43 @@ pub struct SignedAssertion {
 
 /// Sign the authenticator-controlled portion of a WebAuthn assertion.
 ///
-/// The caller supplies the browser-generated clientDataHash. User verification is deliberately
-/// explicit so a future browser service cannot claim UV unless a real verifier approved it.
+/// The caller supplies the browser-generated clientDataHash. UV is requested here
+/// and must be established by the backend transaction before any assertion is returned.
 pub fn sign_assertion(
     passkey: &PasskeyCredential,
     client_data_hash: &[u8],
-    user_present: bool,
-    user_verified: bool,
+    authorization: AuthorizationRequirement,
     backend: &dyn SecurityBackend,
+) -> Result<SignedAssertion> {
+    sign_assertion_with(
+        passkey,
+        client_data_hash,
+        authorization,
+        |key, message, requirement| backend.sign_p256_authorized(key, message, requirement),
+    )
+}
+
+pub(crate) fn sign_assertion_with(
+    passkey: &PasskeyCredential,
+    client_data_hash: &[u8],
+    authorization: AuthorizationRequirement,
+    signer: impl FnOnce(
+        &crate::security::KeyRef,
+        &[u8],
+        AuthorizationRequirement,
+    ) -> Result<crate::security::authorization::AuthorizedSignature>,
 ) -> Result<SignedAssertion> {
     if client_data_hash.len() != 32 {
         return Err(Error::InvalidData(
             "WebAuthn clientDataHash must be 32 bytes".into(),
         ));
     }
-    if user_verified && !user_present {
-        return Err(Error::Security(
-            "WebAuthn user verification cannot be asserted without user presence".into(),
-        ));
-    }
-    let mut flags = 0x08 | 0x10; // Backup eligible and currently backed up (synced passkey).
-    if user_present {
-        flags |= 0x01;
-    }
-    if user_verified {
+    let mut flags = match passkey.provenance {
+        crate::model::PasskeyProvenance::Synced => 0x08 | 0x10,
+        crate::model::PasskeyProvenance::DeviceBound => 0,
+    };
+    flags |= 0x01;
+    if authorization == AuthorizationRequirement::UserVerification {
         flags |= 0x04;
     }
     let mut authenticator_data = Vec::with_capacity(37);
@@ -179,7 +329,8 @@ pub fn sign_assertion(
     let mut signed = Vec::with_capacity(authenticator_data.len() + client_data_hash.len());
     signed.extend_from_slice(&authenticator_data);
     signed.extend_from_slice(client_data_hash);
-    let signature = backend.sign_p256_sha256(&passkey.signing_key, &signed)?;
+    let outcome = signer(&passkey.signing_key, &signed, authorization)?;
+    let signature = outcome.into_signature(&passkey.signing_key, &signed, authorization)?;
     Ok(SignedAssertion {
         authenticator_data,
         signature,
@@ -216,6 +367,26 @@ pub fn assertion_for_origin(
     origin: &str,
     backend: &dyn SecurityBackend,
 ) -> Result<WebAuthnAssertion> {
+    assertion_for_origin_with(
+        passkey,
+        challenge,
+        origin,
+        AuthorizationRequirement::PresenceApproved,
+        |key, message, requirement| backend.sign_p256_authorized(key, message, requirement),
+    )
+}
+
+pub(crate) fn assertion_for_origin_with(
+    passkey: &PasskeyCredential,
+    challenge: &str,
+    origin: &str,
+    authorization: AuthorizationRequirement,
+    signer: impl FnOnce(
+        &crate::security::KeyRef,
+        &[u8],
+        AuthorizationRequirement,
+    ) -> Result<crate::security::authorization::AuthorizedSignature>,
+) -> Result<WebAuthnAssertion> {
     let challenge_bytes = decode_base64url(challenge)
         .map_err(|_| Error::InvalidData("challenge is not base64url".into()))?;
     if !(16..=4096).contains(&challenge_bytes.len()) {
@@ -231,7 +402,12 @@ pub fn assertion_for_origin(
         "origin": canonical_origin,
         "crossOrigin": false,
     }))?;
-    let assertion = sign_assertion(passkey, &Sha256::digest(&client_data), true, false, backend)?;
+    let assertion = sign_assertion_with(
+        passkey,
+        &Sha256::digest(&client_data),
+        authorization,
+        signer,
+    )?;
     Ok(WebAuthnAssertion {
         id: passkey.credential_id.clone(),
         raw_id: passkey.credential_id.clone(),
@@ -522,16 +698,30 @@ mod tests {
         let paths =
             AppPaths::for_test(dir.path()).unwrap_or_else(|error| panic!("test paths: {error}"));
         let backend = SoftwareFileBackend::new(paths);
-        let stored = recovered
+        let mut stored = recovered
             .import(&backend)
             .unwrap_or_else(|error| panic!("import: {error}"));
         assert_eq!(stored.credential_id, "CQgH");
 
         let client_hash = Sha256::digest(b"client data");
-        let assertion = sign_assertion(&stored, &client_hash, true, false, &backend)
-            .unwrap_or_else(|error| panic!("assertion: {error}"));
+        let assertion = sign_assertion(
+            &stored,
+            &client_hash,
+            AuthorizationRequirement::PresenceApproved,
+            &backend,
+        )
+        .unwrap_or_else(|error| panic!("assertion: {error}"));
         assert_eq!(assertion.authenticator_data.len(), 37);
         assert_eq!(assertion.authenticator_data[32], 0x19);
+        assert!(matches!(
+            sign_assertion(
+                &stored,
+                &client_hash,
+                AuthorizationRequirement::UserVerification,
+                &backend
+            ),
+            Err(Error::Refused(_))
+        ));
         let public = backend
             .public_x963(&stored.signing_key)
             .unwrap_or_else(|error| panic!("public key: {error}"));
@@ -542,6 +732,145 @@ mod tests {
         let mut signed = assertion.authenticator_data;
         signed.extend_from_slice(&client_hash);
         assert!(verifying.verify(&signed, &signature).is_ok());
+        stored.provenance = crate::model::PasskeyProvenance::DeviceBound;
+        let local = sign_assertion(
+            &stored,
+            &client_hash,
+            AuthorizationRequirement::PresenceApproved,
+            &backend,
+        )
+        .unwrap_or_else(|error| panic!("device-bound flags: {error}"));
+        assert_eq!(local.authenticator_data[32], 0x01);
+    }
+
+    fn protected_fixture() -> (
+        RecoveredPasskey,
+        PasskeyCredential,
+        crate::broker::registry::ProtectedSummary,
+    ) {
+        use crate::security::{KeyAlgorithm, KeyRef, KeyUsage};
+        use base64::engine::general_purpose::STANDARD;
+        let id = uuid::Uuid::new_v4().to_string();
+        let recovered = from_item(&id, &fixture_fields())
+            .unwrap_or_else(|e| panic!("parse: {e}"))
+            .unwrap_or_else(|| panic!("passkey"));
+        let credential = recovered.metadata(KeyRef {
+            backend_id: "sep-protected-software-v1".into(),
+            key_id: id,
+            usage: KeyUsage::WebAuthnSigning,
+            algorithm: KeyAlgorithm::P256,
+        });
+        let summary = crate::broker::registry::ProtectedSummary {
+            credential: credential.clone(),
+            public_sec1: STANDARD.encode(&recovered.private_x963[..65]),
+            revision: 1,
+            recipient_id: uuid::Uuid::new_v4().to_string(),
+            verified: true,
+            diagnostic: false,
+        };
+        (recovered, credential, summary)
+    }
+    #[test]
+    fn sync_retains_protected_refs_and_local_native_keys_without_software_import() {
+        use crate::broker::{Operation, registry::ProtectionState};
+        let (mut recovered, protected, summary) = protected_fixture();
+        recovered.username = "updated@example.com".into();
+        let mut local = protected.clone();
+        local.id = uuid::Uuid::new_v4().to_string();
+        local.provenance = crate::model::PasskeyProvenance::DeviceBound;
+        local.signing_key.backend_id = "sep-native-v1".into();
+        local.signing_key.key_id = uuid::Uuid::new_v4().to_string();
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let paths = AppPaths::for_test(dir.path()).unwrap_or_else(|e| panic!("paths: {e}"));
+        let backend = SoftwareFileBackend::new(paths.clone());
+        let mut operations = Vec::new();
+        let result = reconcile_with(
+            vec![recovered],
+            &[protected.clone(), local.clone()],
+            &backend,
+            true,
+            |op| match op {
+                Operation::ProtectionState { .. } => {
+                    operations.push("state");
+                    Ok(serde_json::to_value(ProtectionState {
+                        active: Some(summary.clone()),
+                        staged: None,
+                    })?)
+                }
+                Operation::RefreshProtectedMetadata { credential, .. } => {
+                    operations.push("metadata");
+                    assert_eq!(credential.username, "updated@example.com");
+                    Ok(serde_json::json!({"updated":true}))
+                }
+                Operation::SetSyncedInventory { records } => {
+                    operations.push("inventory");
+                    assert_eq!(records, vec![protected.id.clone()]);
+                    Ok(serde_json::json!({"updated":true}))
+                }
+                _ => panic!("sync must not import a protected scalar"),
+            },
+        )
+        .unwrap_or_else(|e| panic!("reconcile: {e}"));
+        assert_eq!(operations, vec!["state", "metadata", "inventory"]);
+        assert_eq!(result[0].signing_key, protected.signing_key);
+        assert_eq!(result[1], local);
+        assert!(!paths.keys_file().exists());
+        assert!(!paths.software_key_file().exists());
+    }
+    #[test]
+    fn sync_refuses_changed_key_or_missing_broker_without_reimporting() {
+        use crate::broker::registry::ProtectionState;
+        let (recovered, protected, mut summary) = protected_fixture();
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let paths = AppPaths::for_test(dir.path()).unwrap_or_else(|e| panic!("paths: {e}"));
+        let backend = SoftwareFileBackend::new(paths.clone());
+        summary.public_sec1 = "different public key".into();
+        assert!(
+            reconcile_with(
+                vec![recovered],
+                std::slice::from_ref(&protected),
+                &backend,
+                true,
+                |op| {
+                    assert!(matches!(
+                        op,
+                        crate::broker::Operation::ProtectionState { .. }
+                    ));
+                    Ok(serde_json::to_value(ProtectionState {
+                        active: Some(summary.clone()),
+                        staged: None,
+                    })?)
+                }
+            )
+            .is_err()
+        );
+        let (recovered, protected, _) = protected_fixture();
+        assert!(
+            reconcile_with(vec![recovered], &[protected], &backend, false, |_| panic!(
+                "no broker"
+            ))
+            .is_err()
+        );
+        assert!(!paths.keys_file().exists());
+        assert!(!paths.software_key_file().exists());
+    }
+    #[test]
+    fn complete_sync_can_disable_synced_inventory_without_removing_local_credentials() {
+        let (_, mut local, _) = protected_fixture();
+        local.provenance = crate::model::PasskeyProvenance::DeviceBound;
+        local.signing_key.backend_id = "sep-native-v1".into();
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let paths = AppPaths::for_test(dir.path()).unwrap_or_else(|e| panic!("paths: {e}"));
+        let backend = SoftwareFileBackend::new(paths);
+        let result = reconcile_with(vec![], std::slice::from_ref(&local), &backend, true, |op| {
+            let crate::broker::Operation::SetSyncedInventory { records } = op else {
+                panic!("inventory only")
+            };
+            assert!(records.is_empty());
+            Ok(serde_json::json!({"updated":true}))
+        })
+        .unwrap_or_else(|e| panic!("reconcile empty: {e}"));
+        assert_eq!(result, vec![local]);
     }
 
     #[test]

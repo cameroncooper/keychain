@@ -11,6 +11,19 @@ use crate::{Error, Result};
 
 pub const MAX_STATE_FILE: u64 = 64 * 1024 * 1024;
 
+/// Preserve Apple's record-name case, accepting only the hyphenated UUID shape
+/// as a single filename component. Generated local UUIDs use lowercase.
+pub fn validate_record_id(id: &str) -> Result<()> {
+    let parsed =
+        Uuid::parse_str(id).map_err(|_| Error::InvalidData("invalid record UUID".into()))?;
+    if !id.eq_ignore_ascii_case(&parsed.to_string()) {
+        return Err(Error::InvalidData(
+            "record UUID must use the hyphenated form".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct AppPaths {
     pub config_dir: PathBuf,
@@ -92,8 +105,17 @@ impl AppPaths {
     pub fn octagon_file(&self) -> PathBuf {
         self.state_dir.join("octagon.enc")
     }
+    pub fn trust_repair_file(&self) -> PathBuf {
+        self.state_dir.join("octagon-repair.enc")
+    }
     pub fn vault_file(&self) -> PathBuf {
         self.state_dir.join("vault.enc")
+    }
+    pub fn previous_vault_file(&self) -> PathBuf {
+        self.state_dir.join("vault.previous.enc")
+    }
+    pub fn protection_dir(&self) -> PathBuf {
+        self.state_dir.join("protection")
     }
     pub fn anisette_dir(&self) -> PathBuf {
         self.state_dir.join("anisette")
@@ -233,6 +255,23 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    #[test]
+    fn apple_record_case_is_preserved_but_unsafe_or_alternate_shapes_are_rejected() {
+        for id in [
+            "89B32928-CAAE-44A0-8255-AFDBD822C7EE",
+            "89b32928-caae-44a0-8255-afdbd822c7ee",
+        ] {
+            assert!(validate_record_id(id).is_ok());
+        }
+        for id in [
+            "../../software.key",
+            "89B32928CAAE44A08255AFDBD822C7EE",
+            "{89B32928-CAAE-44A0-8255-AFDBD822C7EE}",
+            "89B32928-CAAE-44A0-8255-AFDBD822C7EE/extra",
+        ] {
+            assert!(validate_record_id(id).is_err());
+        }
+    }
 
     #[test]
     fn bounded_read_rejects_permissive_files() {

@@ -1,10 +1,13 @@
 # Rust build output
 /target/
+__pycache__/
+*.py[cod]
 
 # Never commit local credentials or captured state
 /.env
 /config/
 /state/
+/.sep-check-*/
 *.enc
 master.key
 software.key

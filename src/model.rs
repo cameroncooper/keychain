@@ -182,8 +182,19 @@ impl Credential {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PasskeyProvenance {
+    #[default]
+    Synced,
+    DeviceBound,
+}
+
 #[derive(Clone, Serialize, Deserialize, PartialEq, Zeroize, ZeroizeOnDrop)]
 pub struct PasskeyCredential {
+    #[serde(default)]
+    #[zeroize(skip)]
+    pub provenance: PasskeyProvenance,
     /// The CKKS item UUID. This is our stable local selector.
     pub id: String,
     pub rp_id: String,
@@ -206,6 +217,7 @@ impl fmt::Debug for PasskeyCredential {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("PasskeyCredential")
+            .field("provenance", &self.provenance)
             .field("id", &self.id)
             .field("rp_id", &self.rp_id)
             .field("username", &self.username)

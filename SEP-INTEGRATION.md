@@ -1,5 +1,111 @@
 # SEP integration for keychain developers
 
+## Current handoff: signing and biometric item decryption — 2026-11-05
+
+Start with [the concrete decrypt API and working example](docs/sep-driver/DECRYPTION.md),
+[the header](docs/sep-driver/sep-bio.h),
+[the client](docs/sep-driver/sep-key.py), and
+[the reference item envelope](docs/sep-driver/sep_envelope.py).
+For the production helper design, also consider
+[secret handling and process isolation](docs/sep-driver/SECRET-HANDLING.md).
+These files are present HERE; no missing research prototype or raw SEP artifact
+is needed to implement the application adapter. Driver development remains local;
+no PR has been opened. The copies match local follow-up commit `85aabf1657`.
+
+The loaded driver supports:
+
+- `SepClient.create()` and `sign_digest(blob, digest)`: new native P-256 keys;
+  private scalar stays in SEP and only the signature returns.
+- `SepClient.create(decrypt=True)` and
+  `decrypt_into(blob, sealed, output, timeout_ms)`: biometric-gated item decryption
+  into a caller-owned 4096-byte bytearray. The recipient private scalar stays in
+  SEP; decrypted item bytes enter host memory. Wipe them after the authorized use.
+- `seal_item(public, context, plaintext)` and
+  `item_view(output, length, expected_context)`: tested-format host encryption
+  and authenticated item-binding checks. Python is a reference, not a hardened
+  production secret-memory provider.
+
+The same saved decrypt key worked after a warm reboot without a diagnostic
+signature. Modified-tag input was rejected with no plaintext, a fresh request
+with finger off timed out with no plaintext, successful output was consumed,
+and the original signing-only key still produced an independently verified
+signature. [Validation details](docs/sep-driver/VALIDATION.md) separate hardware
+results from source-only checks and remaining production work.
+
+There is no demonstrated native private-key import. A downloaded iCloud passkey
+can be encrypted as an item, then biometric-decrypted for SOFTWARE signing.
+New device-bound passkeys can use SEP-native signing. Protect selected-record
+metadata, check owner/RP/purpose, and verify decrypted item context before use.
+Do not claim that a synced scalar decrypted to the host stays non-exportable.
+
+Next application work is the real provider/privileged transport, item-envelope
+storage, identity/purpose binding and disposable integration validation. The
+hardware primitive is no longer blocked on proving biometric decryption. This
+does not authorize automatic migration of the existing software root: no vault
+migration/recovery transaction has been validated. Do not replace a root or fall
+back silently when an operation is unsupported. Keep data and current backups.
+
+The device remains root-only/exclusive; coordinate fprintd. Signing capability
+bit 2 is not a decrypt capability bit; this local extension requires the known
+compatible driver and explicit unsupported-error handling. The module is
+currently loaded temporarily; reboot may select a different driver. Do not
+provision the system keybag, restore xART, reuse test keys, or change enrollments.
+
+## Historical context — superseded by the current handoff above
+
+The older notes below retain the research progression. Claims that decryption,
+fresh request contexts or the concrete API are still missing are historical.
+Use the current header/client and DECRYPTION.md for implementation; do not
+reconstruct the firmware protocol in this application.
+
+
+## Concrete driver API available for integration — 2026-11-04
+
+The local Aurora review implementation now exposes explicit application key
+ioctls. See [the API and example](docs/sep-driver/README.md),
+[the userspace header](docs/sep-driver/sep-bio.h), and
+[the runnable reference client](docs/sep-driver/sep-key.py). These copies are
+from local review commit `bbeb7c0900`; no upstream PR has been opened.
+
+The test module is currently loaded on this MacBook. Hardware validation passed
+on J293/M1 on 2026-11-05: key creation, a real right-index-authorized signature
+verified independently, a new request with the finger removed returning no
+signature, ordinary fingerprint matching, and a second verified signature with
+the SAME saved wrapped key after a warm reboot. Successful completion includes
+acknowledged credential deletion. These results use the concrete new ioctls,
+not a fake provider or reserved-field ATTEST protocol. Cold power-cycle,
+suspend/resume and other hardware profiles are not claimed by these tests.
+
+Implement the concrete `SepProvider` against KEY_SIGN_START/KEY_SIGN_POLL and
+CANCEL, storing a key reference mapped to its wrapped blob and expected public
+point. The provider already receives a SHA-256 digest: pass those 32 bytes
+unchanged. Do not use the message-hashing `sign` command on a digest. The reference
+client exposes `SepClient.sign_digest` and a matching `sign-digest` CLI mode:
+
+```sh
+sudo python3 docs/sep-driver/sep-key.py create application-key.json
+sudo python3 docs/sep-driver/sep-key.py sign-digest application-key.json digest.bin signature.der
+```
+
+Here `digest.bin` contains exactly 32 raw bytes, not hexadecimal text.
+ The device is root-only and exclusive; a trusted helper/broker must
+coordinate with fprintd for an unprivileged application. The example is a
+reference client, not an authenticated multi-user broker. Keep origin/RP/key
+ownership checks in the application. Verify returned signatures against the
+saved public key and exact digest, and do not retry ambiguous completions.
+
+**Biometric unsealing is not required for native P-256 signing.** It remains
+unsupported and must still block protected-root migration. Existing synced
+passkeys are not replaced by newly generated SEP keys. The interface also does
+not provide P-384 or private-key import. Keep unavailable capabilities explicit.
+
+Earlier prototype-file references below refer to the separate development host,
+not this application workspace. The header and example above are the concrete
+interface to use; no raw machine artifacts or SCRD handles are needed by this
+application. The test kernel/module is temporary, so recheck the advertised
+capability after reboot rather than assuming this interface remains loaded.
+
+
 Status: 2026-11-04. Biometric-authorized P-256 signing has been demonstrated on
 J293/M1 under native Linux. A stable application-facing SEP key API has not yet
 been implemented. This document separates the working primitive from the work

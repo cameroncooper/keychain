@@ -1,0 +1,15 @@
+[Unit]
+Description=Keychain desktop biometric authentication agent
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/keychain/keychain-auth-agent
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+UMask=0077
+
+[Install]
+WantedBy=graphical-session.target

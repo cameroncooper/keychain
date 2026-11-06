@@ -27,6 +27,9 @@ const MAX_CREDENTIAL_ID_BYTES: usize = 4096;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "camelCase", deny_unknown_fields)]
 enum HostRequest {
+    Capabilities {
+        version: u32,
+    },
     Inspect {
         version: u32,
         #[serde(rename = "requestDetailsJson")]
@@ -54,12 +57,17 @@ struct HostReply {
 #[derive(Debug, Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 enum HostResult {
+    Capabilities {
+        #[serde(rename = "userVerificationAvailable")]
+        user_verification_available: bool,
+    },
     Inspection {
         #[serde(rename = "rpId")]
         rp_id: String,
         origin: String,
         #[serde(rename = "userVerification")]
         user_verification: UserVerification,
+        biometric: bool,
         candidates: Vec<Candidate>,
     },
     Assertion {
@@ -70,9 +78,10 @@ enum HostResult {
 
 #[derive(Clone, Copy, Debug, Serialize)]
 #[serde(rename_all = "lowercase")]
-enum UserVerification {
+pub(crate) enum UserVerification {
     Discouraged,
     Preferred,
+    Required,
 }
 
 #[derive(Debug, Serialize)]
@@ -115,11 +124,11 @@ struct RemoteDesktopClientOverride {
     same_origin_with_ancestors: bool,
 }
 
-struct RequestContext {
-    challenge: String,
-    rp_id: String,
-    origin: String,
-    user_verification: UserVerification,
+pub(crate) struct RequestContext {
+    pub(crate) challenge: String,
+    pub(crate) rp_id: String,
+    pub(crate) origin: String,
+    pub(crate) user_verification: UserVerification,
     allowed_credential_ids: BTreeSet<String>,
 }
 
@@ -141,18 +150,84 @@ pub fn reply_for_message(
     }
 }
 
-fn handle_message(
+/// Broker-only browser mode: candidate inspection never opens the user vault.
+/// All origin, RP and allow-list checks are repeated inside the privileged peer.
+pub fn reply_for_broker_message(message: &[u8], socket: &std::path::Path) -> serde_json::Value {
+    reply_for_broker_with(message, |operation| crate::broker::call(socket, operation))
+}
+
+pub fn reply_for_broker_message_cancelable(
     message: &[u8],
-    backend: &dyn SecurityBackend,
-    store: &StateStore<'_>,
-) -> Result<HostResult> {
+    socket: &std::path::Path,
+    canceled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> serde_json::Value {
+    reply_for_broker_with(message, |operation| {
+        crate::broker::call_cancelable(socket, operation, canceled.clone())
+    })
+}
+
+fn reply_for_broker_with(
+    message: &[u8],
+    mut call: impl FnMut(crate::broker::Operation) -> Result<serde_json::Value>,
+) -> serde_json::Value {
+    let result = (|| -> Result<serde_json::Value> {
+        let request = parse_host_request(message)?;
+        match request {
+            HostRequest::Capabilities { .. } => {
+                let result = call(crate::broker::Operation::Capabilities)?;
+                let available = result
+                    .get("userVerificationAvailable")
+                    .and_then(serde_json::Value::as_bool)
+                    .ok_or_else(|| {
+                        Error::Security("broker returned invalid availability".into())
+                    })?;
+                Ok(serde_json::json!({"kind":"capabilities","userVerificationAvailable":available}))
+            }
+            HostRequest::Inspect {
+                request_details_json,
+                ..
+            } => call(crate::broker::Operation::Inspect {
+                request_details_json,
+            }),
+            HostRequest::Assert {
+                request_details_json,
+                passkey_id,
+                ..
+            } => {
+                let result = call(crate::broker::Operation::Assert {
+                    record: passkey_id,
+                    request_details_json,
+                })?;
+                let response_json = result
+                    .get("responseJson")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| Error::Security("broker returned no assertion".into()))?;
+                Ok(serde_json::json!({"kind":"assertion","responseJson":response_json}))
+            }
+        }
+    })();
+    match result {
+        Ok(result) => serde_json::json!({"ok":true,"result":result}),
+        Err(error) => error_reply(&error),
+    }
+}
+
+pub(crate) fn broker_inspection(
+    context: &RequestContext,
+    candidates: &[&PasskeyCredential],
+) -> serde_json::Value {
+    serde_json::json!({"kind":"inspection","rpId":context.rp_id,"origin":context.origin,
+        "userVerification":context.user_verification,"biometric":true,
+        "candidates":candidates.iter().map(|c|serde_json::json!({"id":c.id,"username":c.username,"displayName":c.display_name})).collect::<Vec<_>>()})
+}
+
+fn parse_host_request(message: &[u8]) -> Result<HostRequest> {
     if message.len() > MAX_NATIVE_MESSAGE_BYTES {
-        return Err(Error::InvalidData(format!(
-            "native message exceeds the {MAX_NATIVE_MESSAGE_BYTES}-byte limit"
-        )));
+        return Err(Error::InvalidData("native message exceeds limit".into()));
     }
     let request: HostRequest = serde_json::from_slice(message)?;
     let (version, details) = match &request {
+        HostRequest::Capabilities { version } => (*version, None),
         HostRequest::Inspect {
             version,
             request_details_json,
@@ -161,14 +236,47 @@ fn handle_message(
             version,
             request_details_json,
             ..
-        } => (*version, request_details_json.as_str()),
+        } => (*version, Some(request_details_json)),
     };
     if version != 1 {
         return Err(Error::InvalidData(format!(
             "unsupported browser host protocol version {version}"
         )));
     }
+    if let Some(details) = details {
+        RequestContext::parse(details)?;
+    }
+    Ok(request)
+}
+
+fn handle_message(
+    message: &[u8],
+    backend: &dyn SecurityBackend,
+    store: &StateStore<'_>,
+) -> Result<HostResult> {
+    let request = parse_host_request(message)?;
+    let details = match &request {
+        HostRequest::Capabilities { .. } => {
+            return Ok(HostResult::Capabilities {
+                user_verification_available: false,
+            });
+        }
+        HostRequest::Inspect {
+            request_details_json,
+            ..
+        }
+        | HostRequest::Assert {
+            request_details_json,
+            ..
+        } => request_details_json.as_str(),
+    };
     let context = RequestContext::parse(details)?;
+    if matches!(context.user_verification, UserVerification::Required) {
+        return Err(Error::Refused(
+            "this request requires user verification, which the software backend cannot provide"
+                .into(),
+        ));
+    }
     let vault = store
         .load_vault()?
         .ok_or_else(|| Error::Config("vault is empty; run `keychain sync`".into()))?;
@@ -181,10 +289,14 @@ fn handle_message(
     }
 
     match request {
+        HostRequest::Capabilities { .. } => Ok(HostResult::Capabilities {
+            user_verification_available: false,
+        }),
         HostRequest::Inspect { .. } => Ok(HostResult::Inspection {
             rp_id: context.rp_id,
             origin: context.origin,
             user_verification: context.user_verification,
+            biometric: false,
             candidates: candidates
                 .into_iter()
                 .map(|passkey| Candidate {
@@ -217,7 +329,7 @@ fn handle_message(
 }
 
 impl RequestContext {
-    fn parse(details: &str) -> Result<Self> {
+    pub(crate) fn parse(details: &str) -> Result<Self> {
         if details.len() > MAX_REQUEST_DETAILS_BYTES {
             return Err(Error::InvalidData(format!(
                 "WebAuthn request exceeds the {MAX_REQUEST_DETAILS_BYTES}-byte limit"
@@ -277,12 +389,7 @@ impl RequestContext {
         let user_verification = match request.user_verification.as_str() {
             "discouraged" => UserVerification::Discouraged,
             "preferred" => UserVerification::Preferred,
-            "required" => {
-                return Err(Error::Refused(
-                    "this request requires user verification, which the software backend cannot provide"
-                        .into(),
-                ));
-            }
+            "required" => UserVerification::Required,
             value => {
                 return Err(Error::InvalidData(format!(
                     "unknown userVerification value {value:?}"
@@ -298,7 +405,10 @@ impl RequestContext {
         })
     }
 
-    fn candidates<'a>(&self, vault: &'a VaultState) -> Result<Vec<&'a PasskeyCredential>> {
+    pub(crate) fn candidates<'a>(
+        &self,
+        vault: &'a VaultState,
+    ) -> Result<Vec<&'a PasskeyCredential>> {
         let mut candidates = Vec::new();
         for passkey in &vault.passkeys {
             if passkey.rp_id != self.rp_id {
@@ -350,6 +460,12 @@ fn default_user_verification() -> String {
 
 fn error_reply(error: &Error) -> serde_json::Value {
     let name = match error {
+        Error::Sep(
+            crate::security::sep::ProviderError::Canceled
+            | crate::security::sep::ProviderError::Expired
+            | crate::security::sep::ProviderError::Mismatch,
+        ) => "NotAllowedError",
+        Error::Sep(_) => "UnknownError",
         Error::Refused(_) | Error::AuthenticationRequired(_) | Error::Config(_) => {
             "NotAllowedError"
         }
@@ -397,6 +513,55 @@ mod tests {
         assert!(installer.contains(NATIVE_HOST_NAME));
     }
 
+    #[test]
+    fn broker_browser_path_validates_before_ipc_and_never_uses_software_state() {
+        let fixture = Fixture::new();
+        let mut details: serde_json::Value =
+            serde_json::from_str(&fixture.details()).unwrap_or_else(|e| panic!("details: {e}"));
+        details["userVerification"] = json!("required");
+        let request =
+            json!({"version":1,"action":"inspect","requestDetailsJson":details.to_string()});
+        let mut calls = 0;
+        let reply = reply_for_broker_with(request.to_string().as_bytes(), |operation| {
+            calls += 1;
+            assert!(matches!(
+                operation,
+                crate::broker::Operation::Inspect { .. }
+            ));
+            Err(Error::Sep(crate::security::sep::ProviderError::Unavailable))
+        });
+        assert_eq!(calls, 1);
+        assert_eq!(reply["ok"], false); // no fallback to the fixture's software credential
+        details["extensions"]["remoteDesktopClientOverride"]["origin"] =
+            json!("https://attacker.example");
+        let request = json!({"version":1,"action":"assert","requestDetailsJson":details.to_string(),"passkeyId":fixture.passkey_id});
+        let reply = reply_for_broker_with(request.to_string().as_bytes(), |_| {
+            panic!("invalid origin reached broker")
+        });
+        assert_eq!(reply["error"]["name"], "SecurityError");
+    }
+    #[test]
+    fn availability_cannot_be_claimed_by_software_or_malformed_broker_responses() {
+        let fixture = Fixture::new();
+        let request = json!({"version":1,"action":"capabilities"});
+        let software = fixture.send(request.clone());
+        assert_eq!(software["result"]["userVerificationAvailable"], false);
+        let broker = reply_for_broker_with(request.to_string().as_bytes(), |operation| {
+            assert!(matches!(operation, crate::broker::Operation::Capabilities));
+            Ok(json!({"userVerificationAvailable":true}))
+        });
+        assert_eq!(broker["result"]["userVerificationAvailable"], true);
+        let malformed = reply_for_broker_with(request.to_string().as_bytes(), |_| {
+            Ok(json!({"userVerificationAvailable":"yes"}))
+        });
+        assert_eq!(malformed["ok"], false);
+        let unknown_version = json!({"version":2,"action":"capabilities"});
+        let rejected = reply_for_broker_with(unknown_version.to_string().as_bytes(), |_| {
+            panic!("bad version reached broker")
+        });
+        assert_eq!(rejected["ok"], false);
+    }
+
     struct Fixture {
         _root: tempfile::TempDir,
         backend: SoftwareFileBackend,
@@ -429,6 +594,7 @@ mod tests {
                 synced_at: 1,
                 credentials: Vec::new(),
                 passkeys: vec![PasskeyCredential {
+                    provenance: crate::model::PasskeyProvenance::Synced,
                     id: passkey_id.clone(),
                     rp_id: "webauthn.io".into(),
                     credential_id: credential_id.clone(),

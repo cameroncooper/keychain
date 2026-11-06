@@ -63,10 +63,15 @@ refreshes Apple authentication. `bottles` only lists viable recovery records. `j
 interrupted join or starts a guarded recovery for an already authenticated account; when starting a
 new recovery on its own, it needs a fresh Apple password and 2FA exchange to obtain escrow
 authorization.
+If authentication works but this peer has lost access to keychain keys, use
+`keychain join --repair` to start an explicit replacement-peer recovery. It retains
+the existing profile and old keys, resumes interrupted recovery, and restores a
+complete verified snapshot before switching peers. See [trust repair](docs/SYNC-RECOVERY.md).
 If a join is interrupted after successful recovery, the recovered sponsor is saved so the next run
 can reconcile or resume without automatically spending another escrow attempt.
 After joining, the CLI re-encrypts the recovered TLKs to its own Octagon encryption key, signs the
-new shares, fetches them back for exact verification, and only then destroys the recovered sponsor
+new shares, fetches them back for exact verification, independently decrypts a complete snapshot,
+and only then destroys the recovered sponsor
 keys. If a join response is lost or Apple has not made the new shares visible yet, the CLI retains
 the sponsor encryption key and asks you to rerun `join`; reconciliation uses `updateTrust` without
 another escrow attempt.
@@ -93,6 +98,11 @@ reference with passkey metadata in the encrypted vault. The general `list` comma
 and passkeys with an explicit `kind`; it never prints the raw passkey credential ID or user handle.
 Its JSON output includes only a short SHA-256 credential fingerprint. `show` accepts either kind of
 ID and reveals only passkey metadata for a passkey.
+
+Sync fails without replacing the vault if any requested zone is incomplete or any downloaded
+CKKS item cannot be decrypted. It also keeps an encrypted backup of the last nonempty snapshot.
+See [incomplete sync and recovery](docs/SYNC-RECOVERY.md) for the difference between expired
+authentication and missing Octagon keys, backup behavior, and diagnostic output.
 
 For protocol testing, `passkey assert` accepts a unique passkey ID prefix, base64url challenge,
 and HTTPS origin. It displays the relying party, origin, and account, requires an interactive
@@ -162,20 +172,28 @@ but under the software backend another process running as the same user can stil
 binary and read the software key. Avoid backups or synchronization of `software.key`, and protect
 the Linux account and disk accordingly.
 
-All protocol and workflow code uses the `SecurityBackend` interface. A future SEP implementation
-can replace the backend without changing Apple authentication, Octagon, CKKS, or CLI logic. The
-first useful SEP milestone is device-bound sealing of the local root; direct Octagon keys additionally
-need persistent P-384 signing, public-key export, ECDH, and imported recovered-key support.
+Account/Octagon state uses the `SecurityBackend` interface. Selected passkeys can use the separate
+SEP broker for native signing or biometric decrypt/software signing. Protecting the account-state
+root is a follow-up; native signing does not depend on it. Direct Octagon SEP keys additionally
+need persistent P-384 signing, public-key export, ECDH and imported recovered-key support.
 
 ## Current scope
 
 - Included: Apple Passwords login records, password-manager sidecars and TOTP metadata, plus
-  synced ES256 passkeys, explicit WebAuthn assertion signing, and an opt-in Chromium adapter.
+  synced ES256 passkeys, explicit WebAuthn assertion signing, an opt-in Chromium adapter, and
+  development SEP broker/desktop-agent and selected-passkey migration paths.
 - Excluded: writes to Apple records, passkey creation, password/TOTP browser autofill, payment
-  cards, Hide My Email, background sync, other browser transports, and a daemon.
+  cards, Hide My Email, background sync and other browser transports.
 - Network TLS verification is always enabled; there is no insecure switch.
 
 See [DESIGN.md](DESIGN.md) for the architecture, protocol boundary, and SEP integration plan.
+The current [SEP completion design](SEP-IMPLEMENTATION.md) covers native signing, biometric item
+protection, the desktop authentication prompt, migration, and future iCloud/device-only creation.
+The Rust driver/provider, broker, desktop prompt and synthetic migration/native-host path have
+[application-side hardware evidence](docs/SEP-APPLICATION-VALIDATION.md). Build the optional agent
+with `cargo build --release --features desktop-agent` (requires GTK development files). See
+[service deployment](contrib/SEP-SERVICES.md) and [selected migration](docs/SEP-MIGRATION.md).
+Installed service activation, real browser validation and source retirement remain under development.
 
 See [SEP-INTEGRATION.md](SEP-INTEGRATION.md) for the proven biometric signing mechanism, backend integration guidance,
 and the remaining requirements for SEP-protected keys and passkeys.

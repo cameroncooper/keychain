@@ -62,7 +62,28 @@ impl<'a> StateStore<'a> {
         validate_schema("Octagon", state.as_ref().map(|state| state.schema_version))?;
         Ok(state)
     }
+    pub fn save_trust_repair(&self, value: &crate::recovery::TrustRepair) -> Result<()> {
+        self.save(&self.paths.trust_repair_file(), Purpose::TrustRepair, value)
+    }
+    pub fn load_trust_repair(&self) -> Result<Option<crate::recovery::TrustRepair>> {
+        let journal: Option<crate::recovery::TrustRepair> =
+            self.load(&self.paths.trust_repair_file(), Purpose::TrustRepair)?;
+        if let Some(journal) = &journal {
+            journal.validate()?;
+        }
+        Ok(journal)
+    }
     pub fn save_vault(&self, value: &VaultState) -> Result<()> {
+        let current = self.paths.vault_file();
+        if current.try_exists().map_err(|e| Error::io(&current, e))? {
+            let encrypted = read_bounded(&current)?;
+            let plain = self.backend.open(Purpose::Vault, &encrypted)?;
+            let previous: VaultState = serde_json::from_slice(&plain)?;
+            validate_schema("vault", Some(previous.schema_version))?;
+            if !previous.credentials.is_empty() || !previous.passkeys.is_empty() {
+                atomic_write_private(&self.paths.previous_vault_file(), &encrypted)?;
+            }
+        }
         self.save(&self.paths.vault_file(), Purpose::Vault, value)
     }
     pub fn load_vault(&self) -> Result<Option<VaultState>> {
@@ -97,6 +118,61 @@ mod tests {
 
     use super::*;
     use crate::security::SoftwareFileBackend;
+    #[test]
+    fn an_empty_replacement_preserves_the_last_nonempty_encrypted_snapshot() {
+        let directory = tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let paths = AppPaths::for_test(directory.path()).unwrap_or_else(|e| panic!("paths: {e}"));
+        let backend = SoftwareFileBackend::new(paths.clone());
+        let store = StateStore::new(&paths, &backend);
+        let old = VaultState {
+            schema_version: 1,
+            synced_at: 1,
+            passkeys: vec![],
+            credentials: vec![crate::model::Credential {
+                id: "synthetic".into(),
+                domain: "example.com".into(),
+                username: "user".into(),
+                password: "synthetic-secret".into(),
+                title: "old".into(),
+                modified_at: 0.0,
+                notes: String::new(),
+                last_used: 0.0,
+                totp_uri: String::new(),
+            }],
+        };
+        store
+            .save_vault(&old)
+            .unwrap_or_else(|e| panic!("save old: {e}"));
+        let empty = VaultState {
+            schema_version: 1,
+            synced_at: 2,
+            passkeys: vec![],
+            credentials: vec![],
+        };
+        store
+            .save_vault(&empty)
+            .unwrap_or_else(|e| panic!("save empty: {e}"));
+        store
+            .save_vault(&empty)
+            .unwrap_or_else(|e| panic!("repeat empty: {e}"));
+        let previous: Option<VaultState> = store
+            .load(&paths.previous_vault_file(), Purpose::Vault)
+            .unwrap_or_else(|e| panic!("backup: {e}"));
+        assert_eq!(previous, Some(old));
+        assert_eq!(
+            store
+                .load_vault()
+                .unwrap_or_else(|e| panic!("current: {e}")),
+            Some(empty)
+        );
+        let bytes = read_bounded(&paths.previous_vault_file())
+            .unwrap_or_else(|e| panic!("read backup: {e}"));
+        assert!(
+            !bytes
+                .windows(b"synthetic-secret".len())
+                .any(|window| window == b"synthetic-secret")
+        );
+    }
 
     #[test]
     fn vault_round_trip_and_schema_guard() {

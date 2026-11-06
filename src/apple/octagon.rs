@@ -466,18 +466,104 @@ impl<'a> OctagonClient<'a> {
         ))
     }
 
+    /// Verify recovery without borrowing the sponsor encryption key. A full
+    /// successful snapshot is required before that key can be retired.
+    pub fn sync_self_credentials(&self, state: &OctagonState) -> Result<credential::Projection> {
+        if !matches!(
+            state.trust_state,
+            OctagonTrustState::JoinedSponsorRetirementVerified { .. } | OctagonTrustState::Joined
+        ) {
+            return Err(Error::Security(
+                "self-share verification has not completed".into(),
+            ));
+        }
+        let mut independent = state.clone();
+        independent.trust_state = OctagonTrustState::Joined;
+        self.sync_credentials(&independent)
+    }
+
     pub fn sync_credentials(&self, state: &OctagonState) -> Result<credential::Projection> {
         if !state.trust_state.is_joined() {
             return Err(Error::Config(
                 "this device has not joined Octagon; run `keychain join`".into(),
             ));
         }
-        let (tlks, view_sync_keys) = self.fetch_recoverable_tlks(state)?;
+        let (mut tlks, view_sync_keys) = self.fetch_recoverable_tlks(state)?;
+        let mut records = self.fetch_password_records()?;
+        // Recovery shares are not a complete inventory of the live CKKS zones.
+        // Also accept live shares signed by our locally known identity, with
+        // exactly the same signature and recipient-key checks as recovery.
+        let zone_shares = records
+            .get("tlkshare")
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let own_signing_spki = self.backend.public_spki(&state.signing_key)?;
+        let own_encryption_public = self.backend.public_x963(&state.encryption_key)?;
+        let zone_tlks = pipeline::unwrap_authenticated_tlkshares(
+            zone_shares,
+            &state.peer_id,
+            &state.peer_id,
+            &own_signing_spki,
+            self.backend,
+            &state.encryption_key,
+            &own_encryption_public,
+        )?;
+        if std::env::var_os("KEYCHAIN_TRACE_SYNC").is_some() {
+            eprintln!(
+                "CKKS authenticated live self-shared root keys: {}",
+                zone_tlks.len()
+            );
+        }
+        merge_tlks(&mut tlks, zone_tlks)?;
         let tlks = tlks
             .into_iter()
             .map(|tlk| (tlk.uuid, tlk.key))
             .collect::<BTreeMap<_, _>>();
-        let mut records = self.fetch_password_records()?;
+        if std::env::var_os("KEYCHAIN_TRACE_SYNC").is_some() {
+            let changes = self.fetch_changes()?;
+            let mut including = 0;
+            let mut excluding = 0;
+            for peer in &changes.peers {
+                let Some(dynamic) = &peer.dynamic else {
+                    continue;
+                };
+                let spki = validated_peer_signing_spki(peer)?;
+                verify_peer_signed_blob(&spki, DYNAMIC_INFO_SIG_TYPE, dynamic)?;
+                let fields = decode_fields(&dynamic.info)?;
+                let contains_us = |field| {
+                    fields.get(&field).into_iter().flatten().any(
+                        |value| matches!(value, Value::Bytes(id) if id == state.peer_id.as_bytes()),
+                    )
+                };
+                including += usize::from(contains_us(2));
+                excluding += usize::from(contains_us(3));
+            }
+            eprintln!(
+                "Octagon diagnostic: peers={} own_peer_present={} signed_inclusions={} signed_exclusions={}",
+                changes.peers.len(),
+                changes
+                    .peers
+                    .iter()
+                    .any(|peer| peer.peer_id == state.peer_id),
+                including,
+                excluding
+            );
+            let counts = records
+                .iter()
+                .map(|(kind, values)| (kind.clone(), values.len()))
+                .collect::<BTreeMap<_, _>>();
+            let shares = records
+                .get("tlkshare")
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let addressed = shares
+                .iter()
+                .filter(|share| share.string("receiver") == Some(state.peer_id.as_str()))
+                .count();
+            eprintln!(
+                "CKKS record counts: {counts:?}; zone shares addressed to this peer={addressed}"
+            );
+        }
         records
             .entry("synckey".into())
             .or_default()
@@ -549,6 +635,37 @@ impl<'a> OctagonClient<'a> {
             encryption_key,
             recipient_public_x963,
         )?;
+        if std::env::var_os("KEYCHAIN_TRACE_SYNC").is_some() {
+            let mut zones: BTreeMap<&str, usize> = BTreeMap::new();
+            for tlk in &tlks {
+                let zone = if ckks::KEYCHAIN_ZONES.contains(&tlk.zone_name.as_str()) {
+                    tlk.zone_name.as_str()
+                } else {
+                    "other"
+                };
+                *zones.entry(zone).or_default() += 1;
+            }
+            let for_receiver = shares
+                .iter()
+                .filter(|s| s.string("receiver") == Some(peer_id))
+                .count();
+            let from_other = shares
+                .iter()
+                .filter(|s| {
+                    s.string("receiver") == Some(peer_id)
+                        && s.string("sender") != Some(expected_sender)
+                })
+                .count();
+            eprintln!(
+                "CKKS shares: records={} for_receiver={} other_senders={} authenticated_tlks={} sync_keys={}",
+                shares.len(),
+                for_receiver,
+                from_other,
+                tlks.len(),
+                sync_keys.len()
+            );
+            eprintln!("CKKS authenticated root-key zone counts: {zones:?}");
+        }
         if !shares.is_empty() && tlks.is_empty() {
             return Err(Error::Security(format!(
                 "recoverable TLKShares for {peer_id} contained no authenticated self-signed share"
@@ -559,34 +676,38 @@ impl<'a> OctagonClient<'a> {
 
     fn fetch_password_records(&self) -> Result<BTreeMap<String, Vec<Record>>> {
         let mut grouped: BTreeMap<String, Vec<Record>> = BTreeMap::new();
-        let mut successful_zones = 0_usize;
-        let mut last_error = None;
         for zone in PASSWORD_ZONES {
             let zone_id = ckks::record_zone_identifier(zone, self.transport.user_id());
             let mut continuation = None;
             let mut seen_continuations = BTreeSet::new();
             let mut completed = false;
-            let mut request_failed = false;
             for _ in 0..1_000 {
                 let request =
                     ckks::build_retrieve_changes_request(&zone_id, continuation.as_deref(), 500);
-                let raw = match self.transport.fetch_records(&request) {
-                    Ok(raw) => raw,
-                    Err(error) => {
-                        last_error = Some(error);
-                        request_failed = true;
-                        break;
-                    }
-                };
+                let raw = self.transport.fetch_records(&request)?;
                 let page = ckks::parse_retrieve_changes_response(&raw)?;
+                if std::env::var_os("KEYCHAIN_TRACE_SYNC").is_some() {
+                    let kinds = page
+                        .records
+                        .iter()
+                        .fold(BTreeMap::new(), |mut counts, record| {
+                            *counts.entry(record.record_type.as_str()).or_insert(0_usize) += 1;
+                            counts
+                        });
+                    eprintln!(
+                        "CKKS {zone}: status={} records={} continuation={} kinds={kinds:?}",
+                        page.status,
+                        page.records.len(),
+                        page.continuation.is_some()
+                    );
+                }
                 for record in page.records {
                     grouped
                         .entry(record.record_type.clone())
                         .or_default()
                         .push(record);
                 }
-                if page.status != 1 || page.continuation.is_none() {
-                    successful_zones += 1;
+                if page.status == 3 {
                     completed = true;
                     break;
                 }
@@ -598,16 +719,11 @@ impl<'a> OctagonClient<'a> {
                 }
                 continuation = Some(next);
             }
-            if !completed && !request_failed {
+            if !completed {
                 return Err(Error::InvalidData(format!(
                     "CKKS zone {zone} exceeded the 1000-page safety limit"
                 )));
             }
-        }
-        if successful_zones == 0 {
-            return Err(last_error.unwrap_or_else(|| {
-                Error::Apple("no Passwords CKKS zone could be fetched".into())
-            }));
         }
         Ok(grouped)
     }

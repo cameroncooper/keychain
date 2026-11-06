@@ -357,13 +357,18 @@ pub trait SecurityBackend: Send + Sync {
 }
 ```
 
-The first SEP milestone is sealed root-key storage. It provides meaningful protection at rest and
-works even if Octagon needs software representations of some keys.
+The agreed completion design is [SEP-IMPLEMENTATION.md](SEP-IMPLEMENTATION.md), using the current
+[driver handoff](SEP-INTEGRATION.md). Native biometric P-256 signing is the first integration
+milestone. Selected-item biometric decryption and software signing follow; optional root protection
+and explicit migration are later work. The driver now exposes concrete signing and item-decrypt
+ioctls, but the application adapter and production broker are not yet implemented.
 
-Synced passkeys add a separate capability: import an Apple-exported P-256 key and perform
-ECDSA/SHA-256 without exporting it again. The software backend implements that boundary now. A SEP
-backend can adopt passkey keys independently of Octagon once persistent P-256 import and signing
-are reliable; the vault's opaque `KeyRef` does not change.
+Support both **Save to iCloud** and **Save on this device** when creating passkeys. Synced keys
+retain exportable scalar material for synchronization and can have their local copies protected by
+SEP biometric item decryption. Device-only keys can be generated and used entirely inside SEP.
+There is no demonstrated native private-key import: an existing iCloud key cannot be replaced by a
+new SEP key without registering a different credential. Creation and Apple upload support remain
+separate planned features; local protection does not change a credential's sync provenance.
 
 Direct SEP-native Octagon keys require all of the following before use:
 
@@ -388,9 +393,10 @@ new peer and performs a new, explicit trust join.
 
 ## Optional `keychaind`
 
-No daemon is required for the CLI MVP. Add `keychaind` only if the SEP device must be owned by a
-privileged broker, if a browser integration needs an authorization boundary, or if keeping an
-unsealed root out of short-lived clients provides a measurable benefit.
+No daemon is required for the existing software CLI. SEP integration adds an on-demand privileged
+operation broker for the root-only device and an unprivileged user-session authentication agent.
+Keep networking and browser processing outside that broker. The detailed activation, ownership,
+memory and acceptance requirements are in [SEP-IMPLEMENTATION.md](SEP-IMPLEMENTATION.md).
 
 For browser WebAuthn, origin context must come from a trusted browser/authenticator API, never from
 a page content script or an origin string invented by the extension. The implemented Chromium
@@ -406,6 +412,14 @@ fresh one-shot host in assert mode; the host revalidates the entire request befo
 messages and all attacker-controlled collections are bounded. The stable extension ID is the only
 origin permitted by Chromium's native-host manifest.
 
+That describes the current software flow. The planned SEP flow places credential selection and
+creation storage choices in the initiating application/browser UI, then presents a desktop-owned
+fingerprint prompt. Once visible, capture starts automatically; successful authorized use dismisses
+the prompt and completes the action. There is no extra Approve/Continue/Done button. The agent can
+display guidance and cancel; only the broker's SEP operation establishes success. A credential
+picker appears only when selection is needed. Password fallback is offered only for implemented
+policies that support it. Candidate inspection must not require unlocking the entire vault.
+
 The software backend asserts user presence after explicit local approval, but refuses a request
 that requires user verification until a real PIN, PAM, Touch ID, or SEP-backed verifier exists. The
 approval is not a security boundary against same-user malware while software key material remains
@@ -416,10 +430,12 @@ can remain a later adapter over the same assertion core.
 If added, it should be systemd socket-activated rather than continuously running:
 
 - Unix domain socket only; never TCP.
-- Socket under `$XDG_RUNTIME_DIR/keychain/` for a per-user service, mode `0600`.
+- Root-owned broker socket with restricted access and explicit owner/session policy; session UI
+  registration is authenticated separately.
 - Authenticate clients with kernel peer credentials.
 - Length-delimited, versioned protocol with small bounded messages.
-- A narrow operation set: capabilities, decrypt named state, encrypt named state, sign, ECDH, lock.
+- Selected-credential operations with internal key resolution; no arbitrary decrypt/sign endpoint
+  for browser callers.
 - No operation that exports a SEP private key or local root key.
 - Idle timeout and memory zeroization on exit.
 - Optional user-presence or desktop-session policy when the SEP driver can enforce one.
@@ -511,14 +527,18 @@ complete; browser transport is tracked separately in Phase 6.
 
 ### Phase 5: SEP backend
 
-- Stabilize a small driver ABI and implement capability discovery.
-- Add SEP-sealed root protection first.
+- Implement the available ioctl ABI and native biometric signing, then the on-demand broker and
+  desktop authentication agent.
+- Add biometric item envelopes for synced keys, protected software signing and browser integration.
+- Validate explicit migration and recovery; add optional root protection as a follow-up.
+- Add creation with both iCloud and device-only choices as a separate registration/upload feature.
 - Add optional direct Octagon key handles only if signing, ECDH, persistence, and failure semantics
   all pass tests.
 - Decide from measurement whether a socket-activated `keychaind` improves the boundary.
 
-Exit criterion: copied encrypted state is unusable off-device, reboot/suspend do not lose keys, and
-driver failure is safe and diagnosable.
+Exit criteria are the milestone-specific software and hardware gates in SEP-IMPLEMENTATION.md.
+Warm-reboot evidence does not establish cold-power-cycle or suspend behavior. Native private-key
+import and P-384 remain unavailable until separately implemented and validated.
 
 ### Phase 6: convenience integrations — Chromium passkey adapter live-validated
 
@@ -555,9 +575,10 @@ driver failure is safe and diagnosable.
 These should be answered with small probes before they become architectural commitments:
 
 1. Which P-384 operations and key-import modes will the Linux SEP driver expose?
-2. Can SEP policy bind unsealing to the current Linux boot, user authentication, or user presence?
-3. Does the driver need a privileged system broker, or can device-node permissions safely grant
-   the logged-in user access?
+2. How should explicit item/root migration recover across interrupted durable transitions and
+   loss of device-bound secure state?
+3. What device-ownership handoff with fprintd and active-session binding should the privileged
+   broker use on the target desktop?
 4. Does the chosen anisette helper preserve the same machine identity reliably across upgrades?
 5. Which Apple Passwords views are necessary for the minimum useful sync on the target account?
 6. When should locally imported passkey keys absent from a later Apple snapshot be garbage

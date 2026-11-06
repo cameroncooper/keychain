@@ -3,6 +3,7 @@ const APPROVAL_PAGE = chrome.runtime.getURL("approval.html");
 const pendingKey = (requestId) => `pending:${requestId}`;
 const canceledRequests = new Set();
 const processingRequests = new Set();
+const activeNative = new Map();
 
 function domError(name, message) {
   return { name, message };
@@ -25,6 +26,11 @@ async function attach() {
 }
 
 async function detach() {
+  for (const [requestId, port] of activeNative) {
+    canceledRequests.add(requestId);
+    port.disconnect();
+  }
+  activeNative.clear();
   await chrome.webAuthenticationProxy.detach();
   await chrome.storage.session.clear();
   await chrome.action.setBadgeText({ text: "OFF" });
@@ -52,8 +58,29 @@ async function completeGetWithError(requestId, error) {
   }
 }
 
-async function callNative(message) {
-  const reply = await chrome.runtime.sendNativeMessage(NATIVE_HOST, message);
+async function callNative(message, requestId) {
+  if (canceledRequests.has(requestId)) {
+    throw new Error("The website canceled this request");
+  }
+  const reply = await new Promise((resolve, reject) => {
+    const port = chrome.runtime.connectNative(NATIVE_HOST);
+    activeNative.set(requestId, port);
+    let finished = false;
+    function finish(callback, value) {
+      if (finished) return;
+      finished = true;
+      if (activeNative.get(requestId) === port) activeNative.delete(requestId);
+      port.disconnect();
+      callback(value);
+    }
+    port.onMessage.addListener((reply) => finish(resolve, reply));
+    port.onDisconnect.addListener(() => {
+      const message = chrome.runtime.lastError?.message || "The native host disconnected";
+      finish(reject, new Error(message));
+    });
+    try { port.postMessage(message); }
+    catch (error) { finish(reject, error); }
+  });
   if (!reply || typeof reply !== "object") {
     throw new Error("The native host returned no reply");
   }
@@ -68,7 +95,7 @@ async function handleGet(request) {
       version: 1,
       action: "inspect",
       requestDetailsJson: request.requestDetailsJson,
-    });
+    }, requestId);
     if (!reply.ok) {
       await completeGetWithError(
         requestId,
@@ -83,6 +110,7 @@ async function handleGet(request) {
       );
       return;
     }
+    if (canceledRequests.has(requestId)) return;
     await chrome.storage.session.set({
       [pendingKey(requestId)]: {
         requestId,
@@ -90,6 +118,13 @@ async function handleGet(request) {
         inspection: reply.result,
       },
     });
+    // One biometric-backed account goes directly to the desktop prompt. The
+    // browser picker is needed only to choose among accounts. Software presence
+    // approval stays explicit until that credential has been migrated.
+    if (reply.result.biometric === true && reply.result.candidates.length === 1) {
+      await approveRequest(requestId, reply.result.candidates[0].id);
+      return;
+    }
     try {
       await chrome.windows.create({
         url: `${APPROVAL_PAGE}?requestId=${encodeURIComponent(requestId)}`,
@@ -133,14 +168,14 @@ async function approveRequest(requestId, passkeyId) {
       throw new Error("The selected passkey is not eligible for this request");
     }
 
-    // Consume the approval before signing so a repeated message cannot reuse it.
+    // Consume the selection before signing so it cannot be replayed.
     await chrome.storage.session.remove(pendingKey(requestId));
     const reply = await callNative({
       version: 1,
       action: "assert",
       requestDetailsJson: pending.requestDetailsJson,
       passkeyId,
-    });
+    }, requestId);
     if (!reply.ok) {
       await completeGetWithError(
         requestId,
@@ -192,16 +227,33 @@ chrome.webAuthenticationProxy.onCreateRequest.addListener((request) => {
   });
 });
 
+async function handleIsUvpaa(request) {
+  const requestId = request.requestId;
+  canceledRequests.delete(requestId);
+  let available = false;
+  try {
+    const reply = await callNative({ version: 1, action: "capabilities" }, requestId);
+    available = reply?.ok === true && reply.result?.kind === "capabilities" &&
+      reply.result.userVerificationAvailable === true;
+  } catch {
+    // Unavailable service/UI/hardware cannot advertise verified authentication.
+  }
+  if (canceledRequests.has(requestId)) return;
+  try {
+    await chrome.webAuthenticationProxy.completeIsUvpaaRequest({ requestId, isUvpaa: available });
+  } catch (error) {
+    console.error("Could not complete authenticator availability request", error);
+  }
+}
+
 chrome.webAuthenticationProxy.onIsUvpaaRequest.addListener((request) => {
-  // The software backend has explicit presence approval but no local user verification.
-  void chrome.webAuthenticationProxy.completeIsUvpaaRequest({
-    requestId: request.requestId,
-    isUvpaa: false,
-  });
+  void handleIsUvpaa(request);
 });
 
 chrome.webAuthenticationProxy.onRequestCanceled.addListener((requestId) => {
   canceledRequests.add(requestId);
+  activeNative.get(requestId)?.disconnect();
+  activeNative.delete(requestId);
   void chrome.storage.session.remove(pendingKey(requestId));
   void chrome.runtime.sendMessage({ type: "requestCanceled", requestId }).catch(() => {});
 });

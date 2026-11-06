@@ -229,6 +229,73 @@ pub fn parse_response_operation(raw: &[u8]) -> Result<CloudKitResult> {
     })
 }
 
+fn collect_response_operations(body: &[u8], request_field: u32) -> Result<CloudKitResult> {
+    let messages = undelimit(body)?;
+    if messages.is_empty() {
+        return Err(Error::InvalidData(
+            "CloudKit returned no response operation".into(),
+        ));
+    }
+    let mut payloads = Vec::new();
+    let trace = std::env::var_os("KEYCHAIN_TRACE_SYNC").is_some();
+    for (index, raw) in messages.iter().enumerate() {
+        let result = parse_response_operation(raw)?;
+        if trace {
+            let shape = result
+                .fields
+                .iter()
+                .map(|(field, values)| format!("{field}:{}", values.len()))
+                .collect::<Vec<_>>()
+                .join(",");
+            eprintln!(
+                "CloudKit response {}/{}: code={} fields=[{}]",
+                index + 1,
+                messages.len(),
+                result.code,
+                shape
+            );
+        }
+        if result.code != RESULT_SUCCESS {
+            return Err(Error::Apple(format!(
+                "CloudKit operation failed (code {}): {}",
+                result.code,
+                result
+                    .error_description
+                    .as_deref()
+                    .unwrap_or("unknown error")
+            )));
+        }
+        if let Some(values) = result.fields.get(&request_field) {
+            for value in values {
+                let crate::proto::Value::Bytes(value) = value else {
+                    return Err(Error::InvalidData(
+                        "CloudKit payload has the wrong wire type".into(),
+                    ));
+                };
+                payloads.push(value.clone());
+            }
+        }
+    }
+    if payloads.is_empty() {
+        return Err(Error::InvalidData(format!(
+            "CloudKit success response omitted operation payload {request_field}; refusing an empty snapshot"
+        )));
+    }
+    if request_field != ckks::FIELD_RETRIEVE_CHANGES && payloads.len() != 1 {
+        return Err(Error::InvalidData(
+            "unexpected multiple CloudKit function payloads".into(),
+        ));
+    }
+    // Nested protobuf fragments merge by concatenation: repeated changes append,
+    // and singular page status/token fields are resolved last-wins by CKKS.
+    let data = payloads.concat();
+    Ok(CloudKitResult {
+        code: RESULT_SUCCESS,
+        error_description: None,
+        fields: BTreeMap::from([(request_field, vec![crate::proto::Value::Bytes(data)])]),
+    })
+}
+
 pub struct CloudKitTransport<'a> {
     token: String,
     user_id: String,
@@ -328,22 +395,7 @@ impl<'a> CloudKitTransport<'a> {
             });
         }
         let body = maybe_gunzip(&body)?;
-        let messages = undelimit(&body)?;
-        let raw = messages
-            .first()
-            .ok_or_else(|| Error::InvalidData("CloudKit returned no response operation".into()))?;
-        let result = parse_response_operation(raw)?;
-        if result.code != RESULT_SUCCESS {
-            return Err(Error::Apple(format!(
-                "CloudKit operation failed (code {}): {}",
-                result.code,
-                result
-                    .error_description
-                    .as_deref()
-                    .unwrap_or("unknown error")
-            )));
-        }
-        Ok(result)
+        collect_response_operations(&body, request_field)
     }
 
     pub fn invoke(&self, operation_name: &str, parameters: &[u8]) -> Result<Vec<u8>> {
@@ -357,12 +409,12 @@ impl<'a> CloudKitTransport<'a> {
             CUTTLEFISH_BUNDLE,
             Some(&format!("{CUTTLEFISH_SERVICE}/{operation_name}")),
         )?;
-        let Some(invoke) = result.field(1101) else {
-            return Ok(Vec::new());
-        };
-        Ok(first_bytes(&decode_fields(invoke)?, 1)
-            .unwrap_or_default()
-            .to_vec())
+        let invoke = result
+            .field(1101)
+            .ok_or_else(|| Error::InvalidData("CloudKit omitted function response".into()))?;
+        first_bytes(&decode_fields(invoke)?, 1)
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| Error::InvalidData("CloudKit omitted function result parameters".into()))
     }
 
     pub fn fetch_records(&self, request: &[u8]) -> Result<Vec<u8>> {
@@ -374,10 +426,10 @@ impl<'a> CloudKitTransport<'a> {
             SECURITYD_BUNDLE,
             None,
         )?;
-        Ok(result
+        result
             .field(ckks::FIELD_RETRIEVE_CHANGES)
-            .unwrap_or_default()
-            .to_vec())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| Error::InvalidData("CloudKit omitted record-change payload".into()))
     }
 }
 
@@ -480,6 +532,36 @@ fn response_bytes(response: Response) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn stream(messages: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = Vec::new();
+        for message in messages {
+            out.extend(encode_varint(message.len() as u64));
+            out.extend(message);
+        }
+        out
+    }
+    #[test]
+    fn streamed_payload_after_an_ack_is_not_dropped_and_missing_payload_is_an_error() {
+        let ack = Writer::new()
+            .message(3, &Writer::new().uint64(1, 1).finish())
+            .finish();
+        let page = Writer::new().uint64(4, 3).finish();
+        let payload = Writer::new().message(213, &page).finish();
+        let result = collect_response_operations(&stream(&[ack.clone(), payload]), 213)
+            .unwrap_or_else(|e| panic!("stream: {e}"));
+        assert_eq!(result.field(213), Some(page.as_slice()));
+        assert!(collect_response_operations(&stream(&[ack]), 213).is_err());
+    }
+    #[test]
+    fn a_late_application_error_invalidates_earlier_successful_data() {
+        let data = Writer::new()
+            .message(213, &Writer::new().uint64(4, 3).finish())
+            .finish();
+        let error = Writer::new()
+            .message(3, &Writer::new().uint64(1, 7).finish())
+            .finish();
+        assert!(collect_response_operations(&stream(&[data, error]), 213).is_err());
+    }
 
     #[test]
     fn delimiter_round_trip() {

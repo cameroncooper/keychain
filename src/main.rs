@@ -14,7 +14,9 @@ use keychain::model::{
 };
 use keychain::passkey;
 use keychain::paths::{AppPaths, StateLock};
-use keychain::security::{SecurityBackend, SoftwareFileBackend};
+#[cfg(test)]
+use keychain::security::SoftwareFileBackend;
+use keychain::security::{SecurityBackend, backend_for_config};
 use keychain::store::StateStore;
 use keychain::{Error, Result};
 use plist::{Dictionary, Value};
@@ -58,6 +60,9 @@ enum Command {
         /// Select this escrow record without prompting.
         #[arg(long, value_name = "RECORD_LABEL")]
         bottle: Option<String>,
+        /// Recover trust with a replacement peer, preserving existing keys and cache.
+        #[arg(long)]
+        repair: bool,
     },
     /// Download and decrypt the latest password snapshot.
     Sync,
@@ -93,6 +98,12 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum PasskeyCommand {
+    /// Move one existing synced passkey to biometric broker signing, retaining a recovery copy.
+    Protect {
+        id: String,
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
     /// Produce a diagnostic WebAuthn assertion after an interactive approval.
     Assert {
         id: String,
@@ -114,6 +125,10 @@ enum AnisetteCommand {
 }
 
 fn main() {
+    if let Err(error) = keychain_sep_driver::memory::make_process_nondumpable() {
+        eprintln!("keychain: could not protect process memory: {error}");
+        std::process::exit(1);
+    }
     let cli = Cli::parse();
     if let Err(error) = run(cli) {
         eprintln!("keychain: {error}");
@@ -124,45 +139,42 @@ fn main() {
 fn run(cli: Cli) -> Result<()> {
     let paths = AppPaths::discover()?;
     let config = Config::load(&paths)?;
-    let backend = SoftwareFileBackend::new(paths.clone());
-    let store = StateStore::new(&paths, &backend);
+    let selected_backend = backend_for_config(&config, &paths)?;
+    let backend = selected_backend.as_ref();
+    let store = StateStore::new(&paths, backend);
     match cli.command {
         Command::Anisette { command } => command_anisette(command, &paths, config),
         Command::Setup { username, bottle } => {
             let _lock = StateLock::acquire(&paths)?;
-            command_setup(
-                username,
-                bottle.as_deref(),
-                &paths,
-                config,
-                &backend,
-                &store,
-            )
+            command_setup(username, bottle.as_deref(), &paths, config, backend, &store)
         }
         Command::Login { username } => {
             let _lock = StateLock::acquire(&paths)?;
-            command_login(username, &paths, config, &backend, &store)
+            command_login(username, &paths, config, backend, &store)
         }
         Command::Bottles => {
             let _lock = StateLock::acquire(&paths)?;
-            command_bottles(&paths, config, &backend, &store)
+            command_bottles(&paths, config, backend, &store)
         }
-        Command::Join { bottle } => {
+        Command::Join { bottle, repair } => {
             let _lock = StateLock::acquire(&paths)?;
-            command_join(bottle.as_deref(), &paths, config, &backend, &store)
+            command_join(bottle.as_deref(), repair, &paths, config, backend, &store)
         }
         Command::Sync => {
             let _lock = StateLock::acquire(&paths)?;
-            command_sync(&paths, config, &backend, &store)
+            command_sync(&paths, config, backend, &store)
         }
         Command::List { query, json } => command_list(query.as_deref(), json, &store),
         Command::Show { id, json } => command_show(&id, json, &store),
         Command::Totp { id } => command_totp(&id, &store),
-        Command::Passkey { command } => command_passkey(command, &backend, &store),
-        Command::Status => command_status(&paths, &config, &backend, &store),
+        Command::Passkey { command } => {
+            let _lock = StateLock::acquire(&paths)?;
+            command_passkey(command, &paths, &config, backend, &store)
+        }
+        Command::Status => command_status(&paths, &config, backend, &store),
         Command::Logout { forget_device } => {
             let _lock = StateLock::acquire(&paths)?;
-            command_logout(forget_device, &paths, &backend, &store)
+            command_logout(forget_device, &paths, &config, backend, &store)
         }
     }
 }
@@ -215,6 +227,14 @@ fn command_setup(
     let (account, device, state, escrow_pet) =
         authenticate_and_prepare(requested_username, &anisette, backend, store)?;
     println!("signed in as {}", account.username);
+    if store
+        .load_trust_repair()?
+        .is_some_and(|journal| journal.phase() != keychain::recovery::RepairPhase::Committed)
+    {
+        return Err(Error::Config(
+            "a trust repair is pending; resume it with `keychain join --repair`".into(),
+        ));
+    }
     if matches!(state.trust_state, OctagonTrustState::Joined) {
         println!("Octagon: already joined as {}", state.peer_id);
         return Ok(());
@@ -229,6 +249,7 @@ fn command_setup(
         store,
         state,
         Some(escrow_pet),
+        false,
     )
 }
 
@@ -370,6 +391,7 @@ fn command_bottles(
 
 fn command_join(
     requested_label: Option<&str>,
+    repair: bool,
     paths: &AppPaths,
     config: Config,
     backend: &dyn SecurityBackend,
@@ -383,6 +405,20 @@ fn command_join(
     }
     let state = require_octagon(store)?;
     validate_account_binding(&account, &state)?;
+    let pending_repair = store
+        .load_trust_repair()?
+        .is_some_and(|journal| journal.phase() != keychain::recovery::RepairPhase::Committed);
+    if repair || pending_repair {
+        return repair_octagon(
+            requested_label,
+            &account,
+            &device,
+            &anisette,
+            backend,
+            store,
+            &config,
+        );
+    }
     join_octagon(
         requested_label,
         &account,
@@ -392,7 +428,62 @@ fn command_join(
         store,
         state,
         None,
+        false,
     )
+}
+
+fn checkpoint_join(store: &StateStore<'_>, state: &OctagonState, repair: bool) -> Result<()> {
+    if repair {
+        keychain::recovery::TrustRepair::checkpoint(store, state)
+    } else {
+        store.save_octagon(state)
+    }
+}
+
+fn repair_octagon(
+    requested_label: Option<&str>,
+    account: &AccountState,
+    device: &DeviceIdentity,
+    anisette: &dyn anisette::AnisetteProvider,
+    backend: &dyn SecurityBackend,
+    store: &StateStore<'_>,
+    config: &Config,
+) -> Result<()> {
+    use keychain::recovery::{RepairPhase, TrustRepair};
+    let mut journal = TrustRepair::prepare(store, account, device, backend)?;
+    if journal.phase() == RepairPhase::Prepared {
+        eprintln!("Repairing Octagon trust; existing peer keys and cached items are retained.");
+        join_octagon(
+            requested_label,
+            account,
+            device,
+            anisette,
+            backend,
+            store,
+            journal.candidate().clone(),
+            None,
+            true,
+        )?;
+        journal = store
+            .load_trust_repair()?
+            .ok_or_else(|| Error::Security("trust-repair journal disappeared".into()))?;
+        if !matches!(
+            journal.candidate().trust_state,
+            OctagonTrustState::JoinedSponsorRetirementVerified { .. }
+        ) {
+            return Ok(());
+        }
+        let client = octagon::OctagonClient::new(account, device, anisette, backend)?;
+        eprintln!("Verifying a complete sync with the replacement peer alone…");
+        let projection = client.sync_self_credentials(journal.candidate())?;
+        save_synced_projection(projection, config, backend, store)?;
+        journal = journal.snapshot_verified(store)?;
+    }
+    let client = octagon::OctagonClient::new(account, device, anisette, backend)?;
+    let journal = journal.commit(store, |state| client.retire_verified_sponsor(state))?;
+    println!("Octagon trust repaired as {}", journal.candidate().peer_id);
+    println!("Verified a complete snapshot; previous peer keys are retained locally.");
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -405,6 +496,7 @@ fn join_octagon(
     store: &StateStore<'_>,
     mut state: OctagonState,
     escrow_pet: Option<Zeroizing<String>>,
+    repair: bool,
 ) -> Result<()> {
     let client = octagon::OctagonClient::new(account, device, anisette, backend)?;
     if matches!(state.trust_state, OctagonTrustState::Joined) {
@@ -434,7 +526,7 @@ fn join_octagon(
                 unreachable!("a sponsor phase has an escrow record label")
             }
         }
-        return finish_sponsor_join(&client, store, &mut state);
+        return finish_sponsor_join(&client, store, &mut state, repair);
     }
 
     let viable_bottles = client.fetch_viable_bottles()?;
@@ -522,25 +614,32 @@ fn join_octagon(
     let identity = escrow::recover_identity(backend, &bottle, &entropy, &account.adsid)?;
     octagon::set_recovered_sponsor(&mut state, &record_label, identity);
     // Persist before a network join so interruption never causes another automatic recovery.
-    store.save_octagon(&state)?;
-    finish_sponsor_join(&client, store, &mut state)
+    checkpoint_join(store, &state, repair)?;
+    finish_sponsor_join(&client, store, &mut state, repair)
 }
 
 fn finish_sponsor_join(
     client: &octagon::OctagonClient<'_>,
     store: &StateStore<'_>,
     state: &mut OctagonState,
+    repair: bool,
 ) -> Result<()> {
     let outcome = client.join_with_sponsor(state)?;
     // This checkpoint makes retirement crash-safe: after successful verification, a restart can
     // delete the old key without needing it to decrypt the sponsor shares again.
-    store.save_octagon(state)?;
+    checkpoint_join(store, state, repair)?;
     let (uploaded_tlk_shares, awaiting_reason) = match outcome {
         octagon::JoinOutcome::SponsorRetirementReady {
             uploaded_tlk_shares,
         } => {
-            client.retire_verified_sponsor(state)?;
-            store.save_octagon(state)?;
+            if !repair {
+                // Self-share coverage alone does not prove the desired views
+                // are readable. Keep the sponsor until an independent complete
+                // snapshot succeeds, including every encrypted Passwords item.
+                let _ = client.sync_self_credentials(state)?;
+                client.retire_verified_sponsor(state)?;
+                store.save_octagon(state)?;
+            }
             (uploaded_tlk_shares, None)
         }
         octagon::JoinOutcome::AwaitingSelfShareVerification {
@@ -548,14 +647,22 @@ fn finish_sponsor_join(
             reason,
         } => (uploaded_tlk_shares, Some(reason)),
     };
-    println!("joined Octagon as {}", state.peer_id);
+    println!(
+        "{} Octagon as {}",
+        if repair {
+            "replacement peer joined"
+        } else {
+            "joined"
+        },
+        state.peer_id
+    );
     if uploaded_tlk_shares > 0 {
         println!(
             "uploaded {} self-addressed TLK share(s)",
             uploaded_tlk_shares
         );
     }
-    if awaiting_reason.is_none() {
+    if awaiting_reason.is_none() && !repair {
         println!("verified self recovery; retired the recovered sponsor key");
     }
     if let Some(reason) = awaiting_reason {
@@ -581,12 +688,26 @@ fn command_sync(
     let client = octagon::OctagonClient::new(&account, &device, &anisette, backend)?;
     eprintln!("Fetching and decrypting Passwords and Manatee zones…");
     let projection = client.sync_credentials(&state)?;
+    save_synced_projection(projection, &config, backend, store)
+}
+
+fn save_synced_projection(
+    projection: credential::Projection,
+    config: &Config,
+    backend: &dyn SecurityBackend,
+    store: &StateStore<'_>,
+) -> Result<()> {
     let count = projection.credentials.len();
-    let passkeys = projection
-        .passkeys
-        .into_iter()
-        .map(|passkey| passkey.import(backend))
-        .collect::<Result<Vec<_>>>()?;
+    let previous = store.load_vault()?;
+    let passkeys = passkey::reconcile_synced_passkeys(
+        projection.passkeys,
+        previous
+            .as_ref()
+            .map(|v| v.passkeys.as_slice())
+            .unwrap_or_default(),
+        backend,
+        config.credential_broker.as_deref(),
+    )?;
     let passkey_count = passkeys.len();
     store.save_vault(&VaultState {
         schema_version: 1,
@@ -764,15 +885,39 @@ fn command_totp(id: &str, store: &StateStore<'_>) -> Result<()> {
 
 fn command_passkey(
     command: PasskeyCommand,
+    paths: &AppPaths,
+    config: &Config,
     backend: &dyn SecurityBackend,
     store: &StateStore<'_>,
 ) -> Result<()> {
     match command {
+        PasskeyCommand::Protect { id, socket } => {
+            let vault = require_vault(store)?;
+            let id = find_passkey(&vault.passkeys, &id)?.id.clone();
+            let socket = socket
+                .or_else(|| config.credential_broker.clone())
+                .unwrap_or_else(|| {
+                    PathBuf::from(format!(
+                        "/run/keychain/broker-{}.sock",
+                        keychain_sep_driver::peer::effective_uid()
+                    ))
+                });
+            eprintln!("Protecting the existing passkey; your desktop will ask for a fingerprint.");
+            let outcome =
+                keychain::protection::migrate_passkey(paths, backend, store, &id, &socket)?;
+            println!(
+                "protected passkey {} (revision {})",
+                outcome.record, outcome.revision
+            );
+            println!("browser broker: {}", socket.display());
+            println!("software recovery copy retained; no Apple records changed");
+            Ok(())
+        }
         PasskeyCommand::Assert {
             id,
             challenge,
             origin,
-        } => command_passkey_assert(&id, &challenge, &origin, backend, store),
+        } => command_passkey_assert(&id, &challenge, &origin, config, backend, store),
     }
 }
 
@@ -780,6 +925,7 @@ fn command_passkey_assert(
     id: &str,
     challenge: &str,
     origin: &str,
+    config: &Config,
     backend: &dyn SecurityBackend,
     store: &StateStore<'_>,
 ) -> Result<()> {
@@ -789,6 +935,26 @@ fn command_passkey_assert(
     eprintln!("relying party: {}", credential::printable(&item.rp_id));
     eprintln!("origin: {}", credential::printable(origin));
     eprintln!("account: {}", credential::printable(&item.username));
+    if keychain::protection::is_broker_key(&item.signing_key) {
+        let socket=config.credential_broker.as_ref().ok_or_else(||Error::Config(
+            "this passkey requires its credential broker; resume `keychain passkey protect` if migration was interrupted".into()))?;
+        let details = serde_json::json!({"challenge":challenge,"rpId":item.rp_id,
+            "allowCredentials":[{"type":"public-key","id":item.credential_id}],"userVerification":"required",
+            "extensions":{"remoteDesktopClientOverride":{"origin":origin,"sameOriginWithAncestors":true}}});
+        let result = keychain::broker::call(
+            socket,
+            keychain::broker::Operation::Assert {
+                record: item.id.clone(),
+                request_details_json: details.to_string(),
+            },
+        )?;
+        let response = result
+            .get("responseJson")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| Error::Security("broker returned no assertion".into()))?;
+        println!("{response}");
+        return Ok(());
+    }
     let answer = prompt_line("Approve this sign-in? [y/N]: ")?;
     if !matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
         return Err(Error::Refused("passkey sign-in was not approved".into()));
@@ -862,15 +1028,47 @@ fn command_status(
         }
         None => println!("vault: empty"),
     }
+    if let Some(repair) = store.load_trust_repair()? {
+        println!(
+            "Octagon trust repair: {:?}; retained peer identities: {}",
+            repair.phase(),
+            repair.retained().len()
+        );
+        if repair.phase() != keychain::recovery::RepairPhase::Committed {
+            println!("resume trust repair: keychain join --repair");
+        }
+    }
     Ok(())
 }
 
 fn command_logout(
     forget_device: bool,
     paths: &AppPaths,
+    config: &Config,
     backend: &dyn SecurityBackend,
     store: &StateStore<'_>,
 ) -> Result<()> {
+    let repair = match store.load_trust_repair() {
+        Ok(repair) => repair,
+        Err(error) if forget_device => {
+            eprintln!(
+                "warning: trust-repair state could not be decoded ({error}); performing the requested full local reset"
+            );
+            None
+        }
+        Err(error) => return Err(error),
+    };
+    if let Some(socket) = &config.credential_broker {
+        let updated = keychain::broker::call(
+            socket,
+            keychain::broker::Operation::SetSyncedInventory { records: vec![] },
+        )?;
+        if updated.get("updated").and_then(serde_json::Value::as_bool) != Some(true) {
+            return Err(Error::Security(
+                "broker did not disable account-synced passkeys".into(),
+            ));
+        }
+    }
     match store.load_vault() {
         Ok(Some(vault)) => {
             for passkey in &vault.passkeys {
@@ -895,14 +1093,26 @@ fn command_logout(
         }
         Err(error) => return Err(error),
     }
+    if let Some(repair) = repair {
+        destroy_octagon_keys(backend, repair.candidate());
+        for state in repair.retained() {
+            destroy_octagon_keys(backend, state);
+        }
+    }
     for path in [
         paths.account_file(),
         paths.octagon_file(),
+        paths.trust_repair_file(),
         paths.vault_file(),
+        paths.previous_vault_file(),
     ] {
         store.remove_if_exists(&path)?;
     }
     if forget_device {
+        if paths.protection_dir().exists() {
+            std::fs::remove_dir_all(paths.protection_dir())
+                .map_err(|e| Error::io(paths.protection_dir(), e))?;
+        }
         for path in [
             paths.device_file(),
             paths.keys_file(),
@@ -1291,6 +1501,64 @@ mod tests {
     use keychain::security::{KeyUsage, Purpose};
 
     #[test]
+    fn trust_repair_is_an_explicit_join_option() -> Result<()> {
+        for args in [
+            vec!["keychain", "join"],
+            vec!["keychain", "join", "--repair", "--bottle", "test-bottle"],
+        ] {
+            let cli = Cli::try_parse_from(&args).map_err(|e| Error::Config(e.to_string()))?;
+            let Command::Join { repair, bottle } = cli.command else {
+                panic!("expected join")
+            };
+            assert_eq!(repair, args.contains(&"--repair"));
+            assert_eq!(bottle.is_some(), repair);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn logout_removes_pending_repair_and_retained_peer_keys() -> Result<()> {
+        use keychain::model::MobileMeState;
+        use keychain::recovery::TrustRepair;
+        let directory = tempfile::tempdir().map_err(|e| Error::io("fixture", e))?;
+        let paths = AppPaths::new(
+            directory.path().join("config"),
+            directory.path().join("state"),
+            directory.path().join("runtime"),
+        )?;
+        let backend = SoftwareFileBackend::new(paths.clone());
+        let store = StateStore::new(&paths, &backend);
+        let account = AccountState {
+            schema_version: 1,
+            username: "test@example.com".into(),
+            adsid: "test".into(),
+            logged_in_at: 1,
+            mobileme: MobileMeState::default(),
+            webservices: BTreeMap::new(),
+        };
+        let device = DeviceIdentity {
+            schema_version: 1,
+            device_id: "test".into(),
+            serial: "test".into(),
+            local_user_uuid: "test".into(),
+        };
+        let (mut original, _) = octagon::ensure_peer_identity(None, &account, &device, &backend)?;
+        original.trust_state = OctagonTrustState::Joined;
+        store.save_octagon(&original)?;
+        let repair = TrustRepair::prepare(&store, &account, &device, &backend)?;
+        let replacement = repair.candidate().clone();
+        command_logout(false, &paths, &Config::default(), &backend, &store)?;
+        assert!(!paths.trust_repair_file().exists());
+        assert!(!paths.octagon_file().exists());
+        assert!(backend.public_spki(&original.signing_key).is_err());
+        assert!(backend.public_x963(&original.encryption_key).is_err());
+        assert!(backend.public_spki(&replacement.signing_key).is_err());
+        assert!(backend.public_x963(&replacement.encryption_key).is_err());
+        assert!(paths.software_key_file().exists());
+        Ok(())
+    }
+
+    #[test]
     fn full_logout_recovers_from_an_obsolete_octagon_layout() {
         let root = tempfile::tempdir().unwrap_or_else(|error| panic!("tempdir: {error}"));
         let paths = AppPaths::new(
@@ -1310,7 +1578,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("write obsolete state: {error}"));
         let store = StateStore::new(&paths, &backend);
 
-        command_logout(true, &paths, &backend, &store)
+        command_logout(true, &paths, &Config::default(), &backend, &store)
             .unwrap_or_else(|error| panic!("full logout: {error}"));
 
         for path in [

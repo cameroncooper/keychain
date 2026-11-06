@@ -1,0 +1,29 @@
+[Unit]
+Description=Keychain SEP operation broker for explicitly paired UID %i
+Requires=keychain-broker@%i.socket
+After=keychain-broker@%i.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/libexec/keychain/keychain-broker --registry /var/lib/keychain-broker/%i --owner %i serve
+User=root
+Group=root
+StateDirectory=keychain-broker/%i
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=tmpfs
+# Keep the paired user's runtime directory visible so recreated agent sockets
+# work after an agent restart. Other home/runtime directories stay hidden.
+BindReadOnlyPaths=/run/user/%i
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX
+DevicePolicy=closed
+DeviceAllow=/dev/sep-bio rw
+LimitCORE=0
+LimitMEMLOCK=1M
+TimeoutStopSec=10

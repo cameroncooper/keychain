@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use crate::Result;
 use crate::proto::{Fields, Value, Writer, decode_fields, first_bytes, first_string, first_u64};
+use crate::{Error, Result};
 
 pub const KEYCHAIN_ZONES: &[&str] = &[
     "Passwords",
@@ -183,10 +183,32 @@ pub fn parse_retrieve_changes_response(raw: &[u8]) -> Result<ChangesPage> {
             records.push(parse_record(record)?);
         }
     }
+    let status = match fields.get(&4).and_then(|values| values.last()) {
+        Some(Value::Varint(status @ (1 | 3))) => *status,
+        _ => {
+            return Err(Error::InvalidData(
+                "CKKS response has no recognized page completion status".into(),
+            ));
+        }
+    };
+    let continuation = match fields.get(&2).and_then(|values| values.last()) {
+        Some(Value::Bytes(value)) => Some(value.clone()),
+        None => None,
+        _ => {
+            return Err(Error::InvalidData(
+                "invalid CKKS continuation wire type".into(),
+            ));
+        }
+    };
+    if status == 1 && continuation.as_ref().is_none_or(|token| token.is_empty()) {
+        return Err(Error::InvalidData(
+            "CKKS continuation page omitted its token".into(),
+        ));
+    }
     Ok(ChangesPage {
         records,
-        continuation: first_bytes(&fields, 2).map(ToOwned::to_owned),
-        status: first_u64(&fields, 4).unwrap_or_default(),
+        continuation,
+        status,
     })
 }
 
@@ -211,6 +233,25 @@ fn repeated_bytes(fields: &Fields, field: u32) -> impl Iterator<Item = &[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn incomplete_or_unrecognized_pages_cannot_be_empty_snapshots() {
+        for raw in [
+            vec![],
+            Writer::new().uint64(4, 0).finish(),
+            Writer::new().uint64(4, 1).finish(),
+        ] {
+            assert!(parse_retrieve_changes_response(&raw).is_err());
+        }
+        assert!(parse_retrieve_changes_response(&Writer::new().uint64(4, 3).finish()).is_ok());
+    }
+    #[test]
+    fn streamed_singular_status_and_token_fields_follow_protobuf_last_wins() {
+        let mut raw = Writer::new().uint64(4, 1).bytes(2, b"NEXT").finish();
+        raw.extend(Writer::new().uint64(4, 3).bytes(2, b"FINAL").finish());
+        let page = parse_retrieve_changes_response(&raw).unwrap_or_else(|e| panic!("page: {e}"));
+        assert_eq!(page.status, 3);
+        assert_eq!(page.continuation.as_deref(), Some(b"FINAL".as_slice()));
+    }
 
     fn value_string(value: &str) -> Vec<u8> {
         Writer::new().uint64(1, 3).string(7, value).finish()

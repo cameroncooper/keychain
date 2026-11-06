@@ -7,7 +7,23 @@ description = "Read-only Apple Passwords client for Linux"
 license = "MIT"
 publish = false
 
+[workspace]
+members = ["crates/sep-driver"]
+resolver = "2"
+
+[features]
+desktop-agent = ["dep:gtk4"]
+
+[[bin]]
+name = "keychain-auth-agent"
+path = "src/bin/keychain-auth-agent.rs"
+required-features = ["desktop-agent"]
+
 [dependencies]
+keychain-sep-driver = { path = "crates/sep-driver" }
+gtk4 = { version = "0.9", optional = true }
+zbus = "=4.4.0"
+listenfd = "1"
 aes = "0.8"
 aes-gcm = "0.10"
 aes-siv = "0.7"
@@ -26,7 +42,7 @@ libc = "0.2"
 num-bigint = { version = "0.4", features = ["rand"] }
 num-traits = "0.2"
 p384 = { version = "0.13", features = ["ecdh", "ecdsa", "pkcs8"] }
-p256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+p256 = { version = "0.13", features = ["ecdh", "ecdsa", "pkcs8"] }
 pbkdf2 = "0.12"
 plist = "1.7"
 rand = "0.8"

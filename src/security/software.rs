@@ -24,7 +24,8 @@ use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
 use super::{BackendCapabilities, KeyAlgorithm, KeyRef, KeyUsage, Purpose, SecurityBackend};
-use crate::paths::{AppPaths, atomic_write_private, create_private_exclusive, read_bounded};
+use super::{FileRootKeySource, RootKeySource};
+use crate::paths::{AppPaths, atomic_write_private, read_bounded};
 use crate::{Error, Result};
 
 const BACKEND_ID: &str = "software-file-v1";
@@ -57,50 +58,25 @@ struct KeyDatabase {
 pub struct SoftwareFileBackend {
     paths: AppPaths,
     keys_lock: Mutex<()>,
+    root_source: Box<dyn RootKeySource>,
 }
 
 impl SoftwareFileBackend {
     pub fn new(paths: AppPaths) -> Self {
+        let root_source = Box::new(FileRootKeySource::new(paths.clone()));
+        Self::with_root_source(paths, root_source)
+    }
+
+    pub fn with_root_source(paths: AppPaths, root_source: Box<dyn RootKeySource>) -> Self {
         Self {
             paths,
             keys_lock: Mutex::new(()),
+            root_source,
         }
-    }
-
-    fn has_encrypted_state(&self) -> bool {
-        [
-            self.paths.keys_file(),
-            self.paths.account_file(),
-            self.paths.device_file(),
-            self.paths.octagon_file(),
-            self.paths.vault_file(),
-        ]
-        .iter()
-        .any(|path| path.exists())
     }
 
     fn root_key(&self) -> Result<Zeroizing<[u8; 32]>> {
-        let path = self.paths.software_key_file();
-        if path.exists() {
-            let bytes = read_bounded(&path)?;
-            let key: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-                Error::Security(format!("{} is not a 32-byte root key", path.display()))
-            })?;
-            return Ok(Zeroizing::new(key));
-        }
-        if self.has_encrypted_state() {
-            return Err(Error::Security(format!(
-                "{} is missing while encrypted state exists; refusing to generate a replacement",
-                path.display()
-            )));
-        }
-        let mut key = Zeroizing::new([0_u8; 32]);
-        OsRng.fill_bytes(&mut *key);
-        match create_private_exclusive(&path, key.as_slice()) {
-            Ok(()) => Ok(key),
-            Err(_) if path.exists() => self.root_key(),
-            Err(err) => Err(err),
-        }
+        self.root_source.root_key()
     }
 
     fn purpose_key(&self, purpose: Purpose) -> Result<Zeroizing<[u8; 32]>> {
@@ -340,6 +316,30 @@ impl SoftwareFileBackend {
 }
 
 impl SecurityBackend for SoftwareFileBackend {
+    fn prepare_passkey_protection(
+        &self,
+        credential: &crate::model::PasskeyCredential,
+        recipient: &crate::broker::registry::Recipient,
+        owner: u32,
+        expected_revision: u64,
+    ) -> Result<crate::broker::registry::ProtectedImport> {
+        if credential.provenance != crate::model::PasskeyProvenance::Synced {
+            return Err(Error::Refused(
+                "device-bound keys cannot be migrated as synced scalars".into(),
+            ));
+        }
+        let key = self.key_secret_p256(&credential.signing_key, Some(KeyUsage::WebAuthnSigning))?;
+        let scalar = Zeroizing::new(key.to_bytes());
+        drop(key);
+        crate::broker::registry::ProtectedImport::seal_scalar(
+            owner,
+            recipient,
+            expected_revision,
+            credential.clone(),
+            &scalar,
+            false,
+        )
+    }
     fn backend_id(&self) -> &'static str {
         BACKEND_ID
     }

@@ -1,3 +1,6 @@
+pub mod authorization;
+mod root;
+pub mod sep;
 mod software;
 
 use serde::{Deserialize, Serialize};
@@ -5,7 +8,21 @@ use zeroize::Zeroizing;
 
 use crate::Result;
 
+pub use root::{FileRootKeySource, RootKeySource};
 pub use software::SoftwareFileBackend;
+
+/// Shared selection path for all entry points. Unsupported protection fails closed.
+pub fn backend_for_config(
+    config: &crate::config::Config,
+    paths: &crate::paths::AppPaths,
+) -> Result<Box<dyn SecurityBackend>> {
+    match config.security_backend.as_str() {
+        "software-file" => Ok(Box::new(SoftwareFileBackend::new(paths.clone()))),
+        name => Err(crate::Error::Config(format!(
+            "security backend {name} is not available in this build"
+        ))),
+    }
+}
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -41,6 +58,8 @@ pub enum Purpose {
     Device = 3,
     Octagon = 4,
     Vault = 5,
+    ProtectionMigration = 6,
+    TrustRepair = 7,
 }
 
 impl Purpose {
@@ -51,6 +70,8 @@ impl Purpose {
             3 => Ok(Self::Device),
             4 => Ok(Self::Octagon),
             5 => Ok(Self::Vault),
+            6 => Ok(Self::ProtectionMigration),
+            7 => Ok(Self::TrustRepair),
             _ => Err(crate::Error::InvalidData(format!(
                 "unknown encrypted-state purpose {value}"
             ))),
@@ -64,6 +85,8 @@ impl Purpose {
             Self::Device => b"device",
             Self::Octagon => b"octagon",
             Self::Vault => b"vault",
+            Self::ProtectionMigration => b"protection-migration",
+            Self::TrustRepair => b"trust-repair",
         }
     }
 }
@@ -83,6 +106,30 @@ pub struct BackendCapabilities {
 pub trait SecurityBackend: Send + Sync {
     fn backend_id(&self) -> &'static str;
     fn capabilities(&self) -> BackendCapabilities;
+    fn protection_capabilities(&self) -> authorization::ProtectionCapabilities {
+        authorization::ProtectionCapabilities::default()
+    }
+    /// Explicit selected-item migration. Return a recipient-encrypted request,
+    /// never an exported scalar. Unsupported/non-exportable backends refuse.
+    fn prepare_passkey_protection(
+        &self,
+        _credential: &crate::model::PasskeyCredential,
+        _recipient: &crate::broker::registry::Recipient,
+        _owner: u32,
+        _expected_revision: u64,
+    ) -> Result<crate::broker::registry::ProtectedImport> {
+        Err(crate::Error::Refused(
+            "this backend cannot migrate a synced passkey".into(),
+        ))
+    }
+    fn sign_p256_authorized(
+        &self,
+        key: &KeyRef,
+        message: &[u8],
+        requirement: authorization::AuthorizationRequirement,
+    ) -> Result<authorization::AuthorizedSignature> {
+        authorization::software_sign(self, key, message, requirement)
+    }
     fn seal(&self, purpose: Purpose, plaintext: &[u8]) -> Result<Vec<u8>>;
     fn open(&self, purpose: Purpose, envelope: &[u8]) -> Result<Zeroizing<Vec<u8>>>;
     fn generate_p384(&self, usage: KeyUsage) -> Result<KeyRef>;

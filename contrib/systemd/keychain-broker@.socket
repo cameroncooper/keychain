@@ -1,0 +1,13 @@
+[Unit]
+Description=Keychain operation socket for explicitly paired UID %i
+
+[Socket]
+ListenStream=/run/keychain/broker-%i.sock
+SocketUser=%i
+SocketMode=0600
+DirectoryMode=0755
+Service=keychain-broker@%i.service
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

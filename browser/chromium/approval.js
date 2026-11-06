@@ -48,6 +48,11 @@ async function load() {
     return;
   }
   const inspection = reply.pending.inspection;
+  if (inspection.biometric === true) {
+    document.querySelector("h1").textContent = "Choose an account";
+    document.querySelector("#notice").textContent = "Your desktop will ask for a fingerprint after you choose an account.";
+    approveButton.textContent = "Use passkey";
+  }
   site.textContent = inspection.rpId;
   origin.textContent = inspection.origin;
   inspection.candidates.forEach((candidate, index) => {
