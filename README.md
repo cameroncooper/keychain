@@ -224,9 +224,35 @@ The current [SEP completion design](SEP-IMPLEMENTATION.md) covers native signing
 protection, the desktop authentication prompt, migration, and both iCloud/device-only creation.
 The Rust driver/provider, broker, desktop prompt and synthetic migration/native-host path have
 [application-side hardware evidence](docs/SEP-APPLICATION-VALIDATION.md). Build the optional agent
-with `cargo build --release --features desktop-agent` (requires GTK development files). See
+with `cargo build --release --features desktop-agent --bins` (GPUI-kit; no GTK dependency). See
 [service deployment](contrib/SEP-SERVICES.md) and [selected migration](docs/SEP-MIGRATION.md).
 Installed service activation has passed; real browser validation and source retirement remain pending.
 
 See [SEP-INTEGRATION.md](SEP-INTEGRATION.md) for the proven biometric signing mechanism, backend integration guidance,
 and the remaining requirements for SEP-protected keys and passkeys.
+
+## Desktop app
+
+Build the native GPUI-kit app and authentication agent:
+
+```sh
+cargo build --release --locked --features desktop-agent --bins
+./target/release/keychain gui
+```
+
+`keychain gui` launches the adjacent `keychain-gui` executable. The CLI and services
+remain usable without compiling the optional desktop UI. For the app alone, use
+`--features desktop-ui --bins`.
+
+The app has All, Passwords, Passkeys and Codes filters, search, and credential details.
+It reads the same local inventory as `keychain list`, including device-bound passkeys.
+Refresh reloads local items; use `keychain sync` to fetch iCloud changes. Password,
+notes and current-code reveal is explicit and selected-field only; protected logins
+use the broker's fingerprint prompt. Revealed fields hide after 30 seconds, code
+expiry, selection/search changes, window deactivation or Escape. No secret is copied
+to the clipboard automatically. Apple editing/deletion and sync setup remain CLI work.
+
+The small authentication window uses the same GPUI UI stack but runs in its separate
+D-Bus activated agent. Reinstall the service artifacts to switch the installed GTK
+agent to GPUI; building alone does not replace installed services. See
+[desktop UI design](docs/DESKTOP-UI.md) for the security boundaries and remaining work.

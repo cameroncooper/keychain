@@ -3,7 +3,7 @@
 Status: Rust MVP implemented; live login, join, ADP sync, and Chromium WebAuthn validated
 Target: Asahi Linux on Apple silicon
 Implementation language: Rust
-Primary interface: `keychain` CLI
+Primary interfaces: `keychain` CLI and optional `keychain gui` desktop app
 
 ## Decision summary
 
@@ -587,3 +587,12 @@ These should be answered with small probes before they become architectural comm
 The implemented defaults are: one CLI process, managed loopback/on-demand anisette, a software-file
 root key until SEP is available, no Apple-password saving, no background daemon, and one encrypted
 typed snapshot for passwords, TOTP configuration, and passkey metadata.
+
+## Native desktop presentation
+
+The optional GPUI-kit desktop stack provides `keychain gui` (a searchable local
+inventory with deliberate field reveal) and replaces the GTK authentication agent.
+The inventory selection/merging code is shared with the CLI. The browser app and
+prompt remain unprivileged; all protected-item policy stays in the existing root
+broker. See [DESKTOP-UI.md](docs/DESKTOP-UI.md) for UI scope, requester-identity and
+renderer-memory limits, and [SEP-SERVICES.md](contrib/SEP-SERVICES.md) for deployment.

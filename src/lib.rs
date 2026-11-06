@@ -3,7 +3,10 @@ pub mod broker;
 pub mod browser;
 pub mod config;
 pub mod credential;
+#[cfg(feature = "desktop-ui")]
+pub mod desktop;
 pub mod error;
+pub mod inventory;
 pub mod model;
 pub mod passkey;
 pub mod paths;

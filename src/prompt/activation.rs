@@ -155,7 +155,7 @@ pub(crate) fn ensure_running(canceled: &AtomicBool) -> io::Result<()> {
     )
 }
 
-/// Called after GTK initialization and listener setup. Holding this connection
+/// Called after GPUI initialization and listener setup. Holding this connection
 /// owns the activation name; no authentication/success method is registered.
 pub fn claim_name() -> io::Result<zbus::Connection> {
     let owner = keychain_sep_driver::peer::effective_uid();

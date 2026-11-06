@@ -1,6 +1,6 @@
 # SEP broker and desktop-agent deployment
 
-The user-session GTK agent and privileged operation broker are separate binaries.
+The user-session GPUI agent and privileged operation broker are separate binaries.
 Build and stage the exact install before applying it:
 
 ```sh
@@ -61,7 +61,7 @@ The unprivileged CLI/native host activates the fixed name in its own checked
 It ignores environment-supplied bus addresses, checks the private runtime and
 socket owner, and bounds the full asynchronous probe/start path to five seconds
 with cancellation checks. Activation alone never presents a dialog or starts
-capture. The bus name is claimed after GTK initialization and listener setup;
+capture. The bus name is claimed after GPUI initialization and listener setup;
 there are no D-Bus authentication/success methods. The broker still checks the
 agent's kernel peer and requires the actual window-visible acknowledgement before
 capture. The user bus on the development machine rejects root connections, so the
@@ -151,3 +151,17 @@ intentionally ignored), plus 21 privileged library tests run separately.
 Formatting, strict Clippy, staged unit verification and release builds passed.
 The production credential/write gates remain unchanged. Real prompt/capture,
 biometric cancellation/session-lock and Apple-account acceptance remain open.
+
+## GPUI desktop migration
+
+The optional agent now uses GPUI-kit instead of GTK. The socket protocol, D-Bus
+activation name, unit, root-peer validation and SEP authorization remain the same.
+Build with `cargo build --release --locked --features desktop-agent --bins` and run
+the installer above to replace the installed agent. Wait for active authentication
+operations to finish before stopping an older user agent; use
+`systemctl --user daemon-reload` after installation. GPUI's event loop stays alive
+between windows and quits after the existing idle timeout.
+
+The normal credential browser is a separate `keychain-gui` binary launched by
+`keychain gui`; it is not a system service. See [desktop design](../docs/DESKTOP-UI.md)
+for reveal limits and the optional Hyprland placement rule.

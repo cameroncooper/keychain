@@ -8,6 +8,9 @@ use keychain::apple::anisette::{ManagedAnisette, validate_helper};
 use keychain::apple::{anisette, auth, cloudkit, escrow, octagon};
 use keychain::config::Config;
 use keychain::credential;
+#[cfg(test)]
+use keychain::inventory::merge_native_inventory;
+use keychain::inventory::visible_index;
 use keychain::model::{
     AccountState, Credential, DeviceIdentity, OctagonState, OctagonTrustState, PasskeyCredential,
     VaultState,
@@ -35,6 +38,8 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Open the desktop credential browser.
+    Gui,
     /// Configure or inspect the on-demand anisette helper.
     Anisette {
         #[command(subcommand)]
@@ -136,13 +141,27 @@ fn main() {
     }
 }
 
+fn launch_gui() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+    let executable = std::env::current_exe().map_err(|e| Error::io("keychain executable", e))?;
+    let gui = executable.with_file_name("keychain-gui");
+    if !gui.is_file() {
+        return Err(Error::Config("desktop UI is not installed alongside keychain; build with `cargo build --release --features desktop-agent --bins`".into()));
+    }
+    Err(Error::io(&gui, std::process::Command::new(&gui).exec()))
+}
+
 fn run(cli: Cli) -> Result<()> {
+    if matches!(cli.command, Command::Gui) {
+        return launch_gui();
+    }
     let paths = AppPaths::discover()?;
     let config = Config::load(&paths)?;
     let selected_backend = backend_for_config(&config, &paths)?;
     let backend = selected_backend.as_ref();
     let store = StateStore::new(&paths, backend);
     match cli.command {
+        Command::Gui => unreachable!("GUI dispatched before loading account state"),
         Command::Anisette { command } => command_anisette(command, &paths, config),
         Command::Setup { username, bottle } => {
             let _lock = StateLock::acquire(&paths)?;
@@ -1416,96 +1435,6 @@ fn refuse_missing_login_match(
         return Err(Error::Refused(
             "selected protected login is missing or disabled; refusing software fallback".into(),
         ));
-    }
-    Ok(())
-}
-
-fn visible_index(config: &Config, store: &StateStore<'_>) -> Result<keychain::store::VaultIndex> {
-    let mut index = match store.load_index()? {
-        Some(index) => index,
-        None if !store.has_vault()? => keychain::store::VaultIndex {
-            schema_version: 1,
-            source_sha256: String::new(),
-            protected_login_ids: vec![],
-            credentials: vec![],
-            passkeys: vec![],
-        },
-        None if config.protected_logins.is_empty() => {
-            keychain::store::VaultIndex::from_vault(&require_vault(store)?, String::new())
-        }
-        None => {
-            return Err(Error::Refused(
-                "protected cache metadata is missing; resume protection to repair it".into(),
-            ));
-        }
-    };
-    if index
-        .protected_login_ids
-        .iter()
-        .any(|id| !config.protected_logins.iter().any(|route| &route.id == id))
-    {
-        return Err(Error::Refused(
-            "protected login routing is missing; resume protection to restore it".into(),
-        ));
-    }
-    index.credentials.retain(|item| {
-        !config
-            .protected_logins
-            .iter()
-            .any(|route| route.id == item.id)
-    });
-    if let Some(socket) = &config.credential_broker {
-        let native: Vec<PasskeyCredential> = serde_json::from_value(keychain::broker::call(
-            socket,
-            keychain::broker::Operation::ListCredentials,
-        )?)?;
-        let mut metadata = VaultState {
-            schema_version: 1,
-            synced_at: 0,
-            credentials: vec![],
-            passkeys: std::mem::take(&mut index.passkeys),
-        };
-        merge_native_inventory(&mut metadata, native)?;
-        index.passkeys = std::mem::take(&mut metadata.passkeys);
-        for login in keychain::protection::login::inventory(config)? {
-            if index
-                .passkeys
-                .iter()
-                .any(|item| item.id == login.metadata.id)
-            {
-                return Err(Error::Security("login/passkey inventory collision".into()));
-            }
-            index.credentials.push(login.metadata);
-        }
-    }
-    Ok(index)
-}
-
-fn merge_native_inventory(vault: &mut VaultState, records: Vec<PasskeyCredential>) -> Result<()> {
-    use keychain::model::PasskeyProvenance;
-    let mut seen = std::collections::BTreeSet::new();
-    for record in records {
-        if !seen.insert(record.id.clone()) {
-            return Err(Error::Security("duplicate broker inventory record".into()));
-        }
-        if record.provenance != PasskeyProvenance::DeviceBound {
-            continue;
-        }
-        if let Some(previous) = vault.passkeys.iter_mut().find(|p| p.id == record.id) {
-            if previous.provenance != PasskeyProvenance::DeviceBound
-                || previous.signing_key != record.signing_key
-                || previous.rp_id != record.rp_id
-                || previous.credential_id != record.credential_id
-                || previous.user_handle != record.user_handle
-            {
-                return Err(Error::Security(
-                    "broker native credential collides with a different local identity".into(),
-                ));
-            }
-            *previous = record;
-        } else {
-            vault.passkeys.push(record);
-        }
     }
     Ok(())
 }
