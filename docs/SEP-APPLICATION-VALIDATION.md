@@ -289,3 +289,8 @@ are recorded in [login acceptance](SEP-LOGIN-REVEAL.md#live-synthetic-login-acce
 This supersedes the earlier absence of any hardware login/TOTP reveal evidence,
 not the remaining real-account migration, session-lock, browser or reboot gates.
 No Apple requests, real credential reveal or source-copy retirement occurred.
+
+The subsequent separately authorized post-cancellation reveal also passed for the
+same revision 2, using a fresh client while the broker remained PID 427569. No
+broker restart or state reset intervened. This adds successful post-cancel use
+to the selected-login hardware evidence; it does not establish reboot persistence.

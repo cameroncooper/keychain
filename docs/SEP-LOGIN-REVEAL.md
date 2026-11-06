@@ -329,6 +329,11 @@ The client state is `.sep-check-login-20261106/check.json`, mode 0600.
    `--cancel-check` received the typed Canceled result, no successful field
    response, and verified that the active revision remained 2 with no pending
    mutation. A subsequent no-prompt broker status returned `sepDevice: available`.
+6. With renewed readiness, another fresh client process successfully revealed
+   revision 2 after that cancellation. The broker remained PID 427569 throughout
+   these runs; no broker restart, new recipient or state reset intervened. This
+   checks fresh authorization/device cleanup after cancellation in the same
+   broker process, rather than masking a stuck state by restarting it.
 
 Cancellation mode requires existing client state and unchanged committed revision
 2; it never initializes, verifies or updates another item. Unexpected success,

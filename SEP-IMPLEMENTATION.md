@@ -525,3 +525,10 @@ Cancel/Escape test returned no successful field response, preserved revision 2 a
 left the reader available. See [exact evidence and limits](docs/SEP-LOGIN-REVEAL.md#live-synthetic-login-acceptance--2026-11-06).
 This does not establish real CLI migration, session-lock/expiry, broker restart,
 reboot, browser or Apple-account/write acceptance. The complete goal remains open.
+
+The post-cancellation fresh-client reveal now also passes at revision 2, with the
+same broker process and no key/state reset. Main-profile recovery remains the
+next prerequisite for real WebAuthn migration: a local status recheck still shows
+an empty vault and Prepared trust repair with the prior peer retained. Resume
+that existing repair in the user's terminal; do not create another peer/recipient
+or treat the synthetic success as evidence that iCloud access is restored.
