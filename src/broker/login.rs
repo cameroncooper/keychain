@@ -347,13 +347,35 @@ impl Broker {
                 let revision = self.registry.import_login(self.owner, *import)?;
                 Ok(serde_json::json!({"revision":revision,"verified":false}))
             }
-            Operation::VerifyLogin { record } => {
+            Operation::ReplaceStagedLogin {
+                expected_content,
+                import,
+            } => {
+                if !self.allow_item_decrypt {
+                    return Err(ProviderError::UnsupportedPolicy.into());
+                }
+                if canceled.load(Ordering::Acquire) || !session.valid() {
+                    return Err(ProviderError::Canceled.into());
+                }
+                let revision =
+                    self.registry
+                        .replace_staged_login(self.owner, &expected_content, *import)?;
+                Ok(serde_json::json!({"revision":revision,"verified":false}))
+            }
+            Operation::VerifyLogin { selection } => {
                 if !self.allow_item_decrypt {
                     return Err(ProviderError::UnsupportedPolicy.into());
                 }
                 let record = self
                     .registry
-                    .login_verification_record(&record, self.owner)?;
+                    .login_verification_record(&selection.id, self.owner)?;
+                if record.revision != selection.revision
+                    || record.content_binding != selection.content_binding
+                {
+                    return Err(Error::Refused(
+                        "selected login changed before verification".into(),
+                    ));
+                }
                 let authorization = self.native_authorization(
                     Presentation {
                         id,
@@ -405,6 +427,7 @@ impl Broker {
         authorization.check()?;
         let bytes = envelope::item_view(memory.as_array(), length, &binding)?;
         let view = LoginView::parse(bytes, &record.metadata, &record.content_binding)?;
+        authorization.status("Finishing verification…")?;
         let result = operation(&view);
         drop(memory);
         authorization.check()?;
@@ -426,21 +449,8 @@ impl Broker {
             .active
             .try_lock()
             .map_err(|_| Error::Refused("another key operation is active".into()))?;
-        let record = self.registry.load_login(&selection.id, self.owner)?;
-        if record.revision != selection.revision
-            || record.content_binding != selection.content_binding
-        {
-            return Err(Error::Refused(
-                "selected login changed; select it again".into(),
-            ));
-        }
-        if !record.verified
-            || !self
-                .registry
-                .synced_record_enabled(&record.metadata.id, self.owner)?
-        {
-            return Err(Error::Refused("login is not verified".into()));
-        }
+        let selected = self.registry.select_login(self.owner, selection)?;
+        let record = selected.record();
         if field == RevealField::Totp && !record.metadata.has_totp {
             return Err(Error::Refused("login has no TOTP configured".into()));
         }
@@ -461,16 +471,16 @@ impl Broker {
             session,
             false,
         )?;
-        self.with_login(&record, &authorization, |view| {
-            let _update = self.registry.update_lock()?;
-            self.registry.check_current_login(&record)?;
-            authorization.check()?;
-            let at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| Error::Security("system clock predates Unix epoch".into()))?
-                .as_secs();
-            let output = RevealOutput::selected(&record, view, field, at)?;
-            deliver(&output, &|| authorization.check())
+        self.with_login(record, &authorization, |view| {
+            self.registry
+                .with_verified_login(&selected, &|| authorization.check(), || {
+                    let at = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map_err(|_| Error::Security("system clock predates Unix epoch".into()))?
+                        .as_secs();
+                    let output = RevealOutput::selected(record, view, field, at)?;
+                    deliver(&output, &|| authorization.check())
+                })
         })
     }
 

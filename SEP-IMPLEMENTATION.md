@@ -291,10 +291,10 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 218 passing tests, twenty-two ignored (three Apple network and nineteen privileged
-integration tests). Ten registry, five coordination and one account-bootstrap test passed separately as root, including
+Workspace checks: 223 passing tests, twenty-three ignored (three Apple network and twenty privileged
+integration tests). Eleven registry, five coordination and one account-bootstrap test passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
-The separate-UID worker and systemd startup tests also pass (eighteen privileged
+The separate-UID worker and systemd startup tests also pass (nineteen privileged
 library tests total).
 Eleven browser service-worker flow tests also pass. Strict Clippy is clean.
 The broker now exits after an idle interval without interrupting queued/active
@@ -479,6 +479,12 @@ now connected through a metadata-only authenticated cache index. Frozen keyed
 content tags prove exact source contents; recovery journals retain the encrypted
 source. Config publication precedes primary-cache redaction, and cache/index
 markers prevent lost-routing fallback. Unchanged/deleted logins share the managed
-sync inventory with passkeys. Changed-login verified update recovery and real
-biometric reveal still need completion. Complete crypto
+sync inventory with passkeys. Changed logins now freeze encrypted successors and
+publish pending routes without capture. The next explicit reveal checks and
+commits that exact successor through one biometric-decrypt lifetime, then displays
+only requested fields. Root staging replacement pins the old pending tag; recovery
+retains superseded ciphertexts and refuses known loss/rollback. Tests cover repeated
+changes, lost replies, publication faults, concurrent pending commit, bounded history
+and cancellation before/after commit. Real biometric reveal/update still needs
+completion; synthetic stand-ins do not prove one-fingerprint hardware behavior. Complete crypto
 stack erasure is not established.

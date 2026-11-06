@@ -14,13 +14,23 @@ use crate::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use zeroize::Zeroize;
+mod update;
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 enum Phase {
     Prepared,
+    Staged,
     BrokerVerified,
     Committed,
+}
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Version {
+    #[serde(default)]
+    verified: bool,
+    source: Credential,
+    prepared: LoginImport,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -32,13 +42,21 @@ struct Journal {
     source: Credential,
     prepared: LoginImport,
     phase: Phase,
+    #[serde(default)]
+    history: Vec<Version>,
 }
 fn path(paths: &AppPaths, id: &str) -> Result<PathBuf> {
     crate::paths::validate_record_id(id)?;
     Ok(paths.protection_dir().join(format!("login-{id}.enc")))
 }
 fn save(path: &Path, backend: &dyn SecurityBackend, journal: &Journal) -> Result<()> {
+    journal.validate()?;
     let bytes = zeroize::Zeroizing::new(serde_json::to_vec(journal)?);
+    if bytes.len() > 4 * 1024 * 1024 {
+        return Err(Error::Refused(
+            "login recovery history exceeds its limit".into(),
+        ));
+    }
     atomic_write_private(path, &backend.seal(Purpose::ProtectionMigration, &bytes)?)
 }
 fn validate_summary(journal: &Journal, summary: &LoginSummary) -> Result<()> {
@@ -52,6 +70,96 @@ fn validate_summary(journal: &Journal, summary: &LoginSummary) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+fn redacted(source: &Credential) -> Credential {
+    let mut value = source.clone();
+    value.protected = true;
+    value.password.zeroize();
+    value.notes.zeroize();
+    value.totp_uri.zeroize();
+    value
+}
+impl Journal {
+    fn versions(&self) -> impl Iterator<Item = (&Credential, &LoginImport)> {
+        std::iter::once((&self.source, &self.prepared)).chain(
+            self.history
+                .iter()
+                .map(|version| (&version.source, &version.prepared)),
+        )
+    }
+    fn current_matches(&self, summary: &LoginSummary) -> bool {
+        version_matches(&self.source, &self.prepared, summary)
+    }
+    fn recognizes(&self, summary: &LoginSummary) -> bool {
+        self.versions()
+            .any(|(source, prepared)| version_matches(source, prepared, summary))
+    }
+    fn route(&self) -> Result<LoginRoute> {
+        let route = LoginRoute {
+            id: self.source.id.clone(),
+            account_fingerprint: self.account_fingerprint.clone(),
+            recipient_id: self.prepared.recipient_id.clone(),
+            revision: self
+                .prepared
+                .expected_revision
+                .checked_add(1)
+                .ok_or_else(|| Error::InvalidData("login revision overflow".into()))?,
+            content_binding: self.prepared.content_binding.clone(),
+        };
+        route.validate()?;
+        Ok(route)
+    }
+    fn check_route(&self, route: &LoginRoute) -> Result<()> {
+        if route.account_fingerprint != self.account_fingerprint
+            || !self.versions().any(|(source, prepared)| {
+                source.id == route.id
+                    && prepared.recipient_id == route.recipient_id
+                    && prepared.content_binding == route.content_binding
+                    && prepared.expected_revision.checked_add(1) == Some(route.revision)
+            })
+        {
+            return Err(Error::Security(
+                "protected login route is outside its recovery history".into(),
+            ));
+        }
+        Ok(())
+    }
+    fn validate(&self) -> Result<()> {
+        if self.version != 1
+            || self.owner == 0
+            || !self.socket.is_absolute()
+            || self.history.len() > 64
+        {
+            return Err(Error::Security("invalid login recovery journal".into()));
+        }
+        self.route()?;
+        let mut seen = std::collections::BTreeSet::new();
+        for (source, prepared) in self.versions() {
+            if source.protected
+                || source.id != self.source.id
+                || prepared.metadata != LoginMetadata::from_credential(source)?
+                || prepared.recipient_id != self.prepared.recipient_id
+                || !(81..=4096).contains(&prepared.sealed.len())
+                || prepared.expected_revision.checked_add(1).is_none()
+                || prepared.content_binding.len() != 64
+                || hex::decode(&prepared.content_binding)
+                    .map(|value| hex::encode(value) != prepared.content_binding)
+                    .unwrap_or(true)
+                || !seen.insert(prepared.content_binding.as_str())
+            {
+                return Err(Error::Security("login recovery version mismatch".into()));
+            }
+        }
+        Ok(())
+    }
+}
+fn version_matches(source: &Credential, prepared: &LoginImport, summary: &LoginSummary) -> bool {
+    summary.metadata.id == source.id
+        && summary.metadata == prepared.metadata
+        && summary.recipient_id == prepared.recipient_id
+        && summary.content_binding == prepared.content_binding
+        && prepared.expected_revision.checked_add(1) == Some(summary.revision)
 }
 
 struct SourceIdentity<'a> {
@@ -134,21 +242,18 @@ fn migrate_with(
         .map_err(|e| Error::io(&journal_path, e))?
     {
         let sealed = read_bounded(&journal_path)?;
-        if sealed.len() > 65536 {
+        if sealed.len() > 4 * 1024 * 1024 {
             return Err(Error::InvalidData(
                 "login migration journal exceeds limit".into(),
             ));
         }
         let bytes = backend.open(Purpose::ProtectionMigration, &sealed)?;
         let journal: Journal = serde_json::from_slice(&bytes)?;
-        if journal.version != 1
-            || journal.owner != owner
+        journal.validate()?;
+        if journal.owner != owner
             || journal.socket != socket
             || journal.account_fingerprint != fingerprint
             || journal.source.id != id
-            || journal.prepared.metadata != LoginMetadata::from_credential(&journal.source)?
-            || journal.prepared.expected_revision != 0
-            || journal.prepared.content_binding.len() != 64
         {
             return Err(Error::Security(
                 "login migration journal identity/policy mismatch".into(),
@@ -185,47 +290,33 @@ fn migrate_with(
             source,
             prepared,
             phase: Phase::Prepared,
+            history: vec![],
         };
         save(&journal_path, backend, &journal)?;
         journal
     };
     let route = config.protected_logins.iter().find(|route| route.id == id);
     if let Some(route) = route {
-        if route.recipient_id != journal.prepared.recipient_id
-            || route.content_binding != journal.prepared.content_binding
-            || route.revision != 1
-        {
-            return Err(Error::Security("committed login route changed".into()));
-        }
+        journal.check_route(route)?;
     }
-    let mut redacted = journal.source.clone();
-    redacted.protected = true;
-    redacted.password.zeroize();
-    redacted.notes.zeroize();
-    redacted.totp_uri.zeroize();
-    if vault.credentials[selected] != journal.source
-        && (journal.phase == Phase::Prepared || vault.credentials[selected] != redacted)
-    {
+    let cache = &vault.credentials[selected];
+    if !journal.versions().any(|(source, _)| {
+        cache == source
+            || (journal.phase != Phase::Prepared || !journal.history.is_empty())
+                && cache == &redacted(source)
+    }) {
         return Err(Error::Refused(
             "source login changed during migration".into(),
         ));
     }
-    let state: LoginState =
-        serde_json::from_value(call(Operation::LoginProtectionState { record: id.into() })?)?;
-    for summary in [&state.active, &state.staged].into_iter().flatten() {
-        validate_summary(&journal, summary)?;
-    }
-    if state.active.is_none() && state.staged.is_none() {
-        if journal.phase != Phase::Prepared || route.is_some() {
-            return Err(Error::Refused(
-                "previously verified login is missing; refusing replacement".into(),
-            ));
-        }
-        call(Operation::ImportLogin {
-            import: Box::new(journal.prepared.clone()),
-        })?;
-    }
-    let verified = call(Operation::VerifyLogin { record: id.into() })?;
+    update::ensure_staged(&mut journal, &journal_path, backend, route, &mut call)?;
+    let verified = call(Operation::VerifyLogin {
+        selection: crate::broker::login::LoginSelection {
+            id: id.into(),
+            revision: journal.route()?.revision,
+            content_binding: journal.prepared.content_binding.clone(),
+        },
+    })?;
     let state: LoginState =
         serde_json::from_value(call(Operation::LoginProtectionState { record: id.into() })?)?;
     let active = state
@@ -283,8 +374,8 @@ fn migrate_with(
 }
 
 /// Reconcile a complete read snapshot without restoring protected source
-/// fields to the primary cache. Changed content requires an explicit verified
-/// update; until that flow is connected, reject the snapshot before mutation.
+/// fields to the primary cache. Changes stage a frozen encrypted successor;
+/// the next explicit reveal/protect supplies fresh biometric verification.
 pub fn reconcile_synced(
     incoming: Vec<Credential>,
     previous: &[Credential],
@@ -301,41 +392,49 @@ pub fn reconcile_synced(
         Error::AuthenticationRequired("protected login sync requires its account identity".into())
     })?;
     let fingerprint = crate::apple::octagon::account_fingerprint(&account);
-    let socket = config
-        .credential_broker
-        .as_ref()
-        .ok_or_else(|| Error::Config("protected logins require their credential broker".into()))?;
-    reconcile_with(incoming, config, &fingerprint, |id| {
-        let state: LoginState = serde_json::from_value(crate::broker::call(
-            socket,
-            Operation::LoginProtectionState { record: id.into() },
-        )?)?;
-        let journal_path = path(paths, id)?;
-        let sealed = read_bounded(&journal_path)?;
-        if sealed.len() > 65536 {
+    update::reconcile(
+        incoming,
+        config,
+        paths,
+        backend,
+        &fingerprint,
+        |operation| {
+            let socket = config
+                .credential_broker
+                .as_ref()
+                .ok_or_else(|| Error::Config("protected logins require their broker".into()))?;
+            crate::broker::call(socket, operation)
+        },
+    )
+}
+
+pub fn finish_synced(
+    paths: &AppPaths,
+    backend: &dyn SecurityBackend,
+    ids: &[String],
+) -> Result<()> {
+    for id in ids {
+        let file = path(paths, id)?;
+        let sealed = read_bounded(&file)?;
+        if sealed.len() > 4 * 1024 * 1024 {
             return Err(Error::InvalidData(
-                "login migration journal exceeds limit".into(),
+                "login recovery history exceeds limit".into(),
             ));
         }
         let plain = backend.open(Purpose::ProtectionMigration, &sealed)?;
-        let journal: Journal = serde_json::from_slice(&plain)?;
-        if journal.version != 1
-            || journal.owner != keychain_sep_driver::peer::effective_uid()
-            || journal.account_fingerprint != fingerprint
-            || journal.socket != *socket
-            || journal.source.id != id
-            || journal.phase == Phase::Prepared
-        {
+        let mut journal: Journal = serde_json::from_slice(&plain)?;
+        journal.validate()?;
+        if journal.owner != keychain_sep_driver::peer::effective_uid() || journal.source.id != *id {
             return Err(Error::Security(
-                "protected login journal identity mismatch".into(),
+                "login recovery checkpoint identity mismatch".into(),
             ));
         }
-        Ok((
-            state,
-            journal.source.clone(),
-            journal.prepared.content_binding.clone(),
-        ))
-    })
+        if journal.phase == Phase::BrokerVerified {
+            journal.phase = Phase::Committed;
+            save(&file, backend, &journal)?;
+        }
+    }
+    Ok(())
 }
 fn require_routes(previous: &[Credential], config: &Config) -> Result<()> {
     if previous.iter().any(|item| {
@@ -351,54 +450,6 @@ fn require_routes(previous: &[Credential], config: &Config) -> Result<()> {
     }
     Ok(())
 }
-fn reconcile_with(
-    incoming: Vec<Credential>,
-    config: &Config,
-    fingerprint: &str,
-    mut state: impl FnMut(&str) -> Result<(LoginState, Credential, String)>,
-) -> Result<(Vec<Credential>, Vec<String>)> {
-    let mut result = Vec::new();
-    let mut managed = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    for mut item in incoming {
-        if !seen.insert(item.id.clone()) {
-            return Err(Error::InvalidData("duplicate synced login record".into()));
-        }
-        if let Some(route) = config
-            .protected_logins
-            .iter()
-            .find(|route| route.id == item.id)
-        {
-            if route.account_fingerprint != fingerprint {
-                return Err(Error::Refused(
-                    "synced login belongs to a different protected account".into(),
-                ));
-            }
-            let (state, source, expected_content) = state(&item.id)?;
-            let active = state.active.ok_or_else(|| {
-                Error::Refused("protected login is missing; refusing software fallback".into())
-            })?;
-            if item != source
-                || expected_content != route.content_binding
-                || !route.matches(&active)
-                || state.staged.is_some()
-                || active.metadata != LoginMetadata::from_credential(&item)?
-            {
-                return Err(Error::Refused(
-                    "protected login update requires verification; cached items retained".into(),
-                ));
-            }
-            managed.push(item.id.clone());
-            item.protected = true;
-            item.password.zeroize();
-            item.notes.zeroize();
-            item.totp_uri.zeroize();
-        }
-        result.push(item);
-    }
-    Ok((result, managed))
-}
-
 /// Validate the configured routing against broker metadata only. Missing,
 /// disabled or changed records fail closed; never consult a recovery secret.
 pub fn inventory(config: &Config) -> Result<Vec<LoginSummary>> {
@@ -411,29 +462,12 @@ pub fn inventory(config: &Config) -> Result<Vec<LoginSummary>> {
         .ok_or_else(|| Error::Config("protected logins require their credential broker".into()))?;
     let summaries: Vec<LoginSummary> =
         serde_json::from_value(crate::broker::call(socket, Operation::ListLogins)?)?;
-    validate_inventory(config, summaries)
-}
-fn validate_inventory(config: &Config, summaries: Vec<LoginSummary>) -> Result<Vec<LoginSummary>> {
-    let mut visible = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    for summary in summaries {
-        if !seen.insert(summary.metadata.id.clone()) {
-            return Err(Error::Security("duplicate broker login".into()));
-        }
-        if let Some(route) = config
-            .protected_logins
-            .iter()
-            .find(|route| route.id == summary.metadata.id)
-        {
-            if !route.matches(&summary) {
-                return Err(Error::Refused(
-                    "protected login changed; refusing software fallback".into(),
-                ));
-            }
-            visible.push(summary);
-        }
-    }
-    Ok(visible)
+    update::inventory(config, summaries, |id| {
+        Ok(serde_json::from_value(crate::broker::call(
+            socket,
+            Operation::LoginProtectionState { record: id.into() },
+        )?)?)
+    })
 }
 
 #[cfg(test)]
@@ -445,15 +479,15 @@ mod tests {
     use crate::security::sep::ProviderError;
     use base64::{Engine, engine::general_purpose::STANDARD};
 
-    struct Fixture {
+    pub(super) struct Fixture {
         _directory: tempfile::TempDir,
-        paths: AppPaths,
-        backend: SoftwareFileBackend,
-        source: Credential,
-        fingerprint: String,
+        pub(super) paths: AppPaths,
+        pub(super) backend: SoftwareFileBackend,
+        pub(super) source: Credential,
+        pub(super) fingerprint: String,
     }
     impl Fixture {
-        fn new() -> Result<Self> {
+        pub(super) fn new() -> Result<Self> {
             let directory = tempfile::tempdir().map_err(|e| Error::io("test", e))?;
             let paths = AppPaths::for_test(directory.path())?;
             let backend = SoftwareFileBackend::new(paths.clone());
@@ -472,7 +506,7 @@ mod tests {
                 fingerprint: format!("SHA256:{}", STANDARD.encode([1u8; 32])),
             })
         }
-        fn run(&self, remote: &mut Remote) -> Result<super::super::MigrationOutcome> {
+        pub(super) fn run(&self, remote: &mut Remote) -> Result<super::super::MigrationOutcome> {
             migrate_with(
                 &self.paths,
                 &self.backend,
@@ -486,32 +520,32 @@ mod tests {
                 |op| remote.call(op),
             )
         }
-        fn cached(&self) -> Result<Credential> {
+        pub(super) fn cached(&self) -> Result<Credential> {
             Ok(StateStore::new(&self.paths, &self.backend)
                 .load_vault()?
                 .ok_or_else(|| Error::Security("missing test cache".into()))?
                 .credentials[0]
                 .clone())
         }
-        fn journal(&self) -> Result<Journal> {
+        pub(super) fn journal(&self) -> Result<Journal> {
             let data = read_bounded(&path(&self.paths, &self.source.id)?)?;
             Ok(serde_json::from_slice(
                 &self.backend.open(Purpose::ProtectionMigration, &data)?,
             )?)
         }
     }
-    struct Remote {
-        state: LoginState,
-        recipient: Recipient,
-        imports: usize,
-        verifies: usize,
-        lose_stage: bool,
-        lose_verify: bool,
-        fail_config: Option<PathBuf>,
-        fail_index: Option<PathBuf>,
+    pub(super) struct Remote {
+        pub(super) state: LoginState,
+        pub(super) recipient: Recipient,
+        pub(super) imports: usize,
+        pub(super) verifies: usize,
+        pub(super) lose_stage: bool,
+        pub(super) lose_verify: bool,
+        pub(super) fail_config: Option<PathBuf>,
+        pub(super) fail_index: Option<PathBuf>,
     }
     impl Remote {
-        fn new() -> Result<Self> {
+        pub(super) fn new() -> Result<Self> {
             Ok(Self {
                 state: LoginState {
                     active: None,
@@ -526,11 +560,22 @@ mod tests {
                 fail_index: None,
             })
         }
-        fn call(&mut self, operation: Operation) -> Result<serde_json::Value> {
+        pub(super) fn call(&mut self, operation: Operation) -> Result<serde_json::Value> {
             match operation {
                 Operation::LoginProtectionState { .. } => Ok(serde_json::to_value(&self.state)?),
                 Operation::ItemRecipient => Ok(serde_json::to_value(&self.recipient)?),
                 Operation::ImportLogin { import } => {
+                    if self.state.staged.is_some()
+                        || self
+                            .state
+                            .active
+                            .as_ref()
+                            .map(|active| active.revision)
+                            .unwrap_or(0)
+                            != import.expected_revision
+                    {
+                        return Err(Error::Refused("synthetic stale import".into()));
+                    }
                     self.imports += 1;
                     self.state.staged = Some(LoginSummary {
                         metadata: import.metadata,
@@ -544,7 +589,51 @@ mod tests {
                     }
                     Ok(serde_json::json!({"revision":1,"verified":false}))
                 }
-                Operation::VerifyLogin { .. } => {
+                Operation::ReplaceStagedLogin {
+                    expected_content,
+                    import,
+                } => {
+                    let pending = self
+                        .state
+                        .staged
+                        .as_ref()
+                        .ok_or_else(|| Error::Refused("synthetic missing stage".into()))?;
+                    if pending.content_binding != expected_content
+                        || self.state.active.as_ref().map(|active| active.revision)
+                            != Some(import.expected_revision)
+                    {
+                        return Err(Error::Refused("synthetic stale replacement".into()));
+                    }
+                    self.imports += 1;
+                    self.state.staged = Some(LoginSummary {
+                        metadata: import.metadata,
+                        recipient_id: import.recipient_id,
+                        content_binding: import.content_binding,
+                        revision: import.expected_revision + 1,
+                        verified: false,
+                    });
+                    if std::mem::take(&mut self.lose_stage) {
+                        return Err(ProviderError::AmbiguousCompletion.into());
+                    }
+                    Ok(
+                        serde_json::json!({"revision":self.state.staged.as_ref().map(|record|record.revision),"verified":false}),
+                    )
+                }
+                Operation::VerifyLogin { selection } => {
+                    let selected = self
+                        .state
+                        .staged
+                        .as_ref()
+                        .or(self.state.active.as_ref())
+                        .ok_or_else(|| Error::Refused("synthetic missing verification".into()))?;
+                    if selected.metadata.id != selection.id
+                        || selected.revision != selection.revision
+                        || selected.content_binding != selection.content_binding
+                    {
+                        return Err(Error::Refused(
+                            "synthetic verification selection changed".into(),
+                        ));
+                    }
                     self.verifies += 1;
                     if let Some(mut staged) = self.state.staged.take() {
                         staged.verified = true;
@@ -560,7 +649,9 @@ mod tests {
                         std::fs::remove_file(&file).map_err(|e| Error::io(&file, e))?;
                         std::fs::create_dir(&file).map_err(|e| Error::io(file, e))?;
                     }
-                    Ok(serde_json::json!({"revision":1,"verified":true}))
+                    Ok(
+                        serde_json::json!({"revision":self.state.active.as_ref().map(|record|record.revision),"verified":true}),
+                    )
                 }
                 _ => panic!("unexpected synthetic login operation"),
             }
@@ -709,68 +800,6 @@ mod tests {
         remote.state.active = None;
         assert!(f.run(&mut remote).is_err());
         assert_eq!(remote.imports, 1);
-        Ok(())
-    }
-    #[test]
-    fn sync_keeps_protected_data_redacted_and_refuses_changed_or_missing_identity() -> Result<()> {
-        let f = Fixture::new()?;
-        let mut remote = Remote::new()?;
-        f.run(&mut remote)?;
-        let config = Config::load(&f.paths)?;
-        let mut ordinary = item();
-        ordinary.id = uuid::Uuid::new_v4().to_string();
-        let (cached, managed) = reconcile_with(
-            vec![f.source.clone(), ordinary.clone()],
-            &config,
-            &f.fingerprint,
-            |_| {
-                Ok((
-                    remote.state.clone(),
-                    f.source.clone(),
-                    f.journal()?.prepared.content_binding,
-                ))
-            },
-        )?;
-        assert!(
-            cached[0].password.is_empty()
-                && cached[0].notes.is_empty()
-                && cached[0].totp_uri.is_empty()
-        );
-        assert_eq!(cached[1], ordinary);
-        assert_eq!(managed, vec![f.source.id.clone()]);
-        let (_, managed) = reconcile_with(vec![], &config, &f.fingerprint, |_| {
-            panic!("deleted record must not unseal")
-        })?;
-        assert!(managed.is_empty());
-        let mut changed = f.source.clone();
-        changed.password.push('!');
-        assert!(
-            reconcile_with(vec![changed], &config, &f.fingerprint, |_| Ok((
-                remote.state.clone(),
-                f.source.clone(),
-                f.journal()?.prepared.content_binding
-            )))
-            .is_err()
-        );
-        assert!(
-            reconcile_with(
-                vec![f.source.clone()],
-                &config,
-                "different-account",
-                |_| panic!("wrong account must refuse before lookup")
-            )
-            .is_err()
-        );
-        remote.state.active = None;
-        assert!(
-            reconcile_with(vec![f.source.clone()], &config, &f.fingerprint, |_| Ok((
-                remote.state.clone(),
-                f.source.clone(),
-                f.journal()?.prepared.content_binding
-            )))
-            .is_err()
-        );
-        assert!(validate_inventory(&config, vec![])?.is_empty());
         Ok(())
     }
 }

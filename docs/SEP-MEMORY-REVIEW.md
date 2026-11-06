@@ -86,8 +86,8 @@ process memory or prove that compiler copies have disappeared.
    custom cryptographic algorithms. Validate the actual supported backend and
    optimized build, including errors and panic/unwind. Keep the narrower memory
    claims above until this is established.
-2. Finish changed-login staging/verified-update recovery for the connected
-   [login migration/reveal](SEP-LOGIN-REVEAL.md). CLI protected selection now uses
+2. Validate the implemented changed-login staging/verified-update path on hardware
+   for [login migration/reveal](SEP-LOGIN-REVEAL.md). CLI protected selection uses
    the metadata index; the encrypted source journal remains an explicit recovery
    copy. Content verification uses HMAC with a random key inside the sealed
    payload; its primitive/compiler scratch shares the HMAC limits above. No raw

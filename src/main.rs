@@ -752,6 +752,7 @@ fn save_synced_projection(
         credentials,
         passkeys,
     })?;
+    keychain::protection::login::finish_synced(store.paths(), backend, &login_ids)?;
     println!("synced {count} credential(s)");
     println!("synced {passkey_count} passkey(s)");
     Ok(())

@@ -3,9 +3,9 @@
 The broker implements login envelope staging, biometric verification and selected
 reveal. `keychain protect ID` now dispatches selected login or passkey migration;
 `show`/`show --json`, `totp` and `list` route protected logins through broker
-metadata/reveal. Unchanged items and deletion reconcile during sync; changed
-login payloads fail before cache replacement until the verified-update workflow
-is connected. No real login has been imported or revealed through this path.
+metadata/reveal. Sync stages changed login payloads without capture and publishes
+a route to the exact encrypted successor. The next explicit reveal verifies,
+commits and displays it within one selected biometric-decrypt lifetime. No real login has been imported or revealed through this path.
 
 The same SEP item recipient and ECIES/context format used for protected passkeys
 protect a typed login payload. It does not introduce another encryption scheme or
@@ -49,9 +49,14 @@ and encrypts them on the source side. Import IPC contains metadata and ciphertex
 only. `ImportLogin` checks the exact recipient, expected revision, timestamps,
 bounds and namespace before atomically staging `login-ID.pending.enc`. Incoming
 JSON cannot set `verified` or supply a biometric-success assertion. A pending
-update cannot hide or replace the currently verified active revision.
+update never overwrites the verified active revision. `ReplaceStagedLogin` pins
+the existing pending content tag and expected verified predecessor before
+atomically replacing an unverified slot. A lost pending version cannot be treated
+as an empty new slot. An identical leftover staging copy after active publication
+can be replaced by a successor only when it exactly matches the committed file.
 
-`VerifyLogin` opens the desktop prompt, performs a new selected biometric decrypt,
+`VerifyLogin` pins the exact revision/content tag before opening the desktop
+prompt, performs a new selected biometric decrypt,
 validates the context/content and commits only if the entire staged record still
 matches. The verified active envelope is atomically published and fsynced before
 the pending file is removed/fsynced. Reopening after interruption retains the same
@@ -79,13 +84,22 @@ recovery-copy retirement is justified by these tests.
 
 ## Intentional reveal
 
-`RevealLogin` requires an exact record ID, selected revision/content tag and one explicit selector: password,
-notes, TOTP code, or all three for intentional `show`-style disclosure. It accepts
+`RevealLogin` requires an exact record ID, selected revision/content tag and one
+explicit selector: password, notes, TOTP code, or all three for intentional `show`-style disclosure. It accepts
 no caller-provided title/domain, decrypt blob, seed-export selector, signing input
-or authorization flag. Only a verified active login enabled by the managed sync inventory is eligible.
-A changed revision/content tag refuses before capture. Pending data is excluded. The native desktop prompt names the selected stored account/domain and
-requested output, automatically starts capture, and supplies no success grant.
+or authorization flag. A verified, enabled active predecessor is required.
+A changed revision/content tag refuses before capture. Initial unverified imports
+remain excluded. An explicitly selected pending successor requires a verified,
+enabled predecessor. Its entire pending record and predecessor are frozen through
+capture. After context/content verification, both are compared under the registry
+mutation lock; the successor commits before output is serialized. Current cancel,
+session and deadline checks surround commit and delivery. A late cancellation can
+leave a verified durable successor, but supplies no output or reusable UV grant.
+The next request still decrypts with a new biometric operation. The native desktop
+prompt names the selected stored account/domain and requested output, automatically starts capture, and supplies no success grant.
 The real SEP decrypt completion establishes fresh presence for that operation.
+After delivery/validation the desktop status changes to finishing, so it does not
+keep asking for a finger during persistence and reply delivery.
 
 Password/notes remain borrowed from the protected decrypt mapping. TOTP URI
 parsing and base32 decoding now use final-size locked, dump-excluded buffers; no
@@ -135,15 +149,35 @@ with borrowed secret fields, avoiding an extra owned secret JSON tree. Config
 stores no usernames/titles or private fields. The primary cache/index markers
 prevent lost config from enabling software reveal or sync downgrade.
 
-Complete sync checks the current account, committed journal, exact original
-content and current broker identity before redacting a managed login in the new
+Complete sync checks the current account, frozen recovery lineage and exact
+known broker versions before redacting a managed login in the new
 primary snapshot. Its ID joins passkey IDs in one managed inventory update;
 account deletion/logout disables synced entries without deleting native local
 passkeys or their recovery representations. Different account/recipient/revision,
-missing state and unverified updates fail closed. Changed login content/metadata
-currently refuses snapshot replacement; automatic staging and explicit verified
-update recovery remain required. No new private fields are silently saved back
-into a protected primary entry.
+missing state and unknown updates fail closed. Changed content/metadata freezes
+a new encrypted version in the recovery journal before any root publication. The
+root service compares the exact pending tag when replacing an unverified update.
+After root acknowledgement, config routing is published before cache/index
+replacement, so even an interrupted sync cannot select the older password or
+restore plaintext into the protected primary entry.
+
+The journal retains up to 64 preceding source/ciphertext versions (4 MiB total),
+including superseded unverified plans; it never silently prunes recovery data.
+The limit refuses a new plan before modifying the root service. Unknown root
+versions, acknowledged stage loss, known rollback and a changed recipient refuse
+recreation. A lost local-publication reply is discovered by exact root state; no
+send is repeated within the failed invocation. A later explicit sync can publish
+the same frozen ciphertext against its unchanged verified predecessor if it was
+never acknowledged. This local metadata publication is separate from any SEP or
+Apple command and never repeats biometric capture.
+
+If another explicit reveal commits a pending value while sync prepares a newer
+replacement, only an unpublished Prepared plan can be rebased against that known,
+verified predecessor. Both ciphertexts remain in recovery history. Published
+versions are not regenerated. `show`/`totp` lookup resolves the exact configured
+pending metadata without opening the secret-bearing journal; the root service
+checks and commits that selection during the new biometric decrypt. `protect`
+can also explicitly verify/resume the frozen latest version.
 
 ## Validation and remaining acceptance
 
@@ -162,13 +196,12 @@ fresh-process reopen, interrupted cleanup, stale/missing revisions, login/passke
 namespace collision, metadata-purpose confusion and missing-root refusal. Its
 synthetic decrypt is explicitly a test stand-in, not hardware authorization.
 
-Real biometric login verification/reveal, cancellation/session-lock/expiry,
-changed-login update staging/verification and fresh-process/reboot acceptance
-remain required. No password/TOTP browser autofill or Apple write is
+Real biometric login verification/reveal/update, cancellation/session-lock/expiry
+and fresh-process/reboot acceptance remain required. No password/TOTP browser autofill or Apple write is
 claimed from this service implementation.
 
-Installed validation on 2026-11-06: 218 workspace tests passed with 22 intentionally
-ignored tests; 18 privileged library tests passed separately. Formatting, strict
+Installed validation on 2026-11-06: 223 workspace tests passed with 23 intentionally
+ignored tests; 19 privileged library tests passed separately. Formatting, strict
 Clippy and release build passed. Updated service binaries were installed with a
 retained backup. The installed broker/native-host availability check passed with
 `--availability-only`; ListLogins returned an empty inventory and a synthetic
@@ -184,3 +217,18 @@ notes or seed, detects stale two-file publication and can select metadata withou
 decrypting the vault. Shared-inventory tests preserve native passkeys while
 including or disabling synchronized login IDs. No real login migration/reveal
 was performed for this milestone.
+
+Update tests cover repeated cloud changes, exact pending replacement, lost import
+replies, routing-publication faults, unchanged/deleted snapshots, history limits,
+wrong account, known rollback, acknowledged loss and a reveal/replace race. A root
+integration test freezes both pending/predecessor records, independently validates
+synthetic plaintext, refuses changed/missing/disabled state, suppresses output on
+cancellation before and after commit, and handles interrupted cleanup. These
+simulate biometric completion; they do not establish hardware acceptance or
+one-fingerprint behavior on the real reader.
+
+The updated release services were installed with the write gate still disabled.
+Installed broker/native-host availability passed without capture; both pinned
+VerifyLogin and RevealLogin refused a synthetic passkey ID before opening an
+authorization prompt. ListLogins still contained no real login records. The real
+reader, browser, fresh-process and reboot acceptance gates remain unproven.

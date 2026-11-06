@@ -64,6 +64,18 @@ pub struct LoginState {
     pub active: Option<LoginSummary>,
     pub staged: Option<LoginSummary>,
 }
+/// Frozen entirely from authenticated registry state, never owner JSON. Pending
+/// reveal additionally pins the verified predecessor through biometric completion.
+pub(crate) struct LoginUse {
+    record: LoginRecord,
+    predecessor: Option<LoginRecord>,
+}
+impl LoginUse {
+    pub(crate) fn record(&self) -> &LoginRecord {
+        &self.record
+    }
+}
+
 impl Registry {
     pub(super) fn login_path(&self, id: &str, pending: bool) -> Result<PathBuf> {
         self.filename(id)?;
@@ -149,13 +161,49 @@ impl Registry {
         Ok(())
     }
     pub fn import_login(&self, owner: u32, import: LoginImport) -> Result<u64> {
+        self.stage_login(owner, import, None)
+    }
+    pub fn replace_staged_login(
+        &self,
+        owner: u32,
+        expected_content: &str,
+        import: LoginImport,
+    ) -> Result<u64> {
+        self.stage_login(owner, import, Some(expected_content))
+    }
+    fn stage_login(&self, owner: u32, import: LoginImport, replace: Option<&str>) -> Result<u64> {
         let _lock = self.update_lock()?;
         let id = import.metadata.id.clone();
         let pending = self.login_path(&id, true)?;
         let active = self.login_path(&id, false)?;
         if pending.try_exists().map_err(|e| Error::io(&pending, e))? {
+            let staged = self.read_login(&id, owner, true)?;
+            let is_committed_cleanup = if staged.revision == import.expected_revision {
+                let mut verified = staged.clone();
+                verified.verified = true;
+                self.load_login(&id, owner)? == verified
+            } else {
+                false
+            };
+            if replace.is_none()
+                || replace != Some(staged.content_binding.as_str())
+                || (!is_committed_cleanup
+                    && staged.revision
+                        != import
+                            .expected_revision
+                            .checked_add(1)
+                            .ok_or_else(|| Error::InvalidData("login revision overflow".into()))?)
+                || staged.recipient_id != import.recipient_id
+                || staged.verified
+                || import.metadata.modified_at < staged.metadata.modified_at
+            {
+                return Err(Error::Refused(
+                    "staged login changed; refusing replacement".into(),
+                ));
+            }
+        } else if replace.is_some() {
             return Err(Error::Refused(
-                "a staged login already exists; verify or explicitly discard it first".into(),
+                "staged login is missing; refusing replacement".into(),
             ));
         }
         // A UUID cannot change kinds by selecting another envelope namespace.
@@ -239,6 +287,9 @@ impl Registry {
     }
     pub(crate) fn commit_verified_login(&self, expected: &LoginRecord) -> Result<()> {
         let _lock = self.update_lock()?;
+        self.commit_login_locked(expected)
+    }
+    fn commit_login_locked(&self, expected: &LoginRecord) -> Result<()> {
         let mut current = self.login_verification_record(&expected.metadata.id, expected.owner)?;
         if &current != expected {
             return Err(Error::Refused("login changed during verification".into()));
@@ -264,6 +315,72 @@ impl Registry {
         self.include_synced_record(&current.metadata.id, current.owner)?;
         self.remove_pending_login(&current.metadata.id)
     }
+    pub(crate) fn select_login(
+        &self,
+        owner: u32,
+        selection: &crate::broker::login::LoginSelection,
+    ) -> Result<LoginUse> {
+        let _lock = self.update_lock()?;
+        let active = self.load_login(&selection.id, owner)?;
+        if !active.verified || !self.synced_record_enabled(&selection.id, owner)? {
+            return Err(Error::Refused("login is not verified or enabled".into()));
+        }
+        let matches = |record: &LoginRecord| {
+            record.revision == selection.revision
+                && record.content_binding == selection.content_binding
+        };
+        if matches(&active) {
+            return Ok(LoginUse {
+                record: active,
+                predecessor: None,
+            });
+        }
+        let pending = self.login_verification_record(&selection.id, owner)?;
+        if pending.verified
+            || !matches(&pending)
+            || active.revision.checked_add(1) != Some(pending.revision)
+            || active.recipient_id != pending.recipient_id
+        {
+            return Err(Error::Refused(
+                "selected login changed; select it again".into(),
+            ));
+        }
+        Ok(LoginUse {
+            record: pending,
+            predecessor: Some(active),
+        })
+    }
+    /// Called only inside the successful selected biometric-decrypt closure.
+    /// The operation check remains current through commit and intentional output.
+    pub(crate) fn with_verified_login<T>(
+        &self,
+        selected: &LoginUse,
+        check: &dyn Fn() -> Result<()>,
+        deliver: impl FnOnce() -> Result<T>,
+    ) -> Result<T> {
+        let _lock = self.update_lock()?;
+        check()?;
+        if !self.synced_record_enabled(&selected.record.metadata.id, selected.record.owner)? {
+            return Err(Error::Refused("selected login is disabled".into()));
+        }
+        if let Some(predecessor) = &selected.predecessor {
+            self.check_current_login(predecessor)?;
+            if self
+                .login_verification_record(&selected.record.metadata.id, selected.record.owner)?
+                != selected.record
+            {
+                return Err(Error::Refused(
+                    "staged login changed during authorization".into(),
+                ));
+            }
+            check()?;
+            self.commit_login_locked(&selected.record)?;
+        } else {
+            self.check_current_login(&selected.record)?;
+        }
+        check()?;
+        deliver()
+    }
     pub fn discard_staged_login(&self, id: &str, owner: u32, revision: u64) -> Result<()> {
         let _lock = self.update_lock()?;
         if self.read_login(id, owner, true)?.revision != revision {
@@ -287,6 +404,150 @@ impl Registry {
 mod tests {
     use super::*;
     use crate::broker::login::tests::{item, validate};
+    #[test]
+    #[ignore = "requires root; synthetic biometric stand-ins only, no SEP/Apple IO"]
+    fn root_pending_login_reveal_pins_both_versions_and_cancellation_suppresses_delivery()
+    -> Result<()> {
+        use crate::broker::login::LoginSelection;
+        use crate::security::sep::ProviderError;
+        use std::cell::Cell;
+        assert_eq!(keychain_sep_driver::peer::effective_uid(), 0);
+        let directory = tempfile::tempdir().map_err(|e| Error::io("test", e))?;
+        let registry = super::super::test_support::registry(directory.path())?;
+        let mut source = item();
+        let id = source.id.clone();
+        let recipient = registry.item_recipient()?;
+        registry.import_login(1001, LoginImport::seal(1001, &recipient, 0, &source)?)?;
+        let initial = registry.login_verification_record(&id, 1001)?;
+        validate(&initial)?;
+        registry.commit_verified_login(&initial)?;
+        source.password = "pending synthetic password".into();
+        source.modified_at = 3.0;
+        registry.import_login(1001, LoginImport::seal(1001, &recipient, 1, &source)?)?;
+        let pending = registry.login_verification_record(&id, 1001)?;
+        let selection = LoginSelection {
+            id: id.clone(),
+            revision: 2,
+            content_binding: pending.content_binding.clone(),
+        };
+        let frozen = registry.select_login(1001, &selection)?;
+        validate(frozen.record())?; // Explicit fake biometric delivery.
+        registry.set_synced_inventory(1001, vec![])?;
+        assert!(
+            registry
+                .with_verified_login::<()>(&frozen, &|| Ok(()), || panic!(
+                    "disabled operation cannot deliver"
+                ))
+                .is_err()
+        );
+        registry.set_synced_inventory(1001, vec![id.clone()])?;
+        let mut newer = source.clone();
+        newer.password = "newer pending password".into();
+        newer.modified_at = 4.0;
+        assert!(
+            registry
+                .replace_staged_login(
+                    1001,
+                    "wrong-content",
+                    LoginImport::seal(1001, &recipient, 1, &newer)?
+                )
+                .is_err()
+        );
+        registry.replace_staged_login(
+            1001,
+            &pending.content_binding,
+            LoginImport::seal(1001, &recipient, 1, &newer)?,
+        )?;
+        assert!(registry.select_login(1001, &selection).is_err());
+        assert!(
+            registry
+                .with_verified_login::<()>(&frozen, &|| Ok(()), || panic!(
+                    "changed pending data cannot deliver"
+                ))
+                .is_err()
+        );
+        assert_eq!(registry.load_login(&id, 1001)?.revision, 1);
+        let pending = registry.login_verification_record(&id, 1001)?;
+        let selection = LoginSelection {
+            id: id.clone(),
+            revision: 2,
+            content_binding: pending.content_binding.clone(),
+        };
+        let frozen = registry.select_login(1001, &selection)?;
+        validate(frozen.record())?; // New fake authorization for the selected replacement.
+        assert!(
+            registry
+                .with_verified_login::<()>(
+                    &frozen,
+                    &|| Err(ProviderError::Canceled.into()),
+                    || panic!("canceled operation cannot deliver")
+                )
+                .is_err()
+        );
+        assert_eq!(registry.load_login(&id, 1001)?.revision, 1);
+        let checks = Cell::new(0);
+        assert!(
+            registry
+                .with_verified_login::<()>(
+                    &frozen,
+                    &|| {
+                        checks.set(checks.get() + 1);
+                        if checks.get() >= 3 {
+                            Err(ProviderError::Canceled.into())
+                        } else {
+                            Ok(())
+                        }
+                    },
+                    || panic!("late cancellation suppresses output")
+                )
+                .is_err()
+        );
+        let committed = registry.load_login(&id, 1001)?;
+        assert!(committed.verified);
+        assert_eq!(committed.content_binding, pending.content_binding);
+        assert!(
+            registry
+                .with_verified_login::<()>(&frozen, &|| Ok(()), || panic!(
+                    "old predecessor cannot be reused"
+                ))
+                .is_err()
+        );
+        let fresh = registry.select_login(1001, &selection)?;
+        validate(fresh.record())?; // Fresh fake decrypt, never a persisted UV grant.
+        assert_eq!(
+            registry.with_verified_login(&fresh, &|| Ok(()), || Ok(23))?,
+            23
+        );
+        // An identical pending copy after committed-file publication is cleanup,
+        // and may be replaced atomically by a successor without losing active data.
+        registry.write_login(&pending, true)?;
+        source.modified_at = 5.0;
+        source.password = "revision three".into();
+        registry.replace_staged_login(
+            1001,
+            &pending.content_binding,
+            LoginImport::seal(1001, &recipient, 2, &source)?,
+        )?;
+        let next = registry.login_verification_record(&id, 1001)?;
+        let next_selection = LoginSelection {
+            id: id.clone(),
+            revision: 3,
+            content_binding: next.content_binding.clone(),
+        };
+        let selected = registry.select_login(1001, &next_selection)?;
+        validate(selected.record())?;
+        std::fs::remove_file(registry.login_path(&id, false)?)
+            .map_err(|e| Error::io("test active loss", e))?;
+        assert!(
+            registry
+                .with_verified_login::<()>(&selected, &|| Ok(()), || panic!(
+                    "lost predecessor cannot deliver"
+                ))
+                .is_err()
+        );
+        assert!(registry.login_state(&id, 1001)?.staged.is_some());
+        Ok(())
+    }
     #[test]
     #[ignore = "requires root; synthetic recipient/server only, no SEP/Apple IO"]
     fn root_login_staging_commit_recovery_revision_and_namespace_policy() -> Result<()> {

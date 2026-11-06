@@ -52,8 +52,12 @@ pub enum Operation {
     ImportLogin {
         import: Box<login::LoginImport>,
     },
+    ReplaceStagedLogin {
+        expected_content: String,
+        import: Box<login::LoginImport>,
+    },
     VerifyLogin {
-        record: String,
+        selection: login::LoginSelection,
     },
     DiscardStagedLogin {
         record: String,
@@ -403,6 +407,7 @@ impl Broker {
             | Operation::LoginProtectionState { .. }
             | Operation::ImportLogin { .. }
             | Operation::VerifyLogin { .. }
+            | Operation::ReplaceStagedLogin { .. }
             | Operation::DiscardStagedLogin { .. } => {
                 return self.execute_login(id, operation, canceled, session);
             }

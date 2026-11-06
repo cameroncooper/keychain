@@ -19,8 +19,10 @@ pub struct LoginRoute {
 }
 impl LoginRoute {
     pub fn matches(&self, summary: &crate::broker::registry::LoginSummary) -> bool {
-        summary.verified
-            && summary.metadata.id == self.id
+        summary.verified && self.identifies(summary)
+    }
+    pub fn identifies(&self, summary: &crate::broker::registry::LoginSummary) -> bool {
+        summary.metadata.id == self.id
             && summary.revision == self.revision
             && summary.recipient_id == self.recipient_id
             && summary.content_binding == self.content_binding
