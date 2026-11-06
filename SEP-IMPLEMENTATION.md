@@ -291,7 +291,7 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 188 passing tests, nineteen ignored (three Apple network and sixteen privileged
+Workspace checks: 192 passing tests, nineteen ignored (three Apple network and sixteen privileged
 integration tests). Nine registry and five coordination tests passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
 Nine browser service-worker flow tests also pass. Strict Clippy is clean.
@@ -423,9 +423,11 @@ recovery. Five synthetic complete-operation tests cover cancellation/lost replie
 identity checks, restart and recovery. The authenticated cancellable socket
 transport now keeps raw networking outside the broker, validates independent
 service UIDs and exact scope/sequence, and closes rather than replaying after
-failure. Its disposable different-UID test passes. Production worker service/account
-bootstrap, operation-guard wiring and remaining library/scratch memory review
-remain required before exposing this path over IPC; see
+failure. Its disposable different-UID test passes. Current NativeAuthorization
+checks now travel through every upload/journal IO call and into partial socket
+reads/writes; a constructor-time guard cannot substitute for them. Session checks
+use an uncached login1 snapshot with a 250-ms timeout and fail closed. Production worker service/account
+bootstrap and remaining library/scratch memory review remain required before exposing this path over IPC; see
 [coordination limits](docs/ICLOUD-BROKER-COORDINATION.md). The production
 Apple adapter and iCloud browser choice remain unconnected to production flows.
 Atomic save framing is implemented from pinned extracted-schema/client references:

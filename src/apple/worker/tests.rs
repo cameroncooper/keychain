@@ -284,7 +284,7 @@ fn upload_adapter_reads_all_raw_pages_and_keeps_roots_off_the_wire() -> Result<(
         },
         roots,
     )?;
-    io.fetch_zone(&zone)?;
+    io.fetch_zone(&zone, &|| Ok(()))?;
     join(server)
 }
 
@@ -307,6 +307,58 @@ fn worker_failure_is_terminal_and_does_not_request_a_retry() -> Result<()> {
         });
         assert!(client.exchange(Kind::Save, b"ciphertext").is_err());
         assert!(client.exchange(Kind::Save, b"ciphertext").is_err());
+        join(server)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn current_operation_check_interrupts_io_even_when_constructor_check_stays_valid() -> Result<()> {
+    for reason in 0..3 {
+        let scope = binding();
+        let constructor = || Ok(());
+        let (client, socket) = pair(&scope, &constructor, until())?;
+        let changed = Arc::new(AtomicBool::new(false));
+        let flag = changed.clone();
+        let zone = scope.zone.clone();
+        let server = thread::spawn(move || {
+            let check = || Ok(());
+            let mut channel = Channel::new(socket, scope, until(), &check)?;
+            channel.read(0)?;
+            flag.store(true, Ordering::Release);
+            // Keep the response pending while the CURRENT guard changes. The
+            // constructor-time guard deliberately remains valid throughout.
+            assert!(channel.read(1).is_err());
+            Ok(())
+        });
+        let mut io = WorkerUploadIo::new(
+            client,
+            DeviceConfig {
+                device_uuid: Uuid::new_v4().to_string(),
+                serial: "synthetic".into(),
+                name: "test".into(),
+            },
+            vec![RecoveredTlk {
+                uuid: Uuid::new_v4().to_string(),
+                zone_name: zone.name.clone(),
+                keyclass: "tlk".into(),
+                key: zeroize::Zeroizing::new(vec![0xa5; 64]),
+            }],
+        )?;
+        let check = || {
+            if !changed.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            Err(match reason {
+                0 => crate::security::sep::ProviderError::Canceled.into(),
+                1 => crate::security::sep::ProviderError::Expired.into(),
+                _ => Error::Refused("synthetic session is locked".into()),
+            })
+        };
+        let start = Instant::now();
+        assert!(io.fetch_zone(&zone, &check).is_err());
+        assert!(start.elapsed() < Duration::from_secs(1));
+        assert!(!io.client.channel.healthy);
         join(server)?;
     }
     Ok(())

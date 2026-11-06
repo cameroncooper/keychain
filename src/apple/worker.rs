@@ -82,6 +82,9 @@ impl<'a> Channel<'a> {
         if !self.healthy {
             return Err(invalid("channel is closed; reconcile before reconnecting"));
         }
+        if Instant::now() >= self.deadline {
+            return Err(crate::security::sep::ProviderError::Expired.into());
+        }
         (self.check)()?;
         if Instant::now() >= self.deadline {
             return Err(crate::security::sep::ProviderError::Expired.into());
@@ -91,6 +94,48 @@ impl<'a> Channel<'a> {
     fn close(&mut self) {
         self.healthy = false;
         let _ = self.stream.shutdown(Shutdown::Both);
+    }
+    fn frames(&mut self) -> Frames<'_> {
+        Frames {
+            stream: &mut self.stream,
+            binding: &self.binding,
+            deadline: self.deadline,
+            check: self.check,
+        }
+    }
+    fn read(&mut self, step: u64) -> Result<(Kind, Vec<u8>)> {
+        self.guard()?;
+        self.frames().read(step)
+    }
+    fn write(&mut self, step: u64, kind: Kind, body: &[u8]) -> Result<()> {
+        self.guard()?;
+        self.frames().write(step, kind, body)
+    }
+    #[cfg(test)]
+    fn transfer(&mut self, bytes: &mut [u8], write: bool) -> Result<()> {
+        self.guard()?;
+        self.frames().transfer(bytes, write)
+    }
+}
+
+/// Borrows both the socket and the CURRENT operation check. No guard outlives
+/// the call, and no closure containing biometric authorization is persisted.
+struct Frames<'a> {
+    stream: &'a mut UnixStream,
+    binding: &'a Binding,
+    deadline: Instant,
+    check: &'a dyn Fn() -> Result<()>,
+}
+impl Frames<'_> {
+    fn guard(&self) -> Result<()> {
+        if Instant::now() >= self.deadline {
+            return Err(crate::security::sep::ProviderError::Expired.into());
+        }
+        (self.check)()?;
+        if Instant::now() >= self.deadline {
+            return Err(crate::security::sep::ProviderError::Expired.into());
+        }
+        Ok(())
     }
     fn transfer(&mut self, bytes: &mut [u8], write: bool) -> Result<()> {
         let mut offset = 0;
@@ -164,7 +209,7 @@ impl<'a> Channel<'a> {
         self.transfer(&mut bytes, false)?;
         let header: Header = serde_json::from_slice(&bytes)?;
         if header.version != 1
-            || header.binding != self.binding
+            || &header.binding != self.binding
             || header.step != step
             || header.length > MAX_PAYLOAD
         {
@@ -188,6 +233,7 @@ impl<'a> Channel<'a> {
         Ok((header.kind, payload))
     }
 }
+
 impl Drop for Channel<'_> {
     fn drop(&mut self) {
         self.close();
@@ -273,14 +319,34 @@ impl<'a> WorkerClient<'a> {
         Ok(client)
     }
     fn exchange(&mut self, kind: Kind, body: &[u8]) -> Result<Vec<u8>> {
+        self.exchange_checked(kind, body, &|| Ok(()))
+    }
+    fn exchange_checked(
+        &mut self,
+        kind: Kind,
+        body: &[u8],
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Vec<u8>> {
         let result = (|| {
             let step = self.step;
             self.step = step
                 .checked_add(1)
                 .ok_or_else(|| invalid("sequence exhausted"))?;
-            self.channel.write(step, kind, body)?;
-            let (reply, body) = self.channel.read(step)?;
             self.channel.guard()?;
+            let base_check = self.channel.check;
+            let combined = || {
+                base_check()?;
+                check()
+            };
+            let mut frames = Frames {
+                stream: &mut self.channel.stream,
+                binding: &self.channel.binding,
+                deadline: self.channel.deadline,
+                check: &combined,
+            };
+            frames.write(step, kind, body)?;
+            let (reply, body) = frames.read(step)?;
+            frames.guard()?;
             match reply {
                 Kind::AuthenticationRequired => Err(Error::AuthenticationRequired("Apple worker requires fresh local authentication; reconcile any attempted write".into())),
                 Kind::Failed => Err(Error::Apple("network worker failed; reconcile any attempted write before retrying".into())),
@@ -390,12 +456,20 @@ impl<'a> WorkerUploadIo<'a> {
     }
 }
 impl UploadIo for WorkerUploadIo<'_> {
-    fn fetch_zone(&mut self, zone: &ZoneIdentity) -> Result<Snapshot> {
+    fn fetch_zone(
+        &mut self,
+        zone: &ZoneIdentity,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Snapshot> {
         if zone != &self.client.channel.binding.zone {
             return Err(invalid("fetch zone differs from fixed scope"));
         }
         let result = Snapshot::fetch_with(zone.clone(), self.roots.clone(), |body| {
-            self.client.exchange(Kind::FetchPage, body)
+            self.client.exchange_checked(Kind::FetchPage, body, check)
+        })
+        .and_then(|snapshot| {
+            check()?;
+            Ok(snapshot)
         });
         if result.is_err() {
             self.client.channel.close();
@@ -408,6 +482,7 @@ impl UploadIo for WorkerUploadIo<'_> {
         zone: &ZoneIdentity,
         record: &Record,
         pointer: &Record,
+        check: &dyn Fn() -> Result<()>,
     ) -> Result<SaveOutcome> {
         if zone != &self.client.channel.binding.zone
             || record.name != self.client.channel.binding.transaction.to_string()
@@ -415,7 +490,16 @@ impl UploadIo for WorkerUploadIo<'_> {
             return Err(invalid("save differs from fixed scope"));
         }
         let save = AtomicSave::new(&self.device, attempt, zone, record, pointer)?;
-        let result = save.parse_response(&self.client.exchange(Kind::Save, &save.body)?);
+        let result = save
+            .parse_response(
+                &self
+                    .client
+                    .exchange_checked(Kind::Save, &save.body, check)?,
+            )
+            .and_then(|outcome| {
+                check()?;
+                Ok(outcome)
+            });
         if result.is_err() {
             self.client.channel.close();
         }

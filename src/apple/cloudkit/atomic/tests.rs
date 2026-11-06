@@ -535,7 +535,13 @@ fn upload_adapter_binds_authenticated_account_joined_peer_and_record_without_net
     let save = fixture()?;
     assert!(
         adapter
-            .create_atomic(Uuid::new_v4(), &save.zone, &save.item, &save.pointer)
+            .create_atomic(
+                Uuid::new_v4(),
+                &save.zone,
+                &save.item,
+                &save.pointer,
+                &|| Ok(())
+            )
             .is_err()
     );
     let mut changed = peer.clone();

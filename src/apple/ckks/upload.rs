@@ -380,13 +380,20 @@ pub enum SaveOutcome {
     PreconditionFailed,
 }
 pub trait UploadIo {
-    fn fetch_zone(&mut self, zone: &ZoneIdentity) -> Result<Snapshot>;
+    /// The current operation check is borrowed only for this call. Broker IO
+    /// must poll it while waiting; a constructor-time guard is insufficient.
+    fn fetch_zone(
+        &mut self,
+        zone: &ZoneIdentity,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Snapshot>;
     fn create_atomic(
         &mut self,
         attempt: Uuid,
         zone: &ZoneIdentity,
         record: &Record,
         unchanged_pointer: &Record,
+        check: &dyn Fn() -> Result<()>,
     ) -> Result<SaveOutcome>;
 }
 
@@ -644,13 +651,15 @@ impl Session<'_> {
         }
         Ok(())
     }
-    pub fn advance(&mut self, io: &mut dyn UploadIo) -> Result<()> {
+    pub fn advance(&mut self, io: &mut dyn UploadIo, check: &dyn Fn() -> Result<()>) -> Result<()> {
+        check()?;
         self.check_healthy()?;
         if matches!(self.journal.phase, Phase::FetchVerified { .. }) {
             return Ok(());
         }
         let zone = self.journal.plan.binding.zone.clone();
-        let snapshot = io.fetch_zone(&zone)?;
+        let snapshot = io.fetch_zone(&zone, check)?;
+        check()?;
         if let Some(record) = snapshot
             .records
             .iter()
@@ -673,6 +682,7 @@ impl Session<'_> {
                     )
                 })?;
             prepared.verify_payload(record, &snapshot)?;
+            check()?;
             let tag = record
                 .server_precondition(&zone)?
                 .change_tag
@@ -695,14 +705,18 @@ impl Session<'_> {
             return Err(Error::Refused("upload retry budget exhausted".into()));
         }
         let attempt = Uuid::new_v4();
+        check()?;
         self.journal.attempts.push(attempt);
         self.checkpoint(Phase::Attempted { attempt })?; // Must precede ANY send.
-        match io.create_atomic(
+        let outcome = io.create_atomic(
             attempt,
             &zone,
             &self.journal.plan.record,
             &self.journal.plan.current_pointer,
-        )? {
+            check,
+        )?;
+        check()?;
+        match outcome {
             SaveOutcome::PreconditionFailed => {
                 self.checkpoint(Phase::Rejected)?;
                 return Err(Error::Refused(
@@ -735,19 +749,25 @@ impl Session<'_> {
                 })?;
             }
         }
-        self.advance(io) // Independent post-acceptance fetch/decrypt, no resend.
+        self.advance(io, check) // Independent post-acceptance fetch/decrypt, no resend.
     }
     /// Explicit retry only after a fresh complete snapshot reports absence and
     /// the original current-key precondition still holds. Ciphertext/identity
     /// remain unchanged. Known acceptance/rejection never takes this path.
-    pub fn retry_after_absence(&mut self, io: &mut dyn UploadIo) -> Result<()> {
+    pub fn retry_after_absence(
+        &mut self,
+        io: &mut dyn UploadIo,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<()> {
+        check()?;
         self.check_healthy()?;
         if !matches!(self.journal.phase, Phase::Attempted { .. }) {
             return Err(Error::Refused(
                 "only an uncertain attempt can be retried".into(),
             ));
         }
-        let snapshot = io.fetch_zone(&self.journal.plan.binding.zone)?;
+        let snapshot = io.fetch_zone(&self.journal.plan.binding.zone, check)?;
+        check()?;
         if snapshot
             .records
             .iter()
@@ -758,6 +778,7 @@ impl Session<'_> {
             ));
         }
         self.check_pointer(&snapshot)?;
+        check()?;
         self.checkpoint(Phase::Prepared)
     }
 
@@ -769,8 +790,10 @@ impl Session<'_> {
     pub fn reprepare_after_rejection(
         &mut self,
         io: &mut dyn UploadIo,
+        check: &dyn Fn() -> Result<()>,
         prepare: impl FnOnce(&Binding, &PasskeyCredential, &Snapshot) -> Result<PreparedUpload>,
     ) -> Result<()> {
+        check()?;
         self.check_healthy()?;
         if self.journal.phase != Phase::Rejected {
             return Err(Error::Refused(
@@ -785,7 +808,8 @@ impl Session<'_> {
                 "upload re-encryption budget exhausted; all prior ciphertexts retained".into(),
             ));
         }
-        let snapshot = io.fetch_zone(&self.journal.plan.binding.zone)?;
+        let snapshot = io.fetch_zone(&self.journal.plan.binding.zone, check)?;
+        check()?;
         if snapshot.zone != self.journal.plan.binding.zone {
             return Err(invalid("re-encryption snapshot changed account/zone"));
         }
@@ -803,6 +827,7 @@ impl Session<'_> {
             &self.journal.plan.credential,
             &snapshot,
         )?;
+        check()?;
         if !candidate.0.same_credential(&self.journal.plan) {
             return Err(Error::Security(
                 "re-encryption changed the credential, key or request binding".into(),
@@ -820,6 +845,7 @@ impl Session<'_> {
             candidate.0.record,
             &snapshot,
         )?;
+        check()?;
         if serde_json::to_vec(&candidate.0)? != serde_json::to_vec(&self.journal.plan)? {
             self.journal.superseded.push(self.journal.plan.clone());
             self.journal.plan = candidate.0;

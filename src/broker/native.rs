@@ -36,6 +36,7 @@ pub(super) struct NativeAuthorization {
 }
 impl NativeAuthorization {
     pub(super) fn check(&self) -> Result<()> {
+        self.remaining()?;
         if self.canceled.load(Ordering::Acquire)
             || !self.session.valid()
             || self
@@ -44,6 +45,10 @@ impl NativeAuthorization {
                 .map_err(|_| Error::Refused("prompt failed".into()))?
                 .canceled()
         {
+            return Err(ProviderError::Canceled.into());
+        }
+        // Cancellation can arrive during the bounded login1 query above.
+        if self.canceled.load(Ordering::Acquire) {
             return Err(ProviderError::Canceled.into());
         }
         self.remaining()?;

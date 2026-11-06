@@ -54,10 +54,29 @@ finish before capture and before any selected scalar exists. The Unix connect
 syscall itself is synchronous; deployment must make readiness a preflight step.
 Do not create the worker or invoke a subprocess with a live scalar.
 
-Eight offline transport/adapter tests cover binary round trips, actual fragmented
+UploadIo requires a borrowed current operation check for every fetch and save.
+The journal passes it through reconciliation, explicit retry and re-encryption;
+it rechecks responses before checkpointing acceptance or verified backup. The
+coordinator supplies preflight session/cancel/expiry checks before capture, then
+the same NativeAuthorization check used by selected-scalar signing. WorkerUploadIo
+combines that per-call check with its connection check inside the frame loop.
+The callback is never stored past the call. This replaces the former outer-only
+GuardedIo wrapper, which could not interrupt a wait.
+
+Active-session validation uses one fresh login1 GetAll call for the exact owner,
+session ID, type, local/active state and lock hint. The entire snapshot query has
+a 250-ms timeout, and timeout/error/missing/wrongly typed fields fail closed.
+No successful session snapshot is cached as authorization. Cancellation and expiry
+are checked again after the query. These are bounded waits under normal process
+scheduling, not hard real-time latency guarantees. Tests cover malformed session
+snapshots and cancellation/drop of an unresponsive query. A journal test cancels
+after server acceptance, retains Attempted, and reconciles without another send.
+
+Nine offline transport/adapter tests cover binary round trips, actual fragmented
 frames across socket timeouts, wrong scope/version/step/type, unknown fields,
 oversize/truncated frames, stalled-read/write cancellation and deadlines,
-UID refusal, complete paginated fetches and terminal worker failures. A separate
+UID refusal, complete paginated fetches, terminal worker failures, and per-call
+cancellation/expiry/session loss with an independently valid constructor check. A separate
 wire test checks canonical worker request scope. A privileged disposable-process
 test binds a private socket under a different UID, exercises both real kernel
 peer checks and the production handshake/server loop, and exchanges synthetic
@@ -74,8 +93,8 @@ roots in the broker. Use the selected local Asahi Mac anisette helper; no remote
 provider or provisioning reset is authorized by this implementation.
 
 Connect/handshake and perform the authenticated initial fetch before showing
-the biometric prompt. Bind the channel's guard to cancellation, the active local
-session and the operation deadline throughout the selected-scalar lifetime.
+the biometric prompt. Use the coordinator's operation check throughout the
+selected-scalar lifetime; do not bypass it with a no-op guard in production.
 Then route the existing creation coordinator through WorkerUploadIo. The existing
 trusted in-process seam accepts arbitrary UploadIo and is not a safe owner RPC.
 Only expose the iCloud browser option after this service/bootstrap integration,

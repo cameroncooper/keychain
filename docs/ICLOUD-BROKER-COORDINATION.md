@@ -77,11 +77,15 @@ RPC. Direct AppleUploadIo inside the privileged broker remains prohibited; its
 installed AF_UNIX-only restrictions are retained. Start/authenticate the worker
 before capture; never fork/exec with the selected scalar live.
 
-The coordinator's outer guards cannot interrupt an arbitrary blocking trait
-implementation. WorkerUploadIo performs cancellation/deadline checks during
-partial reads/writes and permanently closes on failure. Production must bind its
-guard to the same operation/session; a late response remains uncertain, with no
-automatic replay. No deserialize shortcut constructs VerifiedUpload.
+UploadIo requires the current operation check on every fetch/save. The coordinator
+passes preflight checks before capture and NativeAuthorization checks throughout
+upload/reconciliation/retry. WorkerUploadIo polls that borrowed check during
+partial reads/writes and permanently closes on failure. This replaces the
+outer-only GuardedIo wrapper. The journal independently checks replies before
+acceptance/verification checkpoints, so late results remain uncertain. Session
+validation uses a fresh exact login1 snapshot with a 250-ms timeout and fails
+closed on errors; it does not cache authorization. No deserialize shortcut
+constructs VerifiedUpload, and no automatic replay was added.
 Production service/bootstrap integration, remaining library/scratch memory review,
 scoped live Apple tests, real biometric creation
 and browser/other-device validation remain gates before enabling iCloud creation.

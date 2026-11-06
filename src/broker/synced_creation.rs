@@ -5,7 +5,7 @@
 use super::protected::SelectedScalar;
 use super::registry::SyncedCreation;
 use super::*;
-use crate::apple::ckks::upload::{Binding, Phase, SaveOutcome, Snapshot, UploadIo};
+use crate::apple::ckks::upload::{Binding, Phase, Snapshot, UploadIo};
 use crate::model::PasskeyCredential;
 use crate::passkey::registration::{CreationContext, Registration};
 use crate::security::sep::ProviderError;
@@ -56,10 +56,21 @@ impl Broker {
         }
         // Fetch the initial complete hierarchy before opening the desktop
         // prompt or holding any private scalar. Preparation validates the zone.
-        let snapshot = io.fetch_zone(&request.binding.zone)?;
-        if canceled.load(Ordering::Acquire) || !session.valid() {
-            return Err(ProviderError::Canceled.into());
-        }
+        let preflight_deadline = Instant::now() + Duration::from_secs(60);
+        let preflight = || {
+            if canceled.load(Ordering::Acquire) || !session.valid() {
+                return Err(ProviderError::Canceled.into());
+            }
+            if canceled.load(Ordering::Acquire) {
+                return Err(ProviderError::Canceled.into());
+            }
+            if Instant::now() >= preflight_deadline {
+                return Err(ProviderError::Expired.into());
+            }
+            Ok(())
+        };
+        let snapshot = io.fetch_zone(&request.binding.zone, &preflight)?;
+        preflight()?;
         let excluded = self
             .registry
             .browser_credentials(self.owner)?
@@ -147,7 +158,6 @@ impl PendingCreation<'_> {
         selected.verify_record(self.draft.record())?;
         let binding = self.draft.binding();
         let record = self.draft.record();
-        let mut io = GuardedIo { inner: io, check };
         let mut upload = self.registry.uploads()?.resume_or_prepare(binding, || {
             check()?;
             let prepared = selected.prepare_upload(binding, &self.snapshot)?;
@@ -162,16 +172,16 @@ impl PendingCreation<'_> {
         check()?;
         match (recovery, upload.phase()?) {
             (UploadRecovery::RetryConfirmedAbsent, Phase::Attempted { .. }) => {
-                upload.retry_after_absence(&mut io)?
+                upload.retry_after_absence(io, check)?
             }
             (UploadRecovery::ReencryptRejected, Phase::Rejected) => upload
-                .reprepare_after_rejection(&mut io, |binding, _, snapshot| {
+                .reprepare_after_rejection(io, check, |binding, _, snapshot| {
                     check()?;
                     selected.prepare_upload(binding, snapshot)
                 })?,
             _ => (),
         }
-        upload.advance(&mut io)?;
+        upload.advance(io, check)?;
         check()?;
         let verified = upload.verified_upload()?;
         self.registry.finish_synced_registration(
@@ -184,34 +194,6 @@ impl PendingCreation<'_> {
             },
             check,
         )
-    }
-}
-
-/// Worker calls must themselves be bounded/cancellable. These guards prevent
-/// result delivery or subsequent side effects after cancellation, session loss
-/// or expiry, including a response received just after an uncertain write.
-struct GuardedIo<'a> {
-    inner: &'a mut dyn UploadIo,
-    check: &'a dyn Fn() -> Result<()>,
-}
-impl UploadIo for GuardedIo<'_> {
-    fn fetch_zone(&mut self, zone: &crate::apple::ckks::ZoneIdentity) -> Result<Snapshot> {
-        (self.check)()?;
-        let result = self.inner.fetch_zone(zone);
-        (self.check)()?;
-        result
-    }
-    fn create_atomic(
-        &mut self,
-        attempt: Uuid,
-        zone: &crate::apple::ckks::ZoneIdentity,
-        record: &crate::apple::ckks::Record,
-        pointer: &crate::apple::ckks::Record,
-    ) -> Result<SaveOutcome> {
-        (self.check)()?;
-        let result = self.inner.create_atomic(attempt, zone, record, pointer);
-        (self.check)()?;
-        result
     }
 }
 

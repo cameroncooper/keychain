@@ -30,7 +30,7 @@ pub(crate) fn verified_for(
                 server_record(record, &binding.zone, tag)
             })
             .collect::<Result<Vec<_>>>()?;
-    let snapshot = f.io.fetch_zone(&binding.zone)?;
+    let snapshot = f.io.fetch_zone(&binding.zone, &|| Ok(()))?;
     let current = CurrentKey::from_snapshot(
         &binding.zone.name,
         &snapshot.records,
@@ -49,7 +49,7 @@ pub(crate) fn verified_for(
         &snapshot,
     )?;
     let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(plan)?;
-    session.advance(&mut f.io)?;
+    session.advance(&mut f.io, &|| Ok(()))?;
     session.verified_upload()
 }
 
@@ -104,7 +104,7 @@ fn resume_before_preparation_never_calls_the_factory_for_an_existing_or_corrupt_
 #[test]
 fn prepare_checks_encrypted_identity_before_creating_a_journal() -> Result<()> {
     let mut f = Fixture::new()?;
-    let snapshot = f.io.fetch_zone(&f.plan.0.binding.zone)?;
+    let snapshot = f.io.fetch_zone(&f.plan.0.binding.zone, &|| Ok(()))?;
     let other = p256::SecretKey::from_slice(&[8u8; 32]).map_err(|_| invalid("test key"))?;
     let public = other.public_key().to_encoded_point(false);
     assert!(
@@ -350,7 +350,12 @@ struct FakeIo {
     poison_ack: Option<Arc<AtomicBool>>,
 }
 impl UploadIo for FakeIo {
-    fn fetch_zone(&mut self, zone: &ZoneIdentity) -> Result<Snapshot> {
+    fn fetch_zone(
+        &mut self,
+        zone: &ZoneIdentity,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Snapshot> {
+        check()?;
         assert_eq!(zone, &self.zone);
         if self.fail_fetch {
             return Err(Error::Apple(
@@ -374,7 +379,9 @@ impl UploadIo for FakeIo {
         zone: &ZoneIdentity,
         record: &Record,
         pointer: &Record,
+        check: &dyn Fn() -> Result<()>,
     ) -> Result<SaveOutcome> {
+        check()?;
         assert_eq!(zone, &self.zone);
         self.writes.push((attempt, record.clone()));
         let current = self
@@ -409,16 +416,44 @@ impl UploadIo for FakeIo {
 }
 
 #[test]
+fn cancellation_after_acceptance_preserves_uncertain_attempt_and_reconciles_without_resend()
+-> Result<()> {
+    let mut f = Fixture::new()?;
+    let canceled = Arc::new(AtomicBool::new(false));
+    f.io.poison_ack = Some(canceled.clone());
+    let check = || {
+        if canceled.load(Ordering::Acquire) {
+            Err(crate::security::sep::ProviderError::Canceled.into())
+        } else {
+            Ok(())
+        }
+    };
+    let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
+    assert!(session.advance(&mut f.io, &check).is_err());
+    assert!(matches!(session.phase()?, Phase::Attempted { .. }));
+    assert!(session.verified_upload().is_err());
+    assert_eq!(f.io.writes.len(), 1);
+    drop(session);
+    canceled.store(false, Ordering::Release);
+    f.io.poison_ack = None;
+    let mut resumed = UploadStore::new(&f.directory, &f.backend)?.resume(f.plan.binding())?;
+    resumed.advance(&mut f.io, &check)?;
+    assert!(matches!(resumed.phase()?, Phase::FetchVerified { .. }));
+    assert_eq!(f.io.writes.len(), 1);
+    Ok(())
+}
+
+#[test]
 fn rejected_upload_reencrypts_the_same_key_and_reopens_without_losing_prior_ciphertext()
 -> Result<()> {
     let mut f = Fixture::new()?;
     let private = private_fixture(7)?;
     let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
     f.io.reject = true;
-    assert!(session.advance(&mut f.io).is_err());
+    assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
     let attempts = session.journal.attempts.clone();
     rotate_class_key(&mut f.io)?;
-    session.reprepare_after_rejection(&mut f.io, |binding, credential, snapshot| {
+    session.reprepare_after_rejection(&mut f.io, &|| Ok(()), |binding, credential, snapshot| {
         PreparedUpload::encrypt_from_snapshot(
             binding.clone(),
             credential.clone(),
@@ -446,7 +481,7 @@ fn rejected_upload_reencrypts_the_same_key_and_reopens_without_losing_prior_ciph
     assert_eq!(session.journal.plan.record, cipher);
     assert_eq!(session.journal.superseded[0].record, f.plan.0.record);
     f.io.reject = false;
-    session.advance(&mut f.io)?;
+    session.advance(&mut f.io, &|| Ok(()))?;
     assert_eq!(f.io.writes.len(), 2);
     assert_eq!(f.io.writes[1].1, cipher);
     session.verified_upload()?.verify_identity(
@@ -464,22 +499,22 @@ fn a_late_commit_of_superseded_ciphertext_is_verified_without_sending_the_new_pl
     let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
     f.io.lost_response = true;
     f.io.commit = false;
-    assert!(session.advance(&mut f.io).is_err());
+    assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
     assert_eq!(session.journal.superseded.len(), 0);
     assert!(
         session
-            .reprepare_after_rejection(&mut f.io, |_, _, _| panic!(
+            .reprepare_after_rejection(&mut f.io, &|| Ok(()), |_, _, _| panic!(
                 "uncertain upload reached re-encryption"
             ))
             .is_err()
     );
-    session.retry_after_absence(&mut f.io)?;
+    session.retry_after_absence(&mut f.io, &|| Ok(()))?;
     f.io.reject = true;
     f.io.lost_response = false;
-    assert!(session.advance(&mut f.io).is_err());
+    assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
     assert_eq!(session.phase()?, &Phase::Rejected);
     rotate_class_key(&mut f.io)?;
-    session.reprepare_after_rejection(&mut f.io, |binding, credential, snapshot| {
+    session.reprepare_after_rejection(&mut f.io, &|| Ok(()), |binding, credential, snapshot| {
         PreparedUpload::encrypt_from_snapshot(
             binding.clone(),
             credential.clone(),
@@ -494,7 +529,7 @@ fn a_late_commit_of_superseded_ciphertext_is_verified_without_sending_the_new_pl
         &f.io.zone,
         "late-original",
     )?);
-    session.advance(&mut f.io)?;
+    session.advance(&mut f.io, &|| Ok(()))?;
     assert_eq!(f.io.writes.len(), 2);
     assert!(
         matches!(session.phase()?,Phase::FetchVerified {change_tag} if change_tag == "late-original")
@@ -521,18 +556,18 @@ fn reencrypt_refuses_wrong_identity_stale_keys_failed_fetch_and_existing_records
     let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
     assert!(
         session
-            .reprepare_after_rejection(&mut f.io, |_, _, _| panic!(
+            .reprepare_after_rejection(&mut f.io, &|| Ok(()), |_, _, _| panic!(
                 "prepared upload reached re-encryption"
             ))
             .is_err()
     );
     f.io.reject = true;
-    assert!(session.advance(&mut f.io).is_err());
+    assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
     let original = std::fs::read(&session.path).map_err(|e| Error::io(&session.path, e))?;
     f.io.fail_fetch = true;
     assert!(
         session
-            .reprepare_after_rejection(&mut f.io, |_, _, _| panic!(
+            .reprepare_after_rejection(&mut f.io, &|| Ok(()), |_, _, _| panic!(
                 "failed fetch reached secret callback"
             ))
             .is_err()
@@ -541,7 +576,7 @@ fn reencrypt_refuses_wrong_identity_stale_keys_failed_fetch_and_existing_records
     let wrong_private = private_fixture(9)?;
     assert!(
         session
-            .reprepare_after_rejection(&mut f.io, |binding, credential, snapshot| {
+            .reprepare_after_rejection(&mut f.io, &|| Ok(()), |binding, credential, snapshot| {
                 PreparedUpload::encrypt_from_snapshot(
                     binding.clone(),
                     credential.clone(),
@@ -567,19 +602,19 @@ fn reencrypt_refuses_wrong_identity_stale_keys_failed_fetch_and_existing_records
         }
         assert!(
             session
-                .reprepare_after_rejection(&mut f.io, |_, _, _| Ok(changed))
+                .reprepare_after_rejection(&mut f.io, &|| Ok(()), |_, _, _| Ok(changed))
                 .is_err()
         );
     }
     rotate_class_key(&mut f.io)?;
     assert!(
         session
-            .reprepare_after_rejection(&mut f.io, |_, _, _| Ok(f.plan.clone()))
+            .reprepare_after_rejection(&mut f.io, &|| Ok(()), |_, _, _| Ok(f.plan.clone()))
             .is_err()
     );
     assert!(
         session
-            .reprepare_after_rejection(&mut f.io, |_, _, _| Err(Error::Refused(
+            .reprepare_after_rejection(&mut f.io, &|| Ok(()), |_, _, _| Err(Error::Refused(
                 "synthetic canceled decrypt".into()
             )))
             .is_err()
@@ -597,15 +632,15 @@ fn reencrypt_refuses_wrong_identity_stale_keys_failed_fetch_and_existing_records
     )?);
     assert!(
         session
-            .reprepare_after_rejection(&mut f.io, |_, _, _| panic!(
+            .reprepare_after_rejection(&mut f.io, &|| Ok(()), |_, _, _| panic!(
                 "existing record reached secret callback"
             ))
             .is_err()
     );
-    session.advance(&mut f.io)?;
+    session.advance(&mut f.io, &|| Ok(()))?;
     assert!(
         session
-            .reprepare_after_rejection(&mut f.io, |_, _, _| panic!(
+            .reprepare_after_rejection(&mut f.io, &|| Ok(()), |_, _, _| panic!(
                 "verified upload reached re-encryption"
             ))
             .is_err()
@@ -625,11 +660,11 @@ fn reencrypt_checkpoint_failure_poisoning_reopens_the_durable_plan() -> Result<(
     let private = private_fixture(7)?;
     let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
     f.io.reject = true;
-    assert!(session.advance(&mut f.io).is_err());
+    assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
     rotate_class_key(&mut f.io)?;
     assert!(
         session
-            .reprepare_after_rejection(&mut f.io, |binding, credential, snapshot| {
+            .reprepare_after_rejection(&mut f.io, &|| Ok(()), |binding, credential, snapshot| {
                 let plan = PreparedUpload::encrypt_from_snapshot(
                     binding.clone(),
                     credential.clone(),
@@ -643,14 +678,14 @@ fn reencrypt_checkpoint_failure_poisoning_reopens_the_durable_plan() -> Result<(
     );
     assert!(session.phase().is_err());
     assert!(session.verified_upload().is_err());
-    assert!(session.advance(&mut f.io).is_err());
+    assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
     f.denied.store(false, Ordering::Release);
     drop(session);
     let mut session = UploadStore::new(&f.directory, &f.backend)?.resume(f.plan.binding())?;
     assert_eq!(session.phase()?, &Phase::Rejected);
     assert_eq!(session.journal.plan.record, f.plan.0.record);
     assert!(session.journal.superseded.is_empty());
-    session.reprepare_after_rejection(&mut f.io, |binding, credential, snapshot| {
+    session.reprepare_after_rejection(&mut f.io, &|| Ok(()), |binding, credential, snapshot| {
         PreparedUpload::encrypt_from_snapshot(
             binding.clone(),
             credential.clone(),
@@ -659,7 +694,7 @@ fn reencrypt_checkpoint_failure_poisoning_reopens_the_durable_plan() -> Result<(
         )
     })?;
     f.io.reject = false;
-    session.advance(&mut f.io)?;
+    session.advance(&mut f.io, &|| Ok(()))?;
     assert!(matches!(session.phase()?, Phase::FetchVerified { .. }));
     assert_eq!(f.io.writes.len(), 2);
     Ok(())
@@ -672,21 +707,25 @@ fn reencrypt_history_is_bounded_and_refuses_unrecognized_ciphertext() -> Result<
     let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
     f.io.reject = true;
     for _ in 0..MAX_REBASES {
-        assert!(session.advance(&mut f.io).is_err());
-        session.reprepare_after_rejection(&mut f.io, |binding, credential, snapshot| {
-            PreparedUpload::encrypt_from_snapshot(
-                binding.clone(),
-                credential.clone(),
-                &private,
-                snapshot,
-            )
-        })?;
+        assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
+        session.reprepare_after_rejection(
+            &mut f.io,
+            &|| Ok(()),
+            |binding, credential, snapshot| {
+                PreparedUpload::encrypt_from_snapshot(
+                    binding.clone(),
+                    credential.clone(),
+                    &private,
+                    snapshot,
+                )
+            },
+        )?;
     }
-    assert!(session.advance(&mut f.io).is_err());
+    assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
     let original = read_bounded(&session.path)?;
     assert!(
         session
-            .reprepare_after_rejection(&mut f.io, |_, _, _| panic!(
+            .reprepare_after_rejection(&mut f.io, &|| Ok(()), |_, _, _| panic!(
                 "exhausted budget reached secret callback"
             ))
             .is_err()
@@ -696,7 +735,7 @@ fn reencrypt_history_is_bounded_and_refuses_unrecognized_ciphertext() -> Result<
     assert_eq!(session.phase()?, &Phase::Rejected);
     assert_eq!(read_bounded(&session.path)?, original);
     // Same identity under a new, never-prepared ciphertext is still refused.
-    let snapshot = f.io.fetch_zone(&f.io.zone.clone())?;
+    let snapshot = f.io.fetch_zone(&f.io.zone.clone(), &|| Ok(()))?;
     let foreign = PreparedUpload::encrypt_from_snapshot(
         f.plan.0.binding.clone(),
         f.plan.0.credential.clone(),
@@ -708,14 +747,14 @@ fn reencrypt_history_is_bounded_and_refuses_unrecognized_ciphertext() -> Result<
         &f.io.zone,
         "unknown-ciphertext",
     )?);
-    assert!(session.advance(&mut f.io).is_err());
+    assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
     assert!(session.verified_upload().is_err());
     assert_eq!(session.journal.attempts.len(), MAX_REBASES + 1);
     assert_eq!(f.io.writes.len(), MAX_REBASES + 1);
     assert_eq!(session.journal.plan.record.record_type, "item");
     // The previous ciphertext remains usable even after exhausting rebases.
     f.io.remote = Some(server_record(&f.plan.0.record, &f.io.zone, "late-known")?);
-    session.advance(&mut f.io)?;
+    session.advance(&mut f.io, &|| Ok(()))?;
     assert!(session.verified_upload().is_ok());
     Ok(())
 }
@@ -767,8 +806,8 @@ fn resume_refuses_a_superseded_plan_with_changed_credential_identity() -> Result
     let private = private_fixture(7)?;
     let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
     f.io.reject = true;
-    assert!(session.advance(&mut f.io).is_err());
-    session.reprepare_after_rejection(&mut f.io, |binding, credential, snapshot| {
+    assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
+    session.reprepare_after_rejection(&mut f.io, &|| Ok(()), |binding, credential, snapshot| {
         PreparedUpload::encrypt_from_snapshot(
             binding.clone(),
             credential.clone(),
@@ -836,7 +875,7 @@ fn verified_backup_registration_requires_matching_receipt_and_fresh_protected_si
     let key = SigningKey::from_slice(&[7u8; 32]).map_err(|_| invalid("test key"))?;
     let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
     assert!(session.verified_upload().is_err());
-    session.advance(&mut f.io)?;
+    session.advance(&mut f.io, &|| Ok(()))?;
     let receipt = session.verified_upload()?;
     let sign = |protection, uv| {
         let key = &key;
@@ -951,13 +990,13 @@ fn accepted_upload_requires_independent_fetch_and_reopens_without_another_write(
             .resume(f.plan.binding())
             .is_err()
     ); // Per-transaction lock.
-    session.advance(&mut f.io)?;
+    session.advance(&mut f.io, &|| Ok(()))?;
     assert!(matches!(session.phase()?, Phase::FetchVerified { .. }));
     assert_eq!(f.io.writes.len(), 1);
     assert_eq!(session.credential(), &f.plan.0.credential);
     drop(session);
     let mut session = UploadStore::new(&f.directory, &f.backend)?.resume(f.plan.binding())?;
-    session.advance(&mut f.io)?;
+    session.advance(&mut f.io, &|| Ok(()))?;
     assert_eq!(f.io.writes.len(), 1);
     let bytes = std::fs::read(&session.path).map_err(|e| Error::io(&session.path, e))?;
     assert!(!bytes.windows(b"Test User".len()).any(|s| s == b"Test User"));
@@ -970,11 +1009,11 @@ fn ambiguous_commit_reconciles_exact_identity_and_never_resends_automatically() 
     let mut f = Fixture::new()?;
     f.io.lost_response = true;
     let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
-    assert!(session.advance(&mut f.io).is_err());
+    assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
     assert!(matches!(session.phase()?, Phase::Attempted { .. }));
     drop(session);
     let mut session = UploadStore::new(&f.directory, &f.backend)?.resume(f.plan.binding())?;
-    session.advance(&mut f.io)?; // Server already has this exact ciphertext/key.
+    session.advance(&mut f.io, &|| Ok(()))?; // Server already has this exact ciphertext/key.
     assert!(matches!(session.phase()?, Phase::FetchVerified { .. }));
     assert_eq!(f.io.writes.len(), 1);
     Ok(())
@@ -986,13 +1025,13 @@ fn unresolved_absence_requires_explicit_retry_with_identical_ciphertext() -> Res
     f.io.lost_response = true;
     f.io.commit = false;
     let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
-    assert!(session.advance(&mut f.io).is_err());
-    assert!(session.advance(&mut f.io).is_err());
+    assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
+    assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
     assert_eq!(f.io.writes.len(), 1);
-    session.retry_after_absence(&mut f.io)?;
+    session.retry_after_absence(&mut f.io, &|| Ok(()))?;
     f.io.lost_response = false;
     f.io.commit = true;
-    session.advance(&mut f.io)?;
+    session.advance(&mut f.io, &|| Ok(()))?;
     assert_eq!(f.io.writes.len(), 2);
     assert_ne!(f.io.writes[0].0, f.io.writes[1].0);
     assert_eq!(f.io.writes[0].1, f.io.writes[1].1);
@@ -1009,12 +1048,12 @@ fn changed_pointer_or_atomic_rejection_preserves_key_without_sending_again() -> 
             f.io.records[0] = server_record(&f.io.records[0], &f.io.zone, "rotated-tag")?;
         }
         let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
-        assert!(session.advance(&mut f.io).is_err());
+        assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
         assert_eq!(session.phase()?, &Phase::Rejected);
         assert_eq!(f.io.writes.len(), usize::from(reject_at_server));
         drop(session);
         let mut session = UploadStore::new(&f.directory, &f.backend)?.resume(f.plan.binding())?;
-        assert!(session.advance(&mut f.io).is_err());
+        assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
         assert_eq!(
             session.credential().signing_key,
             f.plan.0.credential.signing_key
@@ -1029,11 +1068,11 @@ fn acceptance_or_http_success_is_not_fetch_verification_when_payload_changes() -
     let mut f = Fixture::new()?;
     f.io.tamper_fetch = true;
     let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
-    assert!(session.advance(&mut f.io).is_err());
+    assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
     assert!(matches!(session.phase()?, Phase::Accepted { .. }));
     assert!(
         session
-            .reprepare_after_rejection(&mut f.io, |_, _, _| panic!(
+            .reprepare_after_rejection(&mut f.io, &|| Ok(()), |_, _, _| panic!(
                 "accepted upload reached re-encryption"
             ))
             .is_err()
@@ -1042,7 +1081,7 @@ fn acceptance_or_http_success_is_not_fetch_verification_when_payload_changes() -
     assert_eq!(f.io.writes.len(), 1);
     drop(session);
     let mut session = UploadStore::new(&f.directory, &f.backend)?.resume(f.plan.binding())?;
-    assert!(session.advance(&mut f.io).is_err());
+    assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
     assert!(!matches!(session.phase()?, Phase::FetchVerified { .. }));
     Ok(())
 }
@@ -1058,10 +1097,10 @@ fn checkpoint_failures_poison_memory_and_reconcile_the_durable_attempt_after_reo
         } else {
             f.denied.store(true, Ordering::Release);
         }
-        assert!(session.advance(&mut f.io).is_err());
+        assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
         assert!(session.phase().is_err());
         assert!(session.verified_upload().is_err());
-        assert!(session.advance(&mut f.io).is_err());
+        assert!(session.advance(&mut f.io, &|| Ok(())).is_err());
         assert_eq!(f.io.writes.len(), usize::from(after_send));
         f.denied.store(false, Ordering::Release);
         drop(session);
@@ -1072,7 +1111,7 @@ fn checkpoint_failures_poison_memory_and_reconcile_the_durable_attempt_after_reo
             assert_eq!(session.phase()?, &Phase::Prepared);
         }
         f.io.poison_ack = None;
-        session.advance(&mut f.io)?;
+        session.advance(&mut f.io, &|| Ok(()))?;
         assert!(matches!(session.phase()?, Phase::FetchVerified { .. }));
         assert_eq!(f.io.writes.len(), 1);
     }

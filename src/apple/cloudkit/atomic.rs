@@ -52,11 +52,23 @@ impl<'a, 'provider> AppleUploadIo<'a, 'provider> {
     }
 }
 impl UploadIo for AppleUploadIo<'_, '_> {
-    fn fetch_zone(&mut self, zone: &ZoneIdentity) -> Result<Snapshot> {
+    fn fetch_zone(
+        &mut self,
+        zone: &ZoneIdentity,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Snapshot> {
+        check()?;
         if zone != &self.binding.zone {
             return Err(invalid("fetch differs from the fixed upload scope"));
         }
-        Snapshot::fetch(self.transport, zone.clone(), self.tlks.clone())
+        let snapshot = Snapshot::fetch_with(zone.clone(), self.tlks.clone(), |body| {
+            check()?;
+            let response = self.transport.fetch_records(body)?;
+            check()?;
+            Ok(response)
+        })?;
+        check()?;
+        Ok(snapshot)
     }
     fn create_atomic(
         &mut self,
@@ -64,7 +76,9 @@ impl UploadIo for AppleUploadIo<'_, '_> {
         zone: &ZoneIdentity,
         record: &Record,
         unchanged_pointer: &Record,
+        check: &dyn Fn() -> Result<()>,
     ) -> Result<SaveOutcome> {
+        check()?;
         if zone != &self.binding.zone || record.name != self.binding.transaction.to_string() {
             return Err(invalid("save differs from the fixed upload scope"));
         }
@@ -75,7 +89,11 @@ impl UploadIo for AppleUploadIo<'_, '_> {
             record,
             unchanged_pointer,
         )?;
-        save.parse_response(&self.send_prepared_save(&save.body)?)
+        let response = self.send_prepared_save(&save.body)?;
+        check()?;
+        let outcome = save.parse_response(&response)?;
+        check()?;
+        Ok(outcome)
     }
 }
 

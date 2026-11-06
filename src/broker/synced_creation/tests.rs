@@ -1,5 +1,6 @@
 //! Synthetic complete-operation integration; no driver, UI or Apple requests.
 use super::*;
+use crate::apple::ckks::upload::SaveOutcome;
 use crate::apple::ckks::upload::tests::synthetic_io;
 use crate::apple::ckks::{Record, ZoneIdentity};
 use crate::broker::registry::test_support::{binding, context, open_scalar, registry};
@@ -32,12 +33,18 @@ impl<I: UploadIo> Observed<I> {
     }
 }
 impl<I: UploadIo> UploadIo for Observed<I> {
-    fn fetch_zone(&mut self, zone: &ZoneIdentity) -> Result<Snapshot> {
+    fn fetch_zone(
+        &mut self,
+        zone: &ZoneIdentity,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Snapshot> {
+        check()?;
         self.fetches += 1;
-        let result = self.inner.fetch_zone(zone);
+        let result = self.inner.fetch_zone(zone, check);
         if self.cancel_fetch == Some(self.fetches) {
             self.canceled.store(true, Ordering::Release);
         }
+        check()?;
         result
     }
     fn create_atomic(
@@ -46,7 +53,9 @@ impl<I: UploadIo> UploadIo for Observed<I> {
         zone: &ZoneIdentity,
         record: &Record,
         pointer: &Record,
+        check: &dyn Fn() -> Result<()>,
     ) -> Result<SaveOutcome> {
+        check()?;
         self.writes.push(record.clone());
         if self.reject {
             return Ok(SaveOutcome::PreconditionFailed);
@@ -54,13 +63,16 @@ impl<I: UploadIo> UploadIo for Observed<I> {
         if self.fail_before_commit {
             return Err(Error::Apple("synthetic uncertain absent write".into()));
         }
-        let result = self.inner.create_atomic(attempt, zone, record, pointer);
+        let result = self
+            .inner
+            .create_atomic(attempt, zone, record, pointer, check);
         if self.cancel_after_send {
             self.canceled.store(true, Ordering::Release);
         }
         if self.lose_reply {
             return Err(Error::Apple("synthetic lost reply".into()));
         }
+        check()?;
         result
     }
 }
@@ -83,7 +95,7 @@ fn selected_creation_uploads_registers_and_retries_delivery_without_regenerating
     let draft = registry.prepare_synced_registration(&binding, &context)?;
     let scalar = open_scalar(draft.record())?;
     let mut io = Observed::new(synthetic_io(binding.zone.clone())?);
-    let snapshot = io.fetch_zone(&binding.zone)?;
+    let snapshot = io.fetch_zone(&binding.zone, &|| Ok(()))?;
     let selected = SelectedScalar::from_biometric(draft.record(), &scalar)?; // Explicit fake UV fixture.
     let response = PendingCreation {
         registry: &registry,
@@ -109,7 +121,7 @@ fn selected_creation_uploads_registers_and_retries_delivery_without_regenerating
     drop(registry);
     let registry = Registry::open(dir.path())?;
     let resumed = registry.prepare_synced_registration(&binding, &context)?;
-    let snapshot = io.fetch_zone(&binding.zone)?; // Contains this item, so new preparation would fail.
+    let snapshot = io.fetch_zone(&binding.zone, &|| Ok(()))?; // Contains this item, so new preparation would fail.
     let fresh = SelectedScalar::from_biometric(resumed.record(), &scalar)?;
     let response = PendingCreation {
         registry: &registry,
@@ -136,7 +148,7 @@ fn lost_upload_reply_keeps_registration_hidden_then_reconciles_without_another_s
     let scalar = open_scalar(draft.record())?;
     let mut io = Observed::new(synthetic_io(binding.zone.clone())?);
     io.lose_reply = true;
-    let snapshot = io.fetch_zone(&binding.zone)?;
+    let snapshot = io.fetch_zone(&binding.zone, &|| Ok(()))?;
     let selected = SelectedScalar::from_biometric(draft.record(), &scalar)?;
     assert!(
         PendingCreation {
@@ -153,7 +165,7 @@ fn lost_upload_reply_keeps_registration_hidden_then_reconciles_without_another_s
     assert!(matches!(upload.phase()?, Phase::Attempted { .. }));
     drop(upload);
     io.lose_reply = false;
-    let snapshot = io.fetch_zone(&binding.zone)?;
+    let snapshot = io.fetch_zone(&binding.zone, &|| Ok(()))?;
     let fresh = SelectedScalar::from_biometric(draft.record(), &scalar)?;
     PendingCreation {
         registry: &registry,
@@ -182,7 +194,7 @@ fn canceled_network_results_never_activate_a_registration_and_new_operation_can_
         let draft = registry.prepare_synced_registration(&binding, &context)?;
         let scalar = open_scalar(draft.record())?;
         let mut io = Observed::new(synthetic_io(binding.zone.clone())?);
-        let snapshot = io.fetch_zone(&binding.zone)?;
+        let snapshot = io.fetch_zone(&binding.zone, &|| Ok(()))?;
         io.fetches = 0;
         if after_ack {
             io.cancel_fetch = Some(2);
@@ -215,7 +227,7 @@ fn canceled_network_results_never_activate_a_registration_and_new_operation_can_
         io.cancel_fetch = None;
         io.cancel_after_send = false;
         canceled.store(false, Ordering::Release);
-        let snapshot = io.fetch_zone(&binding.zone)?;
+        let snapshot = io.fetch_zone(&binding.zone, &|| Ok(()))?;
         let fresh = SelectedScalar::from_biometric(draft.record(), &scalar)?; // New logical UV operation.
         PendingCreation {
             registry: &registry,
@@ -251,7 +263,7 @@ fn explicit_recovery_choices_preserve_the_key_and_do_not_hide_an_uncertain_retry
         let mut io = Observed::new(synthetic_io(binding.zone.clone())?);
         io.reject = rejected;
         io.fail_before_commit = !rejected;
-        let snapshot = io.fetch_zone(&binding.zone)?;
+        let snapshot = io.fetch_zone(&binding.zone, &|| Ok(()))?;
         let selected = SelectedScalar::from_biometric(draft.record(), &scalar)?;
         assert!(
             PendingCreation {
@@ -266,7 +278,7 @@ fn explicit_recovery_choices_preserve_the_key_and_do_not_hide_an_uncertain_retry
         let original = io.writes[0].clone();
         io.reject = false;
         io.fail_before_commit = false;
-        let snapshot = io.fetch_zone(&binding.zone)?;
+        let snapshot = io.fetch_zone(&binding.zone, &|| Ok(()))?;
         let fresh = SelectedScalar::from_biometric(draft.record(), &scalar)?;
         assert!(
             PendingCreation {
@@ -279,7 +291,7 @@ fn explicit_recovery_choices_preserve_the_key_and_do_not_hide_an_uncertain_retry
             .is_err()
         );
         assert_eq!(io.writes.len(), 1);
-        let snapshot = io.fetch_zone(&binding.zone)?;
+        let snapshot = io.fetch_zone(&binding.zone, &|| Ok(()))?;
         let fresh = SelectedScalar::from_biometric(draft.record(), &scalar)?;
         let policy = if rejected {
             UploadRecovery::ReencryptRejected
@@ -318,7 +330,7 @@ fn changed_selected_record_and_expired_operation_do_not_prepare_or_send_an_uploa
     altered.credential.username = "another selected account".into();
     let selected = SelectedScalar::from_biometric(&altered, &scalar)?;
     let mut io = Observed::new(synthetic_io(binding.zone.clone())?);
-    let snapshot = io.fetch_zone(&binding.zone)?;
+    let snapshot = io.fetch_zone(&binding.zone, &|| Ok(()))?;
     assert!(
         PendingCreation {
             registry: &registry,
@@ -329,7 +341,7 @@ fn changed_selected_record_and_expired_operation_do_not_prepare_or_send_an_uploa
         .finish(&selected, &mut io, &|| Ok(()), UploadRecovery::Reconcile)
         .is_err()
     );
-    let snapshot = io.fetch_zone(&binding.zone)?;
+    let snapshot = io.fetch_zone(&binding.zone, &|| Ok(()))?;
     let selected = SelectedScalar::from_biometric(draft.record(), &scalar)?;
     let guards = Cell::new(0);
     assert!(

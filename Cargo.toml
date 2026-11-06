@@ -28,6 +28,7 @@ listenfd = "1"
 aes = { version = "0.8", features = ["zeroize"] }
 aes-gcm = "0.10"
 aes-siv = "0.7"
+async-io = "2"
 base64 = "0.22"
 cbc = "0.1"
 # Enable cleanup in AES-SIV's transitive MAC implementation as well.
@@ -38,6 +39,7 @@ clap = { version = "4.5", features = ["derive"] }
 data-encoding = "2"
 flate2 = "1"
 fs2 = "0.4"
+futures-lite = "2"
 hex = "0.4"
 hkdf = "0.12"
 hmac = "0.12"
