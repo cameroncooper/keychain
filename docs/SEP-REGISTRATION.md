@@ -112,3 +112,30 @@ intent instead of deleting it after saving the wrapped key. The privileged
 registration test now covers legacy intent backfill and a missing committed key:
 neither case may execute a replacement CREATE. No real credentials were removed
 or regenerated during these tests.
+
+
+## Real Chromium registration and login — 2026-11-06
+
+The user registered the disposable username `keychain-sep-20261106` at
+webauthn.io through the project extension, chose **This device**, completed the
+desktop biometric operation and then successfully authenticated with the same
+username. The relying party accepted both registration and authentication.
+This is actual browser/RP evidence, superseding the earlier inspection-only limit
+for this device-only path.
+
+A fresh CLI metadata check found exactly one corresponding native record,
+`22fde9bf-71e2-4844-a4b6-da69b95a125f`, with device-bound storage and ES256.
+Unified inventory contains five items. Both original passkey summaries still
+match their pre-migration public baselines. The new public summary is privately
+retained in ignored `.sep-check-main-webauthn-20261106/public-native-after.json`.
+No private scalar/wrapped key was exported by these checks.
+
+The browser is installed Chromium 156 on Asahi/M1, launched with the unpacked
+extension in the isolated `.sep-check-browser-webauthn-20261106/chromium` profile.
+The normal Chromium profile's existing singleton lock was not altered. The
+native-host registration uses `cameroncooper.keychain` and the stable project
+extension ID. Native registration/login makes no Apple item upload; the iCloud
+creation flag remains disabled. This does not establish reboot/cold-boot,
+session-lock/expiry behavior, other hardware or synced creation/other-device use.
+The demo expires credentials after 24 hours, so persistence tests needing RP
+acceptance must account for that external expiry without replacing the local key.

@@ -105,3 +105,24 @@ the expected WebAuthn candidate for a required-UV request at
 The Chromium native-host manifest points at the current release executable under
 this repository. Actual browser/RP authentication and post-reboot verification
 remain separate acceptance gates; no source retirement is justified yet.
+
+
+Browser follow-up: the user's initial security-key dialog came from LibreWolf,
+which the Chromium-specific adapter does not integrate. The installed Chromium
+profile had a pre-existing singleton lock, so it was left intact. A separate
+private browser profile was opened under
+`.sep-check-browser-webauthn-20261106/chromium`, with the unpacked project extension
+and its fixed native-host registration. The expected extension ID was registered
+with no disable reasons. This changed neither the default browser nor the locked
+profile.
+
+The user confirmed the Keychain desktop fingerprint operation completed in that
+Chromium window. The site then returned “Unrecognized credential ID”. Its
+[published credential service](https://github.com/duo-labs/webauthn.io/blob/15d77cd9059618e0cb8c863303531fdcf7ee5a3a/_app/homepage/services/credential.py)
+expires demo registrations after 24 hours and emits that exact error on a missing
+ID before signature verification. Expiry is consistent with this weeks-old test;
+the current public metadata still matches the pre-migration baseline. This is
+real browser-to-broker biometric execution, not successful RP signature verification
+or login. The original credential remains retained. Fresh device-only registration
+and authentication are now the next browser test; a still-registered fresh synced
+credential is needed for positive synced-migration RP acceptance.

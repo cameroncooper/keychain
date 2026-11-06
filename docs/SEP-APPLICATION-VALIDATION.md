@@ -307,3 +307,18 @@ items remain in unified inventory. A fresh configured native host discovers the
 expected WebAuthn candidate with required UV and biometric availability, without
 capture. See [migration scope and limits](SEP-MIGRATION.md#main-profile-webauthn-migration--2026-11-06).
 Real Chromium/RP authentication and complete-chain reboot checks remain pending.
+
+
+## Real native browser registration/login — 2026-11-06
+
+The user reported successful registration and login for `keychain-sep-20261106`
+in the isolated Chromium window, choosing **This device** and using the desktop
+fingerprint prompt. Fresh metadata confirms device-bound ES256 record
+`22fde9bf-71e2-4844-a4b6-da69b95a125f`; unified inventory has five entries, and the
+original WebAuthn/Apple.com baselines are unchanged. See the
+[registration evidence](SEP-REGISTRATION.md#real-chromium-registration-and-login--2026-11-06).
+This supplies relying-party acceptance for native SEP creation/signing. It does
+not supply successful RP verification of the old migrated synced credential:
+that separate browser request reached the fingerprint operation, then the demo
+rejected its missing/expired ID before checking the signature. Fresh synced
+registration on an Apple device is the next migration acceptance fixture.

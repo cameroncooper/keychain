@@ -136,6 +136,9 @@ cargo build --release
 ./browser/chromium/install-host.sh
 ```
 
+Use Chromium with this extension. Firefox/LibreWolf integration requires a separate
+adapter; their built-in security-key prompt does not route to this native host.
+
 Then open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select the
 absolute `browser/chromium` directory from this checkout. The manifest contains a fixed public key,
 so its extension ID is stable: `lcadeibeloholafalbgoehpbhnplmojh`. Verify that this matches the ID
@@ -153,10 +156,12 @@ There are deliberate initial limits:
 
 - Device-only creation is implemented through the SEP broker: choose **This device**, then use the
   OS fingerprint prompt. Native keys stay in the broker registry and appear in `list`/`show`.
-  The current creation path still needs real browser acceptance testing. See
+  Real Chromium registration and login passed on the development M1; reboot and
+  broader platform acceptance remain open. See
   [registration lifecycle and limits](docs/SEP-REGISTRATION.md).
-- iCloud-syncable creation and Apple uploads remain unimplemented; the browser never silently
-  substitutes device storage for an iCloud save.
+- iCloud-syncable creation and Apple uploads are wired behind a default-off deployment flag.
+  Live Apple write/fetch/other-device validation is still required before enabling that choice.
+  The browser never silently substitutes device storage for an iCloud save.
 - Cross-origin iframe requests and unsupported extensions are refused. Creation supports
   `credProps`; the Chromium caller-origin override is always required.
 - The software backend refuses `userVerification: required`. The SEP broker requires a fresh
@@ -170,6 +175,12 @@ The adapter relies on Chromium's documented
 API. The native host also requires Chromium's injected
 `extensions.remoteDesktopClientOverride` value, rechecks exact HTTPS origin/RP binding and the
 credential allow-list, and caps all messages and credential collections before parsing or signing.
+
+For tests at webauthn.io, its demo server expires registrations after 24 hours.
+A weeks-old passkey can remain in iCloud while the demo returns “Unrecognized credential ID”
+before checking its signature. Use a fresh disposable registration for browser creation/login
+checks; this server-side expiry does not justify deleting or regenerating an existing key.
+See the [demo's credential storage](https://github.com/duo-labs/webauthn.io/blob/15d77cd9059618e0cb8c863303531fdcf7ee5a3a/_app/homepage/services/credential.py).
 
 ## Local security model
 

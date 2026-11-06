@@ -560,3 +560,21 @@ retained, and unified inventory keeps all four items. A fresh main-profile nativ
 host discovers the expected required-UV candidate with biometric availability.
 Real browser/RP authentication, post-reboot validation and source-retirement gates
 remain open; metadata inspection alone does not satisfy them.
+
+
+Real browser follow-up: the open default browser was LibreWolf, outside the supplied
+Chromium adapter. An isolated Chromium profile now loads the correct extension and
+native host. The user confirmed its desktop fingerprint operation completed, but
+webauthn.io rejected the old ID before signature verification. The demo's source
+expires registrations after 24 hours, consistent with the original test's age.
+No key was changed or discarded to work around that server refusal. Native fresh
+registration/login and fresh-synced RP acceptance remain distinct pending gates.
+
+
+Device-only browser acceptance now passed: the user registered and authenticated
+`keychain-sep-20261106` in Chromium through the project extension/desktop prompt.
+Fresh CLI metadata confirms a native device-bound ES256 credential and five total
+items; the two original passkey baselines remain unchanged. This establishes the
+native creation/login RP gate, not reboot or iCloud creation. The old synced demo
+credential still lacks RP acceptance because the server no longer recognizes its
+ID. A fresh Apple-created synced fixture is needed to test that remaining path.
