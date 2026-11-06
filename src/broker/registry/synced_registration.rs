@@ -3,8 +3,9 @@
 //! with VerifyProtected can turn an unfinished iCloud registration into a key.
 
 use super::*;
-use crate::apple::ckks::upload::Binding;
-use crate::passkey::registration::CreationContext;
+use crate::apple::ckks::upload::{Binding, VerifiedUpload};
+use crate::passkey::registration::{CreationContext, Registration};
+use crate::security::authorization::AuthorizedSignature;
 use crate::security::{KeyAlgorithm, KeyRef, KeyUsage};
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use rand::RngCore;
@@ -23,6 +24,15 @@ struct DraftData {
     version: u32,
     binding: Binding,
     record: ProtectedRecord,
+    phase: CreationPhase,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum CreationPhase {
+    Prepared,
+    Activating,
+    Committed,
 }
 
 /// Only the root registry constructs this value. It contains a sealed scalar,
@@ -67,6 +77,9 @@ impl Registry {
         let path = self.synced_creation_filename(id, false)?;
         if path.try_exists().map_err(|e| Error::io(&path, e))? {
             let data = self.read_synced_creation(id, owner)?;
+            if data.phase == CreationPhase::Committed {
+                return Ok(None);
+            }
             return Ok(Some(data.record.into()));
         }
         if self.synced_creation_exists(id)? {
@@ -101,7 +114,46 @@ impl Registry {
                 "synced registration draft identity/policy mismatch".into(),
             ));
         }
+        self.check_synced_active(&draft)?;
         Ok(draft)
+    }
+
+    /// Validate an interrupted or completed promotion without relying on its
+    /// in-memory state. Later normal sync may refresh metadata or rewrap the
+    /// same key; it cannot substitute the original public credential identity.
+    fn check_synced_active(&self, draft: &DraftData) -> Result<Option<ProtectedRecord>> {
+        let expected = &draft.record;
+        let path = self.protected_filename(&expected.credential.id)?;
+        if !path.try_exists().map_err(|e| Error::io(&path, e))? {
+            return if draft.phase == CreationPhase::Committed {
+                Err(Error::Security(
+                    "committed synced credential is missing; refusing replacement".into(),
+                ))
+            } else {
+                Ok(None)
+            };
+        }
+        if draft.phase == CreationPhase::Prepared {
+            return Err(Error::Security(
+                "protected record collides with unpromoted registration".into(),
+            ));
+        }
+        let active = self.read_protected(&path, &expected.credential.id, expected.owner)?;
+        if !active.verified
+            || active.diagnostic
+            || active.credential.signing_key != expected.credential.signing_key
+            || !crate::protection::same_identity(&active.credential, &expected.credential)
+            || active.public_sec1 != expected.public_sec1
+            || active.recipient_id != expected.recipient_id
+            || (active.revision == 1 && active.sealed != expected.sealed)
+            || (draft.phase == CreationPhase::Activating
+                && (active.revision != 1 || active.credential != expected.credential))
+        {
+            return Err(Error::Security(
+                "promoted registration changed its protected key or identity".into(),
+            ));
+        }
+        Ok(Some(active))
     }
 
     /// Bind a new exportable key to an exact request, owner, account and peer.
@@ -127,7 +179,6 @@ impl Registry {
         for name in [
             format!("{id}.enc"),
             format!("{id}.pending.enc"),
-            format!("protected-{id}.enc"),
             format!("protected-{id}.pending.enc"),
         ] {
             let other = self.directory.join(name);
@@ -141,6 +192,15 @@ impl Registry {
             let draft = self.read_synced_creation(&id, binding.owner)?;
             Self::check_synced_context(&draft, binding, context)?;
             return Ok(SyncedCreation(draft));
+        }
+        let active_path = self.protected_filename(&id)?;
+        if active_path
+            .try_exists()
+            .map_err(|e| Error::io(&active_path, e))?
+        {
+            return Err(Error::Refused(
+                "registration transaction already belongs to protected storage".into(),
+            ));
         }
         let intent_path = self.synced_creation_filename(&id, true)?;
         if intent_path
@@ -233,6 +293,7 @@ impl Registry {
         let draft = DraftData {
             version: 1,
             binding: binding.clone(),
+            phase: CreationPhase::Prepared,
             record: ProtectedRecord {
                 version: 1,
                 owner: binding.owner,
@@ -254,6 +315,95 @@ impl Registry {
         // Retain the intent as a transaction tombstone; no reusable grant lives
         // in either file, and retries consult the complete draft first.
         Ok(SyncedCreation(stored))
+    }
+
+    /// Finish only the saved request and key. The upload receipt authorizes no
+    /// signing: the callback must return fresh, exact-message/key-bound SEP UV.
+    /// `check` is the broker's cancellation/session/deadline guard. A late cancel
+    /// suppresses delivery even if the durable credential already committed.
+    pub fn finish_synced_registration(
+        &self,
+        binding: &Binding,
+        context: &CreationContext,
+        verified: &VerifiedUpload,
+        signer: impl FnOnce(&ProtectedRecord, &[u8]) -> Result<AuthorizedSignature>,
+        mut check: impl FnMut() -> Result<()>,
+    ) -> Result<Registration> {
+        binding.validate()?;
+        check()?;
+        let id = binding.transaction.to_string();
+        let draft = {
+            let _lock = self.update_lock()?;
+            let draft = self.read_synced_creation(&id, binding.owner)?;
+            Self::check_synced_context(&draft, binding, context)?;
+            self.refuse_synced_update_collision(&id)?;
+            draft
+        };
+        let record = &draft.record;
+        let public = decode_public(&record.public_sec1)?;
+        let response = context.finish_synced_registration(
+            binding,
+            verified,
+            &record.credential,
+            &public,
+            |_, message, _| signer(record, message),
+        )?;
+        check()?;
+        {
+            let _lock = self.update_lock()?;
+            let mut current = self.read_synced_creation(&id, binding.owner)?;
+            if serde_json::to_vec(&current)? != serde_json::to_vec(&draft)? {
+                return Err(Error::Refused(
+                    "registration changed during authorization; retry with fresh authorization"
+                        .into(),
+                ));
+            }
+            self.refuse_synced_update_collision(&id)?;
+            check()?;
+            if current.phase == CreationPhase::Prepared {
+                current.phase = CreationPhase::Activating;
+                self.write_synced_creation(&current)?;
+            }
+            // Once Activating is durable, an intermediate protected file is
+            // hidden from lookup/use until Committed. Reopen on every retry.
+            if self.check_synced_active(&current)?.is_none() {
+                let mut active = current.record.clone();
+                active.verified = true;
+                self.write_protected(&active, true)?;
+            }
+            self.include_synced_record(&id, binding.owner)?;
+            if current.phase != CreationPhase::Committed {
+                current.phase = CreationPhase::Committed;
+                self.write_synced_creation(&current)?;
+            }
+            // Reopen the complete durable chain before response delivery. A
+            // failed read may follow a successful commit; retry still uses the
+            // original key and requires new signing authorization.
+            self.read_synced_creation(&id, binding.owner)?;
+        }
+        check()?;
+        Ok(response)
+    }
+
+    fn refuse_synced_update_collision(&self, id: &str) -> Result<()> {
+        for path in [
+            self.filename(id)?,
+            self.directory.join(format!("{id}.pending.enc")),
+            self.pending_filename(id)?,
+        ] {
+            if path.try_exists().map_err(|e| Error::io(&path, e))? {
+                return Err(Error::Refused(
+                    "another credential operation owns this registration transaction".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn write_synced_creation(&self, draft: &DraftData) -> Result<()> {
+        let path = self.synced_creation_filename(&draft.record.credential.id, false)?;
+        let plain = zeroize::Zeroizing::new(serde_json::to_vec(draft)?);
+        atomic_write_private(&path, &self.backend.seal(Purpose::Vault, &plain)?)
     }
 
     fn check_synced_context(
@@ -278,241 +428,4 @@ impl Registry {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use base64::engine::general_purpose::STANDARD;
-
-    fn context() -> Result<CreationContext> {
-        CreationContext::parse(&serde_json::json!({
-            "rp":{"id":"example.com","name":"Example"},
-            "user":{"id":URL_SAFE_NO_PAD.encode(b"user"),"name":"Test User","displayName":"Test"},
-            "challenge":URL_SAFE_NO_PAD.encode([23u8;32]),
-            "pubKeyCredParams":[{"type":"public-key","alg":-7}],
-            "extensions":{"remoteDesktopClientOverride":{"origin":"https://example.com","sameOriginWithAncestors":true}}
-        }).to_string())
-    }
-    fn binding(context: &CreationContext) -> Binding {
-        Binding {
-            owner: 1001,
-            account_fingerprint: format!("SHA256:{}", STANDARD.encode([1u8; 32])),
-            peer_id: format!("SHA256:{}", STANDARD.encode([2u8; 32])),
-            transaction: Uuid::new_v4(),
-            request_sha256: context.binding().into(),
-            zone: crate::apple::ckks::ZoneIdentity {
-                name: "Passwords".into(),
-                owner: "test-cloud-owner".into(),
-            },
-        }
-    }
-    fn registry(dir: &Path) -> Result<Registry> {
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-            .map_err(|e| Error::io(dir, e))?;
-        let registry = Registry::open(dir)?;
-        let secret = p256::SecretKey::from_slice(&[7u8; 32])
-            .map_err(|_| Error::Security("test key".into()))?;
-        let key: StoredSepKey = serde_json::from_value(serde_json::json!({
-            "version":1,"reference":KeyRef {backend_id:"sep-native-v1".into(),key_id:Uuid::new_v4().to_string(),usage:KeyUsage::WebAuthnSigning,algorithm:KeyAlgorithm::P256},
-            "policy":"biometry-any","wrapped_blob":STANDARD.encode(b"synthetic wrapped blob"),
-            "public_sec1":STANDARD.encode(secret.public_key().to_encoded_point(false).as_bytes()),"allow_decrypt":true
-        }))?;
-        let plain = zeroize::Zeroizing::new(serde_json::to_vec(&key)?);
-        create_private_exclusive(
-            &dir.join("item-recipient.enc"),
-            &registry.backend.seal(Purpose::KeyStore, &plain)?,
-        )?;
-        Ok(registry)
-    }
-
-    // This exercises root-owned persistence and real memory policy, but uses a
-    // synthetic recipient and software decryption: no SEP, UI or Apple access.
-    #[test]
-    #[ignore = "requires root; disposable synthetic registry only, no hardware or network"]
-    fn synced_creation_seals_one_stable_key_and_cannot_be_activated_as_an_import() -> Result<()> {
-        assert_eq!(keychain_sep_driver::peer::effective_uid(), 0);
-        let dir = tempfile::tempdir().map_err(|e| Error::io("temporary root", e))?;
-        let registry = registry(dir.path())?;
-        let context = context()?;
-        let binding = binding(&context);
-        let draft = registry.prepare_synced_registration(&binding, &context)?;
-        assert_eq!(draft.binding(), &binding);
-        let record = draft.record();
-        assert!(!record.verified);
-        assert_eq!(record.credential.provenance, PasskeyProvenance::Synced);
-        assert_eq!(
-            record.credential.signing_key.backend_id,
-            "sep-protected-software-v1"
-        );
-        let public = STANDARD
-            .decode(&record.public_sec1)
-            .map_err(|_| Error::Security("test public".into()))?;
-        assert_eq!(
-            record.credential.credential_id,
-            URL_SAFE_NO_PAD.encode(Sha1::digest(&public))
-        );
-
-        // Independently decrypt to prove the saved scalar matches its public
-        // identity and exact item context. All secrets here are disposable.
-        use aes_gcm::aead::{Aead, KeyInit, consts::U16};
-        use p256::ecdh::diffie_hellman;
-        use sha2::Sha256;
-        let recipient = p256::SecretKey::from_slice(&[7u8; 32])
-            .map_err(|_| Error::Security("test key".into()))?;
-        let ephemeral = p256::PublicKey::from_sec1_bytes(&record.sealed[..65])
-            .map_err(|_| Error::Security("test ephemeral".into()))?;
-        let shared = diffie_hellman(recipient.to_nonzero_scalar(), ephemeral.as_affine());
-        let mut material = zeroize::Zeroizing::new([0u8; 64]);
-        for index in 1u32..=2 {
-            let mut hash = Sha256::new();
-            hash.update(shared.raw_secret_bytes());
-            hash.update(index.to_be_bytes());
-            hash.update(&record.sealed[..65]);
-            let offset = (index as usize - 1) * 32;
-            material[offset..offset + 32].copy_from_slice(&hash.finalize());
-        }
-        let cipher = aes_gcm::AesGcm::<aes::Aes256, U16>::new_from_slice(&material[..32])
-            .map_err(|_| Error::Security("test cipher".into()))?;
-        let plain = zeroize::Zeroizing::new(
-            cipher
-                .decrypt(
-                    aes_gcm::Nonce::<U16>::from_slice(&material[32..48]),
-                    &record.sealed[65..],
-                )
-                .map_err(|_| Error::Security("test decrypt".into()))?,
-        );
-        let expected = item_binding(
-            binding.owner,
-            1,
-            &record.recipient_id,
-            &record.credential,
-            &record.public_sec1,
-        )?;
-        let scalar = crate::security::sep::envelope::item_view(&plain, plain.len(), &expected)?;
-        let recovered = p256::SecretKey::from_slice(scalar)
-            .map_err(|_| Error::Security("test scalar".into()))?;
-        assert_eq!(
-            recovered.public_key().to_encoded_point(false).as_bytes(),
-            public
-        );
-        let disk = registry.backend.open(
-            Purpose::Vault,
-            &read_bounded(&registry.synced_creation_filename(&record.credential.id, false)?)?,
-        )?;
-        assert!(!disk.windows(32).any(|bytes| bytes == scalar));
-        assert!(registry.browser_credentials(binding.owner)?.is_empty());
-        let state = registry.protection_state(&record.credential.id, binding.owner)?;
-        assert!(state.active.is_none());
-        assert!(state.staged.is_some());
-        assert!(
-            registry
-                .verification_record(&record.credential.id, binding.owner)
-                .is_err()
-        );
-        assert!(
-            registry
-                .load_protected(&record.credential.id, binding.owner)
-                .is_err()
-        );
-        let import = ProtectedImport::seal_scalar(
-            binding.owner,
-            &registry.item_recipient()?,
-            0,
-            record.credential.clone(),
-            scalar,
-            false,
-        )?;
-        assert!(registry.import_protected(binding.owner, import).is_err());
-        assert!(
-            registry
-                .prepare_registration(binding.owner, binding.transaction, &context, || panic!(
-                    "draft reached native CREATE"
-                ))
-                .is_err()
-        );
-        let original = serde_json::to_vec(record)?;
-        drop(registry);
-        let reopened = Registry::open(dir.path())?;
-        let resumed = reopened.prepare_synced_registration(&binding, &context)?;
-        assert_eq!(serde_json::to_vec(resumed.record())?, original);
-        for field in 0..5 {
-            let mut changed = binding.clone();
-            match field {
-                0 => changed.owner += 1,
-                1 => changed.account_fingerprint = format!("SHA256:{}", STANDARD.encode([9u8; 32])),
-                2 => changed.peer_id = format!("SHA256:{}", STANDARD.encode([9u8; 32])),
-                3 => changed.request_sha256 = "a1".repeat(32),
-                _ => changed.zone.owner = "other-owner".into(),
-            }
-            assert!(
-                reopened
-                    .prepare_synced_registration(&changed, &context)
-                    .is_err()
-            );
-        }
-        assert_eq!(
-            serde_json::to_vec(
-                reopened
-                    .prepare_synced_registration(&binding, &context)?
-                    .record()
-            )?,
-            original
-        );
-        Ok(())
-    }
-
-    #[test]
-    #[ignore = "requires root; disposable synthetic registry only, no hardware or network"]
-    fn synced_creation_refuses_interrupted_intents_collisions_and_missing_recipient() -> Result<()>
-    {
-        assert_eq!(keychain_sep_driver::peer::effective_uid(), 0);
-        let dir = tempfile::tempdir().map_err(|e| Error::io("temporary root", e))?;
-        let registry = registry(dir.path())?;
-        let context = context()?;
-        let binding = binding(&context);
-        let draft = registry.prepare_synced_registration(&binding, &context)?;
-        let path = registry.synced_creation_filename(&draft.record().credential.id, false)?;
-        // Simulate interruption after durable intent and before durable key.
-        std::fs::remove_file(&path).map_err(|e| Error::io(&path, e))?;
-        drop(registry);
-        let registry = Registry::open(dir.path())?;
-        assert!(
-            registry
-                .prepare_synced_registration(&binding, &context)
-                .is_err()
-        );
-        assert!(!path.exists());
-        assert!(
-            registry
-                .protection_state(&binding.transaction.to_string(), binding.owner)
-                .is_err()
-        );
-        assert!(registry.browser_credentials(binding.owner)?.is_empty());
-        let other = Binding {
-            transaction: Uuid::new_v4(),
-            ..binding.clone()
-        };
-        let collision = registry
-            .directory
-            .join(format!("{}.pending.enc", other.transaction));
-        create_private_exclusive(&collision, b"native intent")?;
-        assert!(
-            registry
-                .prepare_synced_registration(&other, &context)
-                .is_err()
-        );
-        assert!(!registry.synced_creation_exists(&other.transaction.to_string())?);
-        let recipient = registry.directory.join("item-recipient.enc");
-        std::fs::remove_file(&recipient).map_err(|e| Error::io(&recipient, e))?;
-        let another = Binding {
-            transaction: Uuid::new_v4(),
-            ..binding
-        };
-        assert!(
-            registry
-                .prepare_synced_registration(&another, &context)
-                .is_err()
-        );
-        assert!(!registry.synced_creation_exists(&another.transaction.to_string())?);
-        assert!(!recipient.exists());
-        Ok(())
-    }
-}
+mod tests;

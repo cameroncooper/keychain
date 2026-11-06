@@ -291,8 +291,8 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 159 passing tests, ten ignored (three Apple network and seven privileged
-integration tests). All six registry tests passed separately as root, including
+Workspace checks: 159 passing tests, thirteen ignored (three Apple network and ten privileged
+integration tests). All nine registry tests passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
 Nine browser service-worker flow tests also pass. Strict Clippy is clean.
 The broker now exits after an idle interval without interrupting queued/active
@@ -400,9 +400,15 @@ verification. Sync consults broker state even without a prior user-cache entry,
 so first sync cannot downgrade a protected key into software storage. A typed
 FetchVerified receipt now gates synced registration backup flags; fresh protected
 UV signing is still independently required. Synthetic persistence, receipt,
-registration and first-sync tests cover these paths. No production draft
-authorization/upload/promotion path, Apple write adapter or iCloud browser choice
-is enabled. Atomic save
+registration and first-sync tests cover these paths. Receipt-checked registry
+promotion now commits through an Activating checkpoint, protected-record write,
+inventory inclusion and final Committed marker. Partial promotions cannot be
+used or activated via generic verification. Tests cover interruption at each
+transition, changed drafts during signing and response suppression after late
+cancellation; retries retain the key and require new authorization. Normal
+post-creation metadata refresh/rewraps remain supported, while loss of a committed
+record refuses replacement. The production biometric/upload coordination,
+Apple write adapter and iCloud browser choice remain unconnected. Atomic save
 wire framing, broker creation/authorization coordination, live fetched/other-device
 verification and the remaining reveal/migration gates are still required. A
 read-only live metadata check received HTTP 401 with the cached CloudKit token;

@@ -679,7 +679,7 @@ fn invalid(message: &str) -> Error {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::super::{FieldValue, test_support::server_record};
     use super::*;
     use crate::security::{FileRootKeySource, KeyRef, RootKeySource, SoftwareFileBackend};
@@ -688,6 +688,51 @@ mod tests {
         Arc,
         atomic::{AtomicBool, Ordering},
     };
+
+    /// Offline cross-module integration fixture. Runs the real encoder, CKKS
+    /// encryption, durable coordinator and simulated fetch/decrypt verification.
+    /// No receipt constructor is exposed to production or browser IPC.
+    pub(crate) fn verified_for(
+        binding: Binding,
+        credential: PasskeyCredential,
+        private_x963: &[u8],
+    ) -> Result<VerifiedUpload> {
+        let mut f = Fixture::new()?;
+        f.io.zone = binding.zone.clone();
+        f.io.records =
+            f.io.records
+                .iter()
+                .map(|record| {
+                    let tag = record
+                        .server
+                        .as_ref()
+                        .and_then(|metadata| metadata.change_tag.as_deref())
+                        .ok_or_else(|| invalid("test change tag"))?;
+                    server_record(record, &binding.zone, tag)
+                })
+                .collect::<Result<Vec<_>>>()?;
+        let snapshot = f.io.fetch_zone(&binding.zone)?;
+        let current = CurrentKey::from_snapshot(
+            &binding.zone.name,
+            &snapshot.records,
+            &snapshot.tlks,
+            KeyClass::WhenUnlocked,
+        )?;
+        let item = crate::passkey::encode_sync_item(&credential, private_x963)?;
+        let record = current.seal_new_item(&item)?;
+        let plan = PreparedUpload::from_snapshot(
+            binding,
+            credential,
+            private_x963
+                .get(..65)
+                .ok_or_else(|| invalid("test public point"))?,
+            record,
+            &snapshot,
+        )?;
+        let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(plan)?;
+        session.advance(&mut f.io)?;
+        session.verified_upload()
+    }
 
     #[test]
     fn prepare_checks_encrypted_identity_before_creating_a_journal() -> Result<()> {

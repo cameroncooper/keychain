@@ -202,6 +202,9 @@ impl Registry {
                 return Err(Error::Refused("broker inventory exceeds limit".into()));
             }
             if let Some(id) = id.strip_prefix("protected-") {
+                if self.synced_creation_summary(id, owner)?.is_some() {
+                    continue;
+                }
                 let record = self.load_protected(id, owner)?;
                 if !record.diagnostic
                     && record.verified

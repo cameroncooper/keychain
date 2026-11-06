@@ -71,7 +71,7 @@ impl ProtectedImport {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProtectedRecord {
     pub version: u32,
@@ -212,7 +212,7 @@ impl Registry {
         let pending = self.pending_filename(id)?;
         let draft = self.synced_creation_summary(id, owner)?;
         Ok(ProtectionState {
-            active: if active.try_exists().map_err(|e| Error::io(&active, e))? {
+            active: if draft.is_none() && active.try_exists().map_err(|e| Error::io(&active, e))? {
                 Some(self.read_protected(&active, id, owner)?.into())
             } else {
                 None
@@ -263,11 +263,11 @@ impl Registry {
         record.credential = credential;
         self.write_protected(&record, true)
     }
-    fn protected_filename(&self, id: &str) -> Result<PathBuf> {
+    pub(super) fn protected_filename(&self, id: &str) -> Result<PathBuf> {
         self.filename(id)?;
         Ok(self.directory.join(format!("protected-{id}.enc")))
     }
-    fn pending_filename(&self, id: &str) -> Result<PathBuf> {
+    pub(super) fn pending_filename(&self, id: &str) -> Result<PathBuf> {
         self.filename(id)?;
         Ok(self.directory.join(format!("protected-{id}.pending.enc")))
     }
@@ -318,7 +318,7 @@ impl Registry {
     pub fn import_protected(&self, owner: u32, mut import: ProtectedImport) -> Result<u64> {
         let _lock = self.update_lock()?;
         let id = import.credential.id.clone();
-        if self.synced_creation_exists(&id)? {
+        if self.synced_creation_summary(&id, owner)?.is_some() {
             return Err(Error::Refused(
                 "registration owns this credential; resume it instead of replacing its key".into(),
             ));
@@ -415,10 +415,12 @@ impl Registry {
         Ok(revision)
     }
     pub fn load_protected(&self, id: &str, owner: u32) -> Result<ProtectedRecord> {
+        self.refuse_uncommitted_creation(id, owner)?;
         let path = self.protected_filename(id)?;
         self.read_protected(&path, id, owner)
     }
     pub fn verification_record(&self, id: &str, owner: u32) -> Result<ProtectedRecord> {
+        self.refuse_uncommitted_creation(id, owner)?;
         let pending = self.pending_filename(id)?;
         if pending.try_exists().map_err(|e| Error::io(&pending, e))? {
             self.read_protected(&pending, id, owner)
@@ -426,7 +428,15 @@ impl Registry {
             self.load_protected(id, owner)
         }
     }
-    fn read_protected(
+    fn refuse_uncommitted_creation(&self, id: &str, owner: u32) -> Result<()> {
+        if self.synced_creation_summary(id, owner)?.is_some() {
+            return Err(Error::Refused(
+                "synced registration is not committed".into(),
+            ));
+        }
+        Ok(())
+    }
+    pub(super) fn read_protected(
         &self,
         path: &std::path::Path,
         id: &str,
@@ -497,7 +507,7 @@ impl Registry {
             .and_then(|d| d.sync_all())
             .map_err(|e| Error::io(&self.directory, e))
     }
-    fn write_protected(&self, record: &ProtectedRecord, replace: bool) -> Result<()> {
+    pub(super) fn write_protected(&self, record: &ProtectedRecord, replace: bool) -> Result<()> {
         let plain = zeroize::Zeroizing::new(serde_json::to_vec(record)?);
         let encrypted = self.backend.seal(Purpose::Vault, &plain)?;
         let path = self.protected_filename(&record.credential.id)?;
