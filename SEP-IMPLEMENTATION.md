@@ -291,7 +291,7 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 135 passing tests, five ignored (two Apple network and three privileged
+Workspace checks: 139 passing tests, five ignored (two Apple network and three privileged
 integration tests). Both registry tests passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
 Five browser service-worker flow tests also pass. Strict Clippy is clean.
@@ -359,6 +359,20 @@ one isolated identity and passed real-account SRP init through the application b
 and after being installed/selected. Password proof, 2FA/PET and real repair remain
 pending user input. The prior ADI profile and Prepared journal are retained. See
 [authentication compatibility](docs/APPLE-AUTH-COMPATIBILITY.md).
+
+Passkey creation now has a validated creation-request context and a device-bound
+registration encoder in `src/passkey/registration.rs`. It validates Chromium's
+injected caller origin, RP, challenge, user handle, supported ES256/platform
+requirements and exclusions. It emits discoverable credential metadata, COSE
+P-256 public key and none-attestation JSON only after consuming an operation-bound
+native SEP result with UV and independently verifying the signature against the
+new public key. Device-bound BE/BS stay zero. Four offline tests cover encoded
+fields and refusal of wrong origin, identity, signature, protection, absent UV,
+unsupported requirements and excluded credentials. These tests use synthetic
+signing outcomes, not hardware authorization. Durable broker creation, browser
+storage selection and registration delivery are not yet connected; the extension
+continues to reject creation until that lifecycle is implemented. iCloud creation,
+upload/fetch reconciliation and other-device verification also remain required.
 
 Cold power-cycle, suspend/resume, other hardware, enrollment-set invalidation,
 native private-key import, P-384 and multi-user SEP identity isolation remain

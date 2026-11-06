@@ -17,6 +17,8 @@ use crate::security::authorization::AuthorizationRequirement;
 use crate::security::{KeyUsage, SecurityBackend};
 use crate::{Error, Result};
 
+pub mod registration;
+
 pub const ACCESS_GROUP: &str = "com.apple.webkit.webauthn";
 const MAX_ATAG_BYTES: usize = 16 * 1024;
 const MAX_CREDENTIAL_ID_BYTES: usize = 4096;

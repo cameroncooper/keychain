@@ -441,7 +441,12 @@ impl RequestContext {
     }
 }
 
-fn canonical_base64url(value: &str, field: &str, min: usize, max: usize) -> Result<String> {
+pub(crate) fn canonical_base64url(
+    value: &str,
+    field: &str,
+    min: usize,
+    max: usize,
+) -> Result<String> {
     let decoded = URL_SAFE_NO_PAD
         .decode(value)
         .or_else(|_| URL_SAFE.decode(value))
