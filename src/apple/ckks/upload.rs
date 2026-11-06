@@ -36,7 +36,7 @@ pub struct Binding {
     pub zone: ZoneIdentity,
 }
 impl Binding {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         let tphash = |value: &str| {
             value
                 .strip_prefix("SHA256:")
@@ -172,6 +172,34 @@ struct PlanData {
 /// verified plan. The encrypted journal loads its private representation only.
 #[derive(Clone)]
 pub struct PreparedUpload(PlanData);
+
+/// Evidence that the exact prepared credential was independently fetched and
+/// decrypted after upload. This is neither a biometric grant nor evidence of
+/// RP acceptance. It cannot be constructed or deserialized by an IPC client.
+pub struct VerifiedUpload {
+    binding: Binding,
+    credential: PasskeyCredential,
+    public_sec1: String,
+}
+impl VerifiedUpload {
+    pub fn verify_identity(
+        &self,
+        binding: &Binding,
+        credential: &PasskeyCredential,
+        public_sec1: &[u8],
+    ) -> Result<()> {
+        if &self.binding != binding
+            || &self.credential != credential
+            || self.public_sec1 != STANDARD.encode(public_sec1)
+        {
+            return Err(Error::Security(
+                "verified upload belongs to a different account, request or credential".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl PreparedUpload {
     pub fn from_snapshot(
         binding: Binding,
@@ -482,6 +510,21 @@ impl Session<'_> {
     }
     pub fn credential(&self) -> &PasskeyCredential {
         &self.journal.plan.credential
+    }
+    /// Only a healthy durable FetchVerified checkpoint can supply backup
+    /// evidence. An HTTP acknowledgement or a poisoned in-memory phase cannot.
+    pub fn verified_upload(&self) -> Result<VerifiedUpload> {
+        self.check_healthy()?;
+        if !matches!(self.journal.phase, Phase::FetchVerified { .. }) {
+            return Err(Error::Refused(
+                "upload has not passed independent fetch/decrypt verification".into(),
+            ));
+        }
+        Ok(VerifiedUpload {
+            binding: self.journal.plan.binding.clone(),
+            credential: self.journal.plan.credential.clone(),
+            public_sec1: self.journal.plan.public_sec1.clone(),
+        })
     }
     fn envelope(&self) -> Result<Vec<u8>> {
         let plain = Zeroizing::new(serde_json::to_vec(&self.journal)?);
@@ -942,6 +985,143 @@ mod tests {
     }
 
     #[test]
+    fn verified_backup_registration_requires_matching_receipt_and_fresh_protected_signature()
+    -> Result<()> {
+        use crate::passkey::registration::CreationContext;
+        use crate::security::authorization::{AuthorizedSignature, SigningProtection};
+        use p256::ecdsa::{Signature, SigningKey, signature::Signer};
+        let mut f = Fixture::new()?;
+        let credential = f.plan.0.credential.clone();
+        let details = serde_json::json!({
+            "rp":{"id":credential.rp_id,"name":"Example"},
+            "user":{"id":credential.user_handle,"name":credential.username,"displayName":credential.display_name},
+            "challenge":URL_SAFE_NO_PAD.encode([23u8;32]),
+            "pubKeyCredParams":[{"type":"public-key","alg":-7}],
+            "extensions":{"remoteDesktopClientOverride":{"origin":"https://example.com","sameOriginWithAncestors":true}}
+        });
+        let context = CreationContext::parse(&details.to_string())?;
+        f.plan.0.binding.request_sha256 = context.binding().into();
+        let binding = f.plan.0.binding.clone();
+        let public = STANDARD
+            .decode(&f.plan.0.public_sec1)
+            .map_err(|_| invalid("test public"))?;
+        let key = SigningKey::from_slice(&[7u8; 32]).map_err(|_| invalid("test key"))?;
+        let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
+        assert!(session.verified_upload().is_err());
+        session.advance(&mut f.io)?;
+        let receipt = session.verified_upload()?;
+        let sign = |protection, uv| {
+            let key = &key;
+            move |reference: &KeyRef, message: &[u8], _| -> Result<AuthorizedSignature> {
+                let signature: Signature = key.sign(message);
+                Ok(AuthorizedSignature::new(
+                    signature.to_der().as_bytes().to_vec(),
+                    reference,
+                    message,
+                    uv,
+                    protection,
+                ))
+            }
+        };
+        let registration = context.finish_synced_registration(
+            &binding,
+            &receipt,
+            &credential,
+            &public,
+            sign(SigningProtection::SepProtectedSoftware, true),
+        )?;
+        let auth = URL_SAFE_NO_PAD
+            .decode(registration.response.authenticator_data)
+            .map_err(|_| invalid("test auth"))?;
+        assert_eq!(auth[32], 0x5d);
+        assert_eq!(registration.id, credential.credential_id);
+        for (protection, uv) in [
+            (SigningProtection::Software, true),
+            (SigningProtection::SepNative, true),
+            (SigningProtection::SepProtectedSoftware, false),
+        ] {
+            assert!(
+                context
+                    .finish_synced_registration(
+                        &binding,
+                        &receipt,
+                        &credential,
+                        &public,
+                        sign(protection, uv)
+                    )
+                    .is_err()
+            );
+        }
+        // Every binding component is checked before invoking the signer.
+        for field in 0..6 {
+            let mut changed = binding.clone();
+            match field {
+                0 => changed.owner += 1,
+                1 => changed.account_fingerprint = format!("SHA256:{}", STANDARD.encode([9u8; 32])),
+                2 => changed.peer_id = format!("SHA256:{}", STANDARD.encode([9u8; 32])),
+                3 => changed.transaction = Uuid::new_v4(),
+                4 => changed.request_sha256 = "f1".repeat(32),
+                _ => changed.zone.owner = "another-owner".into(),
+            }
+            assert!(
+                context
+                    .finish_synced_registration(
+                        &changed,
+                        &receipt,
+                        &credential,
+                        &public,
+                        |_, _, _| panic!("changed binding reached signer")
+                    )
+                    .is_err()
+            );
+        }
+        let mut changed = credential.clone();
+        changed.credential_id = URL_SAFE_NO_PAD.encode([9u8; 20]);
+        assert!(
+            context
+                .finish_synced_registration(
+                    &binding,
+                    &receipt,
+                    &changed,
+                    &public,
+                    |_, _, _| panic!("changed credential reached signer")
+                )
+                .is_err()
+        );
+        assert!(
+            context
+                .finish_synced_registration(
+                    &binding,
+                    &receipt,
+                    &credential,
+                    &[0u8; 65],
+                    |_, _, _| panic!("changed point reached signer")
+                )
+                .is_err()
+        );
+        let mut changed_details = details;
+        changed_details["challenge"] = serde_json::json!(URL_SAFE_NO_PAD.encode([24u8; 32]));
+        let changed_context = CreationContext::parse(&changed_details.to_string())?;
+        assert!(
+            changed_context
+                .finish_synced_registration(
+                    &binding,
+                    &receipt,
+                    &credential,
+                    &public,
+                    |_, _, _| panic!("changed request reached signer")
+                )
+                .is_err()
+        );
+        drop(session);
+        let reopened = UploadStore::new(&f.directory, &f.backend)?.resume(&binding)?;
+        reopened
+            .verified_upload()?
+            .verify_identity(&binding, &credential, &public)?;
+        Ok(())
+    }
+
+    #[test]
     fn accepted_upload_requires_independent_fetch_and_reopens_without_another_write() -> Result<()>
     {
         let mut f = Fixture::new()?;
@@ -1034,6 +1214,7 @@ mod tests {
         let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
         assert!(session.advance(&mut f.io).is_err());
         assert!(matches!(session.phase()?, Phase::Accepted { .. }));
+        assert!(session.verified_upload().is_err());
         assert_eq!(f.io.writes.len(), 1);
         drop(session);
         let mut session = UploadStore::new(&f.directory, &f.backend)?.resume(f.plan.binding())?;
@@ -1056,6 +1237,7 @@ mod tests {
             }
             assert!(session.advance(&mut f.io).is_err());
             assert!(session.phase().is_err());
+            assert!(session.verified_upload().is_err());
             assert!(session.advance(&mut f.io).is_err());
             assert_eq!(f.io.writes.len(), usize::from(after_send));
             f.denied.store(false, Ordering::Release);

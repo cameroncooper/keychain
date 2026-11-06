@@ -210,6 +210,7 @@ impl Registry {
         let _lock = self.update_lock()?;
         let active = self.protected_filename(id)?;
         let pending = self.pending_filename(id)?;
+        let draft = self.synced_creation_summary(id, owner)?;
         Ok(ProtectionState {
             active: if active.try_exists().map_err(|e| Error::io(&active, e))? {
                 Some(self.read_protected(&active, id, owner)?.into())
@@ -219,7 +220,7 @@ impl Registry {
             staged: if pending.try_exists().map_err(|e| Error::io(&pending, e))? {
                 Some(self.read_protected(&pending, id, owner)?.into())
             } else {
-                None
+                draft
             },
         })
     }
@@ -250,7 +251,7 @@ impl Registry {
         }
         if [&credential.username, &credential.display_name]
             .iter()
-            .any(|s| s.len() > 512 || s.chars().any(char::is_control))
+            .any(|s| s.len() > 4096 || s.chars().any(char::is_control))
             || !credential.created_at.is_finite()
             || !credential.modified_at.is_finite()
             || credential.modified_at < record.credential.modified_at
@@ -281,11 +282,9 @@ impl Registry {
             std::fs::read_dir(&self.directory).map_err(|e| Error::io(&self.directory, e))?
         {
             let entry = entry.map_err(|e| Error::io(&self.directory, e))?;
-            if entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("protected-")
-            {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("protected-") || name.starts_with("synced-create-") {
                 return Err(Error::Security(
                     "item recipient is missing while protected records exist; refusing replacement"
                         .into(),
@@ -319,6 +318,11 @@ impl Registry {
     pub fn import_protected(&self, owner: u32, mut import: ProtectedImport) -> Result<u64> {
         let _lock = self.update_lock()?;
         let id = import.credential.id.clone();
+        if self.synced_creation_exists(&id)? {
+            return Err(Error::Refused(
+                "registration owns this credential; resume it instead of replacing its key".into(),
+            ));
+        }
         let path = self.protected_filename(&id)?;
         let pending = self.pending_filename(&id)?;
         if pending.try_exists().map_err(|e| Error::io(&pending, e))? {
@@ -333,7 +337,7 @@ impl Registry {
                 != import.credential.rp_id
             || [&import.credential.username, &import.credential.display_name]
                 .iter()
-                .any(|s| s.len() > 512 || s.chars().any(char::is_control))
+                .any(|s| s.len() > 4096 || s.chars().any(char::is_control))
             || !import.credential.created_at.is_finite()
             || !import.credential.modified_at.is_finite()
             || !(81..=4096).contains(&import.sealed.len())

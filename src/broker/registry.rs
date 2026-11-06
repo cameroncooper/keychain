@@ -11,10 +11,12 @@ use crate::security::{Purpose, SecurityBackend, SoftwareFileBackend};
 use crate::{Error, Result};
 mod protected;
 mod registration;
+mod synced_registration;
 pub(super) use protected::decode_public;
 pub use protected::{
     ProtectedImport, ProtectedRecord, ProtectedSummary, ProtectionState, Recipient, item_binding,
 };
+pub use synced_registration::SyncedCreation;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -192,7 +194,7 @@ impl Registry {
             if matches!(id, "item-recipient" | "synced-inventory") {
                 continue;
             }
-            if id.starts_with("upload-") {
+            if id.starts_with("upload-") || id.starts_with("synced-create-") {
                 continue;
             }
             scanned += 1;

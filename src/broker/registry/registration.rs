@@ -27,6 +27,11 @@ impl Registry {
         }
         let _lock = self.update_lock()?;
         let id = transaction.to_string();
+        if self.synced_creation_exists(&id)? {
+            return Err(Error::Refused(
+                "registration transaction belongs to synced storage".into(),
+            ));
+        }
         let path = self.filename(&id)?;
         if path.try_exists().map_err(|e| Error::io(&path, e))? {
             let record = self.load(&id, owner)?;

@@ -129,41 +129,43 @@ fn reconcile_with(
             return Err(Error::InvalidData("duplicate synced passkey record".into()));
         }
         let previous = previous.iter().find(|p| p.id == recovered.record_id);
-        if let Some(previous) = previous {
-            if previous.provenance == PasskeyProvenance::DeviceBound {
-                return Err(Error::Security(
-                    "synced record collides with a local device-bound credential".into(),
+        if previous.is_some_and(|p| p.provenance == PasskeyProvenance::DeviceBound) {
+            return Err(Error::Security(
+                "synced record collides with a local device-bound credential".into(),
+            ));
+        }
+        let was_protected =
+            previous.is_some_and(|p| crate::protection::is_broker_key(&p.signing_key));
+        if was_protected && !has_broker {
+            return Err(Error::Config(
+                "protected passkeys require their configured broker for sync".into(),
+            ));
+        }
+        // The broker is authoritative even on first sync or after cache loss.
+        // Never infer absence of local protection from absence in the user cache.
+        if has_broker {
+            let state: ProtectionState =
+                serde_json::from_value(call(Operation::ProtectionState {
+                    record: recovered.record_id.clone(),
+                })?)?;
+            if state.staged.is_some() {
+                return Err(Error::Refused(
+                    "synced credential has an incomplete protected operation".into(),
                 ));
             }
-            if crate::protection::is_broker_key(&previous.signing_key) {
-                if !has_broker {
-                    return Err(Error::Config(
-                        "protected passkeys require their configured broker for sync".into(),
-                    ));
-                }
-                let state: ProtectionState =
-                    serde_json::from_value(call(Operation::ProtectionState {
-                        record: previous.id.clone(),
-                    })?)?;
-                let active = state.active.ok_or_else(|| {
-                    Error::Refused(
-                        "protected credential is missing; refusing software fallback".into(),
-                    )
-                })?;
-                let metadata = recovered.metadata(previous.signing_key.clone());
-                let public = STANDARD.encode(
-                    recovered
-                        .private_x963
-                        .get(..65)
-                        .ok_or_else(|| Error::InvalidData("truncated synced passkey".into()))?,
-                );
-                if state.staged.is_some()
-                    || !active.verified
+            if let Some(active) = state.active {
+                let metadata = recovered.metadata(active.credential.signing_key.clone());
+                let public = STANDARD.encode(recovered.public_x963());
+                if !active.verified
                     || active.diagnostic
-                    || !crate::protection::same_identity(&metadata, previous)
+                    || !crate::protection::is_broker_key(&metadata.signing_key)
+                    || metadata.signing_key.key_id != metadata.id
+                    || previous.is_some_and(|p| !crate::protection::same_identity(&metadata, p))
                     || !crate::protection::same_identity(&metadata, &active.credential)
                     || active.public_sec1 != public
-                    || active.credential.signing_key != metadata.signing_key
+                    || previous
+                        .filter(|_| was_protected)
+                        .is_some_and(|p| p.signing_key != metadata.signing_key)
                 {
                     return Err(Error::Refused(
                         "synced identity changed or protected migration is incomplete".into(),
@@ -181,6 +183,11 @@ fn reconcile_with(
                 }
                 result.push(metadata);
                 continue;
+            }
+            if was_protected {
+                return Err(Error::Refused(
+                    "protected credential is missing; refusing software fallback".into(),
+                ));
             }
         }
         result.push(recovered.import(backend)?);
@@ -947,6 +954,107 @@ mod tests {
         assert!(!paths.keys_file().exists());
         assert!(!paths.software_key_file().exists());
     }
+    #[test]
+    fn first_sync_recovers_broker_protection_without_importing_a_software_copy() {
+        use crate::broker::{Operation, registry::ProtectionState};
+        let (recovered, protected, summary) = protected_fixture();
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let paths = AppPaths::for_test(dir.path()).unwrap_or_else(|e| panic!("paths: {e}"));
+        let backend = SoftwareFileBackend::new(paths.clone());
+        let result = reconcile_with(vec![recovered], &[], &backend, true, |op| match op {
+            Operation::ProtectionState { record } => {
+                assert_eq!(record, protected.id);
+                Ok(serde_json::to_value(ProtectionState {
+                    active: Some(summary.clone()),
+                    staged: None,
+                })?)
+            }
+            Operation::RefreshProtectedMetadata { credential, .. } => {
+                assert_eq!(credential.signing_key, protected.signing_key);
+                Ok(serde_json::json!({"updated":true}))
+            }
+            Operation::SetSyncedInventory { records } => {
+                assert_eq!(records, vec![protected.id.clone()]);
+                Ok(serde_json::json!({"updated":true}))
+            }
+            _ => panic!("unexpected operation"),
+        })
+        .unwrap_or_else(|e| panic!("first sync: {e}"));
+        assert_eq!(result, vec![protected]);
+        assert!(!paths.keys_file().exists());
+        assert!(!paths.software_key_file().exists());
+    }
+
+    #[test]
+    fn first_sync_imports_an_unprotected_item_only_after_broker_confirms_absence() {
+        use crate::broker::{Operation, registry::ProtectionState};
+        let (recovered, _, _) = protected_fixture();
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let paths = AppPaths::for_test(dir.path()).unwrap_or_else(|e| panic!("paths: {e}"));
+        let backend = SoftwareFileBackend::new(paths.clone());
+        let mut checked = false;
+        let result = reconcile_with(vec![recovered], &[], &backend, true, |op| match op {
+            Operation::ProtectionState { .. } => {
+                assert!(!paths.keys_file().exists());
+                checked = true;
+                Ok(serde_json::to_value(ProtectionState {
+                    active: None,
+                    staged: None,
+                })?)
+            }
+            Operation::SetSyncedInventory { records } => {
+                assert!(checked);
+                assert!(records.is_empty());
+                Ok(serde_json::json!({"updated":true}))
+            }
+            _ => panic!("unexpected operation"),
+        })
+        .unwrap_or_else(|e| panic!("sync unprotected item: {e}"));
+        assert_eq!(result.len(), 1);
+        assert!(!crate::protection::is_broker_key(&result[0].signing_key));
+        assert!(paths.keys_file().exists());
+    }
+
+    #[test]
+    fn first_sync_refuses_incomplete_or_unavailable_broker_state_without_software_import() {
+        use crate::broker::{Operation, registry::ProtectionState};
+        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
+        let paths = AppPaths::for_test(dir.path()).unwrap_or_else(|e| panic!("paths: {e}"));
+        let backend = SoftwareFileBackend::new(paths.clone());
+        for case in 0..5 {
+            let (recovered, _, mut summary) = protected_fixture();
+            match case {
+                1 => summary.verified = false,
+                2 => summary.public_sec1 = "another point".into(),
+                3 => summary.diagnostic = true,
+                _ => (),
+            }
+            assert!(
+                reconcile_with(vec![recovered], &[], &backend, true, |op| {
+                    assert!(matches!(op, Operation::ProtectionState { .. }));
+                    if case == 4 {
+                        return Err(Error::Refused("broker unavailable".into()));
+                    }
+                    Ok(serde_json::to_value(ProtectionState {
+                        active: if case == 0 {
+                            None
+                        } else {
+                            Some(summary.clone())
+                        },
+                        staged: if case == 0 {
+                            Some(summary.clone())
+                        } else {
+                            None
+                        },
+                    })?)
+                })
+                .is_err()
+            );
+        }
+        assert!(!paths.keys_file().exists());
+        assert!(!paths.software_key_file().exists());
+    }
+
     #[test]
     fn sync_refuses_changed_key_or_missing_broker_without_reimporting() {
         use crate::broker::registry::ProtectionState;

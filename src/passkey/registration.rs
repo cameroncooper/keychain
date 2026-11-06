@@ -254,14 +254,50 @@ impl CreationContext {
         public_sec1: &[u8],
         signer: impl FnOnce(&KeyRef, &[u8], AuthorizationRequirement) -> Result<AuthorizedSignature>,
     ) -> Result<Registration> {
-        if credential.provenance != PasskeyProvenance::DeviceBound
+        self.finish_registration(
+            credential,
+            public_sec1,
+            PasskeyProvenance::DeviceBound,
+            signer,
+        )
+    }
+
+    /// Backup state comes only from the durable upload coordinator. The trusted
+    /// caller supplies its current account/peer binding, and the signer must
+    /// independently authorize this exact registration with fresh SEP UV.
+    pub fn finish_synced_registration(
+        &self,
+        binding: &crate::apple::ckks::upload::Binding,
+        verified: &crate::apple::ckks::upload::VerifiedUpload,
+        credential: &PasskeyCredential,
+        public_sec1: &[u8],
+        signer: impl FnOnce(&KeyRef, &[u8], AuthorizationRequirement) -> Result<AuthorizedSignature>,
+    ) -> Result<Registration> {
+        binding.validate()?;
+        if binding.request_sha256 != self.binding {
+            return Err(Error::Security(
+                "upload is bound to another creation request".into(),
+            ));
+        }
+        verified.verify_identity(binding, credential, public_sec1)?;
+        self.finish_registration(credential, public_sec1, PasskeyProvenance::Synced, signer)
+    }
+
+    fn finish_registration(
+        &self,
+        credential: &PasskeyCredential,
+        public_sec1: &[u8],
+        provenance: PasskeyProvenance,
+        signer: impl FnOnce(&KeyRef, &[u8], AuthorizationRequirement) -> Result<AuthorizedSignature>,
+    ) -> Result<Registration> {
+        if credential.provenance != provenance
             || credential.rp_id != self.rp_id
             || credential.user_handle != self.user_handle
             || credential.username != self.username
             || credential.display_name != self.display_name
         {
             return Err(Error::Security(
-                "registration metadata does not match the selected device-bound credential".into(),
+                "registration metadata does not match the selected credential".into(),
             ));
         }
         let canonical_id =
@@ -291,7 +327,11 @@ impl CreationContext {
             (int(-3), Value::Bytes(y.to_vec())),
         ]);
         let mut auth_data = Sha256::digest(self.rp_id.as_bytes()).to_vec();
-        auth_data.push(0x01 | 0x04 | 0x40); // UP, UV, AT; device-bound BE/BS are zero.
+        // UP, UV, AT. Only the receipt-checked synced path adds BE and BS.
+        auth_data.push(match provenance {
+            PasskeyProvenance::DeviceBound => 0x45,
+            PasskeyProvenance::Synced => 0x5d,
+        });
         auth_data.extend_from_slice(&0_u32.to_be_bytes());
         auth_data.extend_from_slice(&[0_u8; 16]); // none attestation AAGUID
         auth_data.extend_from_slice(&(credential_id.len() as u16).to_be_bytes());
@@ -306,9 +346,13 @@ impl CreationContext {
         signed.extend_from_slice(&Sha256::digest(&client_data));
         let requirement = AuthorizationRequirement::UserVerification;
         let outcome = signer(&credential.signing_key, &signed, requirement)?;
-        if outcome.protection() != SigningProtection::SepNative {
+        let protection = match provenance {
+            PasskeyProvenance::DeviceBound => SigningProtection::SepNative,
+            PasskeyProvenance::Synced => SigningProtection::SepProtectedSoftware,
+        };
+        if outcome.protection() != protection {
             return Err(Error::Security(
-                "device-bound registration requires native SEP signing".into(),
+                "registration signature does not have the required SEP protection".into(),
             ));
         }
         let signature = outcome.into_signature(&credential.signing_key, &signed, requirement)?;

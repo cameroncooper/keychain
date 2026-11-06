@@ -25,8 +25,8 @@ user handle and backup provenance when their local protection changes. A
 non-exportable SEP key cannot be uploaded using this API. Changing device-only
 to synced needs a supported replacement/registration flow, not a metadata toggle.
 
-Both creation options are product goals. WebAuthn registration and Apple CKKS
-uploads are not implemented today. Uploads are a separate feature requiring
+Both creation options are product goals. Device-only WebAuthn registration is
+connected; iCloud creation and Apple CKKS uploads remain incomplete. Uploads require
 explicit account-write authorization before live tests. Diagnostic native key
 creation is not completed passkey registration.
 
@@ -291,8 +291,8 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 155 passing tests, eight ignored (three Apple network and five privileged
-integration tests). All four registry tests passed separately as root, including
+Workspace checks: 159 passing tests, ten ignored (three Apple network and seven privileged
+integration tests). All six registry tests passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
 Nine browser service-worker flow tests also pass. Strict Clippy is clean.
 The broker now exits after an idle interval without interrupting queued/active
@@ -393,7 +393,16 @@ record bytes. A paginated read adapter and encrypted upload coordinator persist
 prepared ciphertext/identity and attempts, reconcile uncertain outcomes through
 fetch/decrypt verification and require explicit retries after confirmed absence.
 Nine coordinator tests pass, including persistence faults and key-pointer changes.
-No actual Apple write adapter or iCloud browser choice is enabled. Atomic save
+The broker can now generate and durably seal a syncable key into an isolated
+account/request-bound draft, refusing interrupted-key regeneration and storage
+path collisions. Drafts remain outside eligible inventory and generic import
+verification. Sync consults broker state even without a prior user-cache entry,
+so first sync cannot downgrade a protected key into software storage. A typed
+FetchVerified receipt now gates synced registration backup flags; fresh protected
+UV signing is still independently required. Synthetic persistence, receipt,
+registration and first-sync tests cover these paths. No production draft
+authorization/upload/promotion path, Apple write adapter or iCloud browser choice
+is enabled. Atomic save
 wire framing, broker creation/authorization coordination, live fetched/other-device
 verification and the remaining reveal/migration gates are still required. A
 read-only live metadata check received HTTP 401 with the cached CloudKit token;

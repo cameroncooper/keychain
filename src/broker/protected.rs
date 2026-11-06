@@ -19,6 +19,15 @@ use std::sync::{
 use uuid::Uuid;
 
 impl Broker {
+    fn require_item_decrypt(&self) -> Result<()> {
+        // Signing capability bit 2 does not advertise the decrypt extension.
+        // Metadata inspection works without enabling a hardware operation.
+        if !self.allow_item_decrypt {
+            return Err(Error::Sep(ProviderError::UnsupportedPolicy));
+        }
+        Ok(())
+    }
+
     pub(super) fn execute_protected(
         &self,
         id: Uuid,
@@ -26,11 +35,6 @@ impl Broker {
         canceled: Arc<AtomicBool>,
         session: ActiveSession,
     ) -> Result<serde_json::Value> {
-        // Signing capability bit 2 does not advertise the decrypt extension.
-        // Deployment must explicitly enable the matching local driver API.
-        if !self.allow_item_decrypt {
-            return Err(Error::Sep(ProviderError::UnsupportedPolicy));
-        }
         let (record_id, details, verify) = match operation {
             Operation::SetSyncedInventory { records } => {
                 self.registry.set_synced_inventory(self.owner, records)?;
@@ -55,9 +59,11 @@ impl Broker {
                 )?);
             }
             Operation::ItemRecipient => {
+                self.require_item_decrypt()?;
                 return Ok(serde_json::to_value(self.registry.item_recipient()?)?);
             }
             Operation::ImportProtected { import } => {
+                self.require_item_decrypt()?;
                 if import.diagnostic && !self.allow_diagnostics {
                     return Err(Error::Refused("diagnostic imports are disabled".into()));
                 }
@@ -89,6 +95,7 @@ impl Broker {
                 ));
             }
         };
+        self.require_item_decrypt()?;
         let record = if verify {
             self.registry.verification_record(&record_id, self.owner)?
         } else {
