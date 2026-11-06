@@ -53,6 +53,10 @@ impl fmt::Debug for RecoveredPasskey {
 }
 
 impl RecoveredPasskey {
+    /// Public point validated against the recovered scalar by `from_item`.
+    pub(crate) fn public_x963(&self) -> &[u8] {
+        &self.private_x963[..65]
+    }
     fn metadata(&self, signing_key: crate::security::KeyRef) -> PasskeyCredential {
         PasskeyCredential {
             provenance: crate::model::PasskeyProvenance::Synced,

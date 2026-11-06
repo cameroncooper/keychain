@@ -1,8 +1,12 @@
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 use crate::proto::{Fields, Value, Writer, decode_fields, first_bytes, first_string, first_u64};
 use crate::{Error, Result};
 
+#[cfg(test)]
+pub(crate) mod test_support;
+pub mod upload;
 pub mod write;
 
 pub const KEYCHAIN_ZONES: &[&str] = &[
@@ -28,7 +32,8 @@ pub const FIELD_RETRIEVE_CHANGES: u32 = 213;
 const ID_RECORD_ZONE: u64 = 6;
 const ID_USER: u64 = 7;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "kebab-case")]
 pub enum FieldValue {
     Bytes(Vec<u8>),
     String(String),
@@ -38,14 +43,73 @@ pub enum FieldValue {
     Reference(String),
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Record {
     pub name: String,
     pub record_type: String,
     pub fields: BTreeMap<String, FieldValue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<ServerMetadata>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ZoneIdentity {
+    pub name: String,
+    pub owner: String,
+}
+
+/// Retain the original record, including unknown fields, for a future atomic
+/// unchanged-record save. Debug output deliberately omits the opaque encoding.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServerMetadata {
+    pub change_tag: Option<String>,
+    pub zone: Option<ZoneIdentity>,
+    pub encoded_record: Vec<u8>,
+}
+impl std::fmt::Debug for ServerMetadata {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerMetadata")
+            .field("change_tag", &self.change_tag)
+            .field("zone", &self.zone)
+            .field("encoded_bytes", &self.encoded_record.len())
+            .finish()
+    }
 }
 
 impl Record {
+    /// Loading a snapshot alone is not write authorization. A write precondition
+    /// additionally needs an intact server encoding bound to the expected zone.
+    pub fn server_precondition(&self, expected: &ZoneIdentity) -> Result<&ServerMetadata> {
+        let metadata = self
+            .server
+            .as_ref()
+            .ok_or_else(|| Error::Security("record has no server precondition".into()))?;
+        if metadata.zone.as_ref() != Some(expected)
+            || metadata
+                .change_tag
+                .as_ref()
+                .is_none_or(|tag| tag.is_empty() || tag.len() > 4096)
+            || metadata.encoded_record.len() > crate::proto::MAX_FIELD_SIZE
+        {
+            return Err(Error::Security(
+                "record precondition is missing or belongs to another zone".into(),
+            ));
+        }
+        let original = parse_record(&metadata.encoded_record)?;
+        if original.name != self.name
+            || original.record_type != self.record_type
+            || original.fields != self.fields
+            || original.server.as_ref() != Some(metadata)
+        {
+            return Err(Error::Security(
+                "record projection differs from its saved server encoding".into(),
+            ));
+        }
+        Ok(metadata)
+    }
     pub fn string(&self, name: &str) -> Option<&str> {
         match self.fields.get(name)? {
             FieldValue::String(value) | FieldValue::Reference(value) => Some(value),
@@ -131,18 +195,52 @@ fn parse_value(raw: &[u8]) -> Result<Option<FieldValue>> {
 
 pub fn parse_record(raw: &[u8]) -> Result<Record> {
     let fields = decode_fields(raw)?;
-    let name = if let Some(record_id) = first_bytes(&fields, 2) {
+    let change_tag = unique_bytes(&fields, 1)?
+        .map(|value| {
+            std::str::from_utf8(value)
+                .map(str::to_owned)
+                .map_err(|_| Error::InvalidData("invalid record change tag".into()))
+        })
+        .transpose()?;
+    let zone = if let Some(id) = unique_bytes(&fields, 2)? {
+        let id = decode_fields(id)?;
+        unique_bytes(&id, 2)?.map(parse_zone_identity).transpose()?
+    } else {
+        None
+    };
+    let name = if let Some(record_id) = unique_bytes(&fields, 2)? {
         let record_id = decode_fields(record_id)?;
-        if let Some(identifier) = first_bytes(&record_id, 1) {
-            first_string(&decode_fields(identifier)?, 1)?.unwrap_or_default()
+        if let Some(identifier) = unique_bytes(&record_id, 1)? {
+            let identifier = decode_fields(identifier)?;
+            if identifier
+                .get(&2)
+                .is_some_and(|kind| kind.as_slice() != [Value::Varint(1)])
+            {
+                return Err(Error::InvalidData("invalid record identifier kind".into()));
+            }
+            unique_bytes(&identifier, 1)?
+                .map(|value| {
+                    std::str::from_utf8(value)
+                        .map(str::to_owned)
+                        .map_err(|_| Error::InvalidData("invalid record name".into()))
+                })
+                .transpose()?
+                .unwrap_or_default()
         } else {
             String::new()
         }
     } else {
         String::new()
     };
-    let record_type = if let Some(kind) = first_bytes(&fields, 3) {
-        first_string(&decode_fields(kind)?, 1)?.unwrap_or_default()
+    let record_type = if let Some(kind) = unique_bytes(&fields, 3)? {
+        unique_bytes(&decode_fields(kind)?, 1)?
+            .map(|value| {
+                std::str::from_utf8(value)
+                    .map(str::to_owned)
+                    .map_err(|_| Error::InvalidData("invalid record type".into()))
+            })
+            .transpose()?
+            .unwrap_or_default()
     } else {
         String::new()
     };
@@ -166,6 +264,44 @@ pub fn parse_record(raw: &[u8]) -> Result<Record> {
         name,
         record_type,
         fields: parsed,
+        server: Some(ServerMetadata {
+            change_tag,
+            zone,
+            encoded_record: raw.to_vec(),
+        }),
+    })
+}
+
+fn unique_bytes(fields: &Fields, number: u32) -> Result<Option<&[u8]>> {
+    match fields.get(&number).map(Vec::as_slice) {
+        None => Ok(None),
+        Some([Value::Bytes(value)]) => Ok(Some(value)),
+        _ => Err(Error::InvalidData(
+            "ambiguous CloudKit record identity/precondition".into(),
+        )),
+    }
+}
+
+fn parse_zone_identity(raw: &[u8]) -> Result<ZoneIdentity> {
+    fn part(fields: &Fields, field: u32, kind: u64) -> Result<String> {
+        let raw = unique_bytes(fields, field)?
+            .ok_or_else(|| Error::InvalidData("zone identity is incomplete".into()))?;
+        let identifier = decode_fields(raw)?;
+        if identifier.get(&2).map(Vec::as_slice) != Some(&[Value::Varint(kind)]) {
+            return Err(Error::InvalidData(
+                "zone identity has the wrong identifier kind".into(),
+            ));
+        }
+        let name = unique_bytes(&identifier, 1)?
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .filter(|name| !name.is_empty() && name.len() <= 512)
+            .ok_or_else(|| Error::InvalidData("zone identity has an invalid name".into()))?;
+        Ok(name.into())
+    }
+    let fields = decode_fields(raw)?;
+    Ok(ZoneIdentity {
+        name: part(&fields, 1, ID_RECORD_ZONE)?,
+        owner: part(&fields, 2, ID_USER)?,
     })
 }
 
@@ -235,6 +371,45 @@ fn repeated_bytes(fields: &Fields, field: u32) -> impl Iterator<Item = &[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn server_preconditions_retain_opaque_data_and_reject_wrong_zone_or_changed_projection()
+    -> Result<()> {
+        let zone = ZoneIdentity {
+            name: "Passwords".into(),
+            owner: "test-owner".into(),
+        };
+        let record = Record {
+            name: "classA".into(),
+            record_type: "currentkey".into(),
+            fields: BTreeMap::from([(
+                "parentkeyref".into(),
+                FieldValue::Reference("class-key".into()),
+            )]),
+            server: None,
+        };
+        let server = test_support::server_record(&record, &zone, "tag-1")?;
+        let metadata = server.server_precondition(&zone)?;
+        assert_eq!(metadata.change_tag.as_deref(), Some("tag-1"));
+        assert_eq!(
+            first_bytes(&decode_fields(&metadata.encoded_record)?, 999),
+            Some(b"opaque future server metadata".as_slice())
+        );
+        let mut wrong_zone = zone.clone();
+        wrong_zone.owner = "another-owner".into();
+        assert!(server.server_precondition(&wrong_zone).is_err());
+        let mut edited = server.clone();
+        edited.fields.insert(
+            "parentkeyref".into(),
+            FieldValue::Reference("changed-key".into()),
+        );
+        assert!(edited.server_precondition(&zone).is_err());
+        let mut duplicate = metadata.encoded_record.clone();
+        duplicate.extend_from_slice(&Writer::new().string(1, "another-tag").finish());
+        assert!(parse_record(&duplicate).is_err());
+        let missing = test_support::server_record(&record, &zone, "")?;
+        assert!(missing.server_precondition(&zone).is_err());
+        Ok(())
+    }
     #[test]
     fn incomplete_or_unrecognized_pages_cannot_be_empty_snapshots() {
         for raw in [

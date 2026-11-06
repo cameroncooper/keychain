@@ -532,6 +532,56 @@ fn response_bytes(response: Response) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "configured account + network; reads one CKKS page only, no password, escrow, biometric or Apple record write"]
+    fn live_record_metadata_preserves_server_zone_and_tags() -> Result<()> {
+        use crate::apple::anisette::ManagedAnisette;
+        use crate::config::Config;
+        use crate::paths::{AppPaths, StateLock};
+        use crate::security::SoftwareFileBackend;
+        use crate::store::StateStore;
+        keychain_sep_driver::memory::make_process_nondumpable()
+            .map_err(|e| Error::io("live metadata protection", e))?;
+        let paths = AppPaths::discover()?;
+        let _lock = StateLock::acquire(&paths)?;
+        let config = Config::load(&paths)?;
+        let backend = SoftwareFileBackend::new(paths.clone());
+        let store = StateStore::new(&paths, &backend);
+        let account = store
+            .load_account()?
+            .ok_or_else(|| Error::Config("metadata check requires an existing account".into()))?;
+        let device = store
+            .load_device()?
+            .ok_or_else(|| Error::Config("metadata check requires an existing device".into()))?;
+        let helper = config
+            .anisette_helper
+            .ok_or_else(|| Error::Config("anisette is not configured".into()))?;
+        let anisette = ManagedAnisette::start(&helper, &paths)?;
+        let transport = CloudKitTransport::new(&account, &device, &anisette)?;
+        let zone = ckks::ZoneIdentity {
+            name: "Passwords".into(),
+            owner: transport.user_id().into(),
+        };
+        let request = ckks::build_retrieve_changes_request(
+            &ckks::record_zone_identifier(&zone.name, &zone.owner),
+            None,
+            500,
+        );
+        let page = ckks::parse_retrieve_changes_response(&transport.fetch_records(&request)?)?;
+        if page.records.is_empty() {
+            return Err(Error::InvalidData(
+                "metadata check fetched no records; nothing verified".into(),
+            ));
+        }
+        for record in &page.records {
+            record.server_precondition(&zone)?;
+        }
+        eprintln!(
+            "verified server zone/tag/opaque encoding for {} CKKS records; no item decrypted or state snapshot saved",
+            page.records.len()
+        );
+        Ok(())
+    }
     fn stream(messages: &[Vec<u8>]) -> Vec<u8> {
         let mut out = Vec::new();
         for message in messages {

@@ -60,6 +60,7 @@ pub enum Purpose {
     Vault = 5,
     ProtectionMigration = 6,
     TrustRepair = 7,
+    SyncUpload = 8,
 }
 
 impl Purpose {
@@ -72,6 +73,7 @@ impl Purpose {
             5 => Ok(Self::Vault),
             6 => Ok(Self::ProtectionMigration),
             7 => Ok(Self::TrustRepair),
+            8 => Ok(Self::SyncUpload),
             _ => Err(crate::Error::InvalidData(format!(
                 "unknown encrypted-state purpose {value}"
             ))),
@@ -87,6 +89,7 @@ impl Purpose {
             Self::Vault => b"vault",
             Self::ProtectionMigration => b"protection-migration",
             Self::TrustRepair => b"trust-repair",
+            Self::SyncUpload => b"sync-upload",
         }
     }
 }

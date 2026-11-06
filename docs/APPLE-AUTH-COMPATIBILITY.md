@@ -101,3 +101,14 @@ Prepared journal and original ADI state remain.
 The installed helper's offline 31-second check confirmed changing OTPs, avoiding
 the frozen-clock failure described by the emulator project. It printed no header
 values. Full password proof and recovery still require the user.
+
+## Subsequent cached-token read check
+
+The read-only CloudKit metadata probe on 2026-11-05 received HTTP 401 using the
+stored `cloudKitToken` with the selected local Mac provider. The test stopped
+before metadata validation; it sent no password, escrow attempt, biometric
+operation or Apple record write, and saved no account/vault snapshot. Earlier
+cached-token success therefore does not establish current access. The response
+does not distinguish expiry from provider/session binding. Fresh local
+authentication through `keychain join --repair` remains the next live recovery
+step; do not reset provisioning or retry escrow to address this HTTP response.

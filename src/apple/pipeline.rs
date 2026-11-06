@@ -456,6 +456,7 @@ mod tests {
             .encrypt(std::iter::empty::<&[u8]>(), key)
             .unwrap_or_else(|e| panic!("wrap: {e}"));
         Record {
+            server: None,
             name: id.into(),
             record_type: "synckey".into(),
             fields: BTreeMap::from([
@@ -499,6 +500,7 @@ mod tests {
         let records = BTreeMap::from([(
             "item".into(),
             vec![Record {
+                server: None,
                 name: "encrypted-item".into(),
                 record_type: "item".into(),
                 fields: BTreeMap::new(),
@@ -515,6 +517,7 @@ mod tests {
     #[test]
     fn aad_is_sorted_and_uses_parent_id() {
         let record = Record {
+            server: None,
             name: "uuid".into(),
             record_type: "item".into(),
             fields: BTreeMap::from([
@@ -567,6 +570,7 @@ mod tests {
             .sign_p384_sha256(&signing, &signed)
             .unwrap_or_else(|error| panic!("sign: {error}"));
         let mut record = Record {
+            server: None,
             name: "share-record".into(),
             record_type: "tlkshare".into(),
             fields: BTreeMap::from([

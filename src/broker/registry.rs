@@ -33,7 +33,66 @@ pub struct Registry {
     directory: PathBuf,
     backend: SoftwareFileBackend,
 }
+
+/// Guard the directory that actually holds broker envelopes, including upload
+/// journals. A long-lived broker must also refuse root regeneration if its root
+/// is lost after startup, not only when Registry::open performs its first check.
+struct RegistryRoot {
+    directory: PathBuf,
+    key_path: PathBuf,
+    inner: crate::security::FileRootKeySource,
+    initialized: std::sync::atomic::AtomicBool,
+}
+impl crate::security::RootKeySource for RegistryRoot {
+    fn root_key(&self) -> Result<zeroize::Zeroizing<[u8; 32]>> {
+        use std::sync::atomic::Ordering;
+        // Existing roots are read without invoking an auto-initializing source.
+        // Unlink during an open read keeps that FD valid; unlink before open
+        // fails closed once this registry has ever observed an initialized root.
+        match read_bounded(&self.key_path) {
+            Ok(bytes) => {
+                let bytes = zeroize::Zeroizing::new(bytes);
+                let key: [u8; 32] = bytes
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| Error::Security("invalid broker metadata root length".into()))?;
+                self.initialized.store(true, Ordering::Release);
+                Ok(zeroize::Zeroizing::new(key))
+            }
+            Err(Error::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
+                if self.initialized.load(Ordering::Acquire) {
+                    return Err(Error::Security(
+                        "initialized broker metadata root is missing; refusing replacement".into(),
+                    ));
+                }
+                refuse_missing_root(&self.directory, &self.key_path)?;
+                let key = self.inner.root_key()?;
+                self.initialized.store(true, Ordering::Release);
+                Ok(key)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+fn refuse_missing_root(directory: &Path, key_path: &Path) -> Result<()> {
+    if !key_path.try_exists().map_err(|e| Error::io(key_path, e))? {
+        for entry in std::fs::read_dir(directory).map_err(|e| Error::io(directory, e))? {
+            let entry = entry.map_err(|e| Error::io(directory, e))?;
+            if entry
+                .path()
+                .extension()
+                .is_some_and(|extension| extension == "enc")
+            {
+                return Err(Error::Security("broker metadata root is missing while encrypted records exist; refusing replacement".into()));
+            }
+        }
+    }
+    Ok(())
+}
 impl Registry {
+    pub fn uploads(&self) -> Result<crate::apple::ckks::upload::UploadStore<'_>> {
+        crate::apple::ckks::upload::UploadStore::new(&self.directory, &self.backend)
+    }
     fn synced_inventory(&self, owner: u32) -> Result<Option<std::collections::BTreeSet<String>>> {
         #[derive(Deserialize)]
         #[serde(deny_unknown_fields)]
@@ -133,6 +192,9 @@ impl Registry {
             if matches!(id, "item-recipient" | "synced-inventory") {
                 continue;
             }
+            if id.starts_with("upload-") {
+                continue;
+            }
             scanned += 1;
             if scanned > 4096 {
                 return Err(Error::Refused("broker inventory exceeds limit".into()));
@@ -172,21 +234,21 @@ impl Registry {
             directory.join("state"),
             directory.join("runtime"),
         )?;
-        if !paths.software_key_file().exists() {
-            for entry in std::fs::read_dir(directory).map_err(|e| Error::io(directory, e))? {
-                let entry = entry.map_err(|e| Error::io(directory, e))?;
-                if entry
-                    .path()
-                    .extension()
-                    .is_some_and(|extension| extension == "enc")
-                {
-                    return Err(Error::Security("broker metadata root is missing while encrypted records exist; refusing replacement".into()));
-                }
-            }
-        }
+        refuse_missing_root(directory, &paths.software_key_file())?;
+        let root = RegistryRoot {
+            directory: directory.into(),
+            key_path: paths.software_key_file(),
+            inner: crate::security::FileRootKeySource::new(paths.clone()),
+            initialized: std::sync::atomic::AtomicBool::new(
+                paths
+                    .software_key_file()
+                    .try_exists()
+                    .map_err(|e| Error::io(paths.software_key_file(), e))?,
+            ),
+        };
         Ok(Self {
             directory: directory.to_owned(),
-            backend: SoftwareFileBackend::new(paths),
+            backend: SoftwareFileBackend::with_root_source(paths, Box::new(root)),
         })
     }
     pub fn provision_diagnostic(&self, owner: u32, key: StoredSepKey) -> Result<String> {
@@ -257,6 +319,43 @@ mod tests {
     use p256::elliptic_curve::sec1::ToEncodedPoint;
 
     #[test]
+    #[ignore = "requires root; only temporary synthetic upload metadata, no SEP or network"]
+    fn upload_journal_is_not_a_credential_and_prevents_in_process_root_replacement() -> Result<()> {
+        assert_eq!(keychain_sep_driver::peer::effective_uid(), 0);
+        let directory = tempfile::tempdir().map_err(|e| Error::io("test registry", e))?;
+        std::fs::set_permissions(directory.path(), std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| Error::io(directory.path(), e))?;
+        let registry = Registry::open(directory.path())?;
+        let envelope = registry
+            .backend
+            .seal(Purpose::SyncUpload, b"synthetic journal marker")?;
+        let journal = directory
+            .path()
+            .join(format!("upload-{}.enc", Uuid::new_v4()));
+        create_private_exclusive(&journal, &envelope)?;
+        assert!(registry.browser_credentials(1001)?.is_empty());
+        assert!(registry.uploads().is_ok());
+        let root = directory.path().join("state/software.key");
+        std::fs::remove_file(&root).map_err(|e| Error::io(&root, e))?;
+        assert!(
+            registry
+                .backend
+                .seal(Purpose::SyncUpload, b"must refuse")
+                .is_err()
+        );
+        assert!(Registry::open(directory.path()).is_err());
+        std::fs::remove_file(&journal).map_err(|e| Error::io(&journal, e))?;
+        assert!(
+            registry
+                .backend
+                .seal(Purpose::SyncUpload, b"even without a remaining envelope")
+                .is_err()
+        );
+        assert!(!root.exists());
+        Ok(())
+    }
+
+    #[test]
     #[ignore = "requires root; creates only disposable temporary registry files"]
     fn root_registry_enforces_owner_identity_and_authenticated_storage() {
         assert_eq!(keychain_sep_driver::peer::effective_uid(), 0);
@@ -291,6 +390,12 @@ mod tests {
         std::fs::remove_file(dir.path().join("state/software.key"))
             .unwrap_or_else(|e| panic!("remove synthetic root: {e}"));
         assert!(Registry::open(dir.path()).is_err());
+        assert!(
+            registry
+                .backend
+                .seal(Purpose::Vault, b"must not regenerate in a running broker")
+                .is_err()
+        );
         assert!(!dir.path().join("state/software.key").exists());
     }
 }

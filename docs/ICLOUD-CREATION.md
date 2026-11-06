@@ -43,20 +43,54 @@ account metadata, timestamps and imported public point. These tests use syntheti
 keys. They do not prove CloudKit accepts the record, that another Apple device
 imports it, or that any new biometric creation operation has run.
 
-The upload coordinator still needs to:
+The upload coordinator in `apple::ckks::upload` is now implemented against an
+explicit `UploadIo` interface. There is no production implementation of its
+atomic-write method yet. `Snapshot::fetch` uses the existing authenticated
+CloudKit transport and collects every page with cursor/count/size bounds before
+absence can enable a send or retry. The decoder retains each record's zone,
+owner, change tag and original encoding; unchanged-record checks reject edited
+projections rather than discard unknown server fields.
+
+`PreparedUpload` can only be built by validating a new item against the current
+key and a complete authenticated snapshot, decrypting it and checking the
+credential/public identity. It is not deserializable from browser IPC. The
+broker registry exposes private upload-journal storage, separated from credential
+inventory and encrypted with the dedicated `SyncUpload` purpose. Journals contain
+account/peer/owner/request/transaction binding, exact ciphertext, public identity,
+current-pointer precondition and attempt history; no raw private key, account
+token, biometric result or reusable authorization grant is persisted.
+
+The coordinator checkpoints Attempted before invoking the write adapter, records
+acceptance separately, then fetches and decrypts before reaching FetchVerified.
+A lost response reopens as uncertain and does not automatically resend. Explicit
+retry requires a fresh complete snapshot reporting absence and the unchanged key
+pointer; it reuses identical ciphertext/identity. Pointer changes and atomic
+rejections retain the key for later reconciliation, without silently choosing a
+new key or re-encrypting an unresolved upload. Any checkpoint error poisons the
+in-memory session until reopening, since rename/fsync failure can leave either
+old or new durable bytes. The broker also refuses root regeneration after an
+initialized root disappears, including in a running process.
+
+Nine offline coordinator tests cover acceptance/fetch separation, independent
+decryption/public-point checks, pagination, changed bindings, locks/tampering,
+lost responses, explicit retries, precondition failures and checkpoint faults.
+A privileged upload-only registry test checks namespace isolation and missing-root
+refusal. These tests use synthetic roots and a simulated server, and are not live
+Apple upload evidence.
+
+Remaining integration work:
 
 1. Generate and durably stage the exportable scalar in the broker, bind it to
    the frozen creation request/storage choice, and protect local use with a
    fresh biometric transaction. Never convert a native key to exportable storage.
-2. Retain server identity/change tags in zone snapshots and implement the atomic
-   save/current-key precondition. Apple's [outgoing operation](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/keychain/ckks/CKKSOutgoingQueueOperation.m)
+2. Implement the atomic save/current-key wire protocol using the retained server
+   identity and tags. Apple's [outgoing operation](https://github.com/apple-oss-distributions/Security/blob/db15acbe6a7f257a859ad9a3bb86097bfe0679d9/keychain/ckks/CKKSOutgoingQueueOperation.m)
    saves items with current-key pointers atomically under the unchanged-record
    policy. The private protobuf framing for those safeguards is not yet verified;
    an ordinary create request alone is insufficient.
-3. Persist account/peer/request binding, exact prepared ciphertext, transaction
-   and expected public identity before sending. After an ambiguous response,
-   fetch/reconcile the same UUID rather than generate another key or blindly
-   retry. A key rotation may require explicit re-encryption before a new attempt.
+3. Connect the durable coordinator to the broker/browser creation path and add
+   reconciled re-encryption for a rejected stale-key attempt. An uncertain
+   attempt must not lose its existing identity or prepared ciphertext.
 4. Verify Apple acceptance and subsequent authenticated fetch/decryption before
    reporting an iCloud save or enabling normal backed-up use. A local round trip
    or HTTP success alone is insufficient. Browser BE/BS flags must follow the
@@ -65,8 +99,17 @@ The upload coordinator still needs to:
    on another trusted device. Only after these gates should the browser offer
    **Save to iCloud** alongside **This device**.
 
-The current CloudKit decoder drops record change tags/zone identity, so it must
-be extended before upload. The public descriptor URL in the request header did
-not provide a usable schema during this investigation. These are remaining
-implementation tasks; none of the safeguards above are replaced by the offline
-encryption helper or by the existing joined Octagon identity.
+The public descriptor URL in the request header did not provide a usable schema
+during this investigation. The new ignored read-only metadata test received
+HTTP 401 using the cached CloudKit token on 2026-11-05. No record was decrypted,
+no vault/account snapshot was saved and no password, escrow or write request was
+sent. The response establishes an authentication refusal, not its cause; it does
+not prove token expiry versus provider/session binding. After fresh local sign-in
+through `keychain join --repair`, rerun the metadata check:
+
+```sh
+cargo test --lib apple::cloudkit::tests::live_record_metadata_preserves_server_zone_and_tags -- --ignored --nocapture
+```
+
+The actual metadata encoding and atomic-save semantics still need live validation;
+the coordinator or the existing joined Octagon identity cannot substitute for it.

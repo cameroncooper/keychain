@@ -188,6 +188,7 @@ impl CurrentKey {
         rand::rngs::OsRng.fill_bytes(item_key.as_mut());
         let wrapped = aes_siv_wrap_key(&self.key, item_key.as_ref())?;
         let mut record = Record {
+            server: None,
             name: item.record_id.clone(),
             record_type: "item".into(),
             fields: BTreeMap::from([
@@ -251,6 +252,7 @@ mod tests {
             let class_key = vec![2; 64];
             let records = vec![
                 Record {
+                    server: None,
                     name: "classA".into(),
                     record_type: "currentkey".into(),
                     fields: BTreeMap::from([(
@@ -259,6 +261,7 @@ mod tests {
                     )]),
                 },
                 Record {
+                    server: None,
                     name: class_id,
                     record_type: "synckey".into(),
                     fields: BTreeMap::from([

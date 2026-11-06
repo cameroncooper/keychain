@@ -291,8 +291,8 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 145 passing tests, six ignored (two Apple network and four privileged
-integration tests). All three registry tests passed separately as root, including
+Workspace checks: 155 passing tests, eight ignored (three Apple network and five privileged
+integration tests). All four registry tests passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
 Nine browser service-worker flow tests also pass. Strict Clippy is clean.
 The broker now exits after an idle interval without interrupting queued/active
@@ -388,10 +388,17 @@ correct key class and zone-bound authenticated TLK ancestry; it refuses stale
 fallback, record collisions and device-bound export. A synthetic newly encrypted
 passkey reenters the existing sync pipeline with the same credential ID, user
 metadata and P-256 public key. This is local interoperability evidence, not Apple
-acceptance. No upload endpoint or iCloud browser choice is enabled. Atomic
-current-key/change-tag handling, a durable upload/reconciliation journal, broker
-coordination, fetched/other-device verification and the remaining reveal/migration
-gates are still required. See [iCloud creation progress](docs/ICLOUD-CREATION.md).
+acceptance. The decoder now retains zone/owner, change tags and opaque server
+record bytes. A paginated read adapter and encrypted upload coordinator persist
+prepared ciphertext/identity and attempts, reconcile uncertain outcomes through
+fetch/decrypt verification and require explicit retries after confirmed absence.
+Nine coordinator tests pass, including persistence faults and key-pointer changes.
+No actual Apple write adapter or iCloud browser choice is enabled. Atomic save
+wire framing, broker creation/authorization coordination, live fetched/other-device
+verification and the remaining reveal/migration gates are still required. A
+read-only live metadata check received HTTP 401 with the cached CloudKit token;
+it did not validate live metadata or save any snapshot. Fresh local authentication
+is still required. See [iCloud creation progress](docs/ICLOUD-CREATION.md).
 
 Cold power-cycle, suspend/resume, other hardware, enrollment-set invalidation,
 native private-key import, P-384 and multi-user SEP identity isolation remain
