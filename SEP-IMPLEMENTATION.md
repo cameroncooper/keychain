@@ -291,7 +291,7 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 174 passing tests, eighteen ignored (three Apple network and fifteen privileged
+Workspace checks: 179 passing tests, eighteen ignored (three Apple network and fifteen privileged
 integration tests). Nine registry and five coordination tests passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
 Nine browser service-worker flow tests also pass. Strict Clippy is clean.
@@ -421,7 +421,7 @@ normal protected signing shares the same selected-secret implementation. Resume
 precedes ciphertext preparation and explicit policies govern uncertain/rejected
 recovery. Five synthetic complete-operation tests cover cancellation/lost replies,
 identity checks, restart and recovery. The authenticated cancellable network bridge
-and encoder-memory audit remain required before exposing this path over IPC; see
+and remaining library/scratch memory review remain required before exposing this path over IPC; see
 [coordination limits](docs/ICLOUD-BROKER-COORDINATION.md). The production
 Apple adapter and iCloud browser choice remain unconnected to production flows.
 Atomic save framing is implemented from pinned extracted-schema/client references:

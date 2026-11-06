@@ -7,17 +7,14 @@ use std::fs::{File, OpenOptions};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
-use base64::{
-    Engine,
-    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
-};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use super::write::{CurrentKey, KeyClass};
 use super::{Record, ZoneIdentity};
-use crate::apple::pipeline::{RecoveredTlk, decrypt_items, unwrap_class_keys};
+use crate::apple::pipeline::{RecoveredTlk, unwrap_class_keys};
 use crate::model::{PasskeyCredential, PasskeyProvenance};
 use crate::paths::{atomic_write_private, create_private_exclusive, read_bounded};
 use crate::security::{KeyAlgorithm, KeyUsage, Purpose, SecurityBackend};
@@ -223,8 +220,7 @@ impl PreparedUpload {
             &snapshot.tlks,
             KeyClass::WhenUnlocked,
         )?;
-        let item = crate::passkey::encode_sync_item(&credential, private_x963)?;
-        let record = current.seal_new_item(&item)?;
+        let record = current.seal_new_passkey(&credential, private_x963)?;
         let public = private_x963
             .get(..65)
             .ok_or_else(|| invalid("truncated private key"))?;
@@ -350,24 +346,7 @@ impl PlanData {
             .cloned()
             .collect();
         let keys = unwrap_class_keys(&sync_keys, &roots)?;
-        let items = decrypt_items(std::slice::from_ref(record), &keys);
-        let item = items.first().ok_or_else(|| {
-            Error::Security("fetched upload did not decrypt with authenticated keys".into())
-        })?;
-        let recovered = crate::passkey::from_item(&record.name, &item.fields)?
-            .ok_or_else(|| invalid("fetched upload is not a passkey"))?;
-        let expected = &self.credential;
-        if recovered.rp_id != expected.rp_id
-            || URL_SAFE_NO_PAD.encode(&recovered.credential_id) != expected.credential_id
-            || URL_SAFE_NO_PAD.encode(&recovered.user_handle) != expected.user_handle
-            || recovered.username != expected.username
-            || recovered.display_name != expected.display_name
-            || STANDARD.encode(recovered.public_x963()) != self.public_sec1
-        {
-            return Err(Error::Security(
-                "fetched upload changed the credential identity".into(),
-            ));
-        }
+        super::write::verify_new_passkey(record, &keys, &self.credential, &self.public_sec1)?;
         Ok(())
     }
 }

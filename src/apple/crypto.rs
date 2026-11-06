@@ -114,7 +114,95 @@ pub fn aes_siv_wrap_key(parent: &[u8], item_key: &[u8]) -> Result<Vec<u8>> {
     if item_key.len() != 64 {
         return Err(Error::InvalidData("CKKS item key must be 64 bytes".into()));
     }
-    aes_siv_encrypt(parent, item_key, &[])
+    let mut memory = keychain_sep_driver::memory::SecretBuffer::new()
+        .map_err(|e| Error::io("item wrapping memory", e))?;
+    memory.as_mut_array()[..64].copy_from_slice(item_key);
+    let tag = Aes256Siv::new_from_slice(parent)
+        .map_err(|_| Error::InvalidData("invalid CKKS parent key".into()))?
+        .encrypt_in_place_detached(
+            std::iter::empty::<&[u8]>(),
+            &mut memory.as_mut_array()[..64],
+        )
+        .map_err(|_| Error::Security("item key wrapping failed".into()))?;
+    let mut wrapped = tag.to_vec();
+    wrapped.extend_from_slice(&memory.as_array()[..64]);
+    Ok(wrapped)
+}
+
+/// Decrypt only into the caller's already-protected final allocation. Never
+/// allocate a Vec holding the plaintext. All error paths erase the output.
+pub(crate) fn siv_decrypt_into(
+    key: &[u8],
+    ciphertext: &[u8],
+    headers: &[Vec<u8>],
+    output: &mut [u8],
+) -> Result<usize> {
+    use zeroize::Zeroize;
+    let result = (|| {
+        if key.len() != 64
+            || headers.len() > 126
+            || ciphertext.len() < 16
+            || ciphertext.len() - 16 > output.len()
+        {
+            return Err(Error::InvalidData(
+                "invalid in-place SIV decryption bounds".into(),
+            ));
+        }
+        let length = ciphertext.len() - 16;
+        output[..length].copy_from_slice(&ciphertext[16..]);
+        Aes256Siv::new_from_slice(key)
+            .map_err(|_| Error::InvalidData("invalid SIV key".into()))?
+            .decrypt_in_place_detached(
+                headers.iter(),
+                &mut output[..length],
+                aes_siv::Tag::from_slice(&ciphertext[..16]),
+            )
+            .map_err(|_| Error::Security("SIV authentication failed".into()))?;
+        Ok(length)
+    })();
+    if result.is_err() {
+        output.zeroize();
+    }
+    result
+}
+
+pub(crate) fn encrypt_item_in_place(
+    item_key: &[u8],
+    buffer: &mut [u8],
+    length: usize,
+    aad: &[Vec<u8>],
+    short: bool,
+) -> Result<Vec<u8>> {
+    use rand::RngCore;
+    if item_key.len() != 64
+        || length > 1024 * 1024
+        || aad.len() > 125
+        || aad.iter().any(|value| value.len() > 256 * 1024)
+    {
+        return Err(Error::InvalidData(
+            "invalid in-place CKKS encryption bounds".into(),
+        ));
+    }
+    let padded = length
+        .checked_add(20 - length % 20 + if short { 20 } else { 0 })
+        .filter(|end| *end <= buffer.len())
+        .ok_or_else(|| Error::InvalidData("CKKS padding exceeds protected buffer".into()))?;
+    buffer[length..padded].fill(0);
+    buffer[length] = 0x80;
+    let mut nonce = [0u8; 16];
+    rand::rngs::OsRng
+        .try_fill_bytes(&mut nonce)
+        .map_err(|_| Error::Security("CKKS randomness unavailable".into()))?;
+    let mut headers = vec![nonce.to_vec()];
+    headers.extend_from_slice(aad);
+    let tag = Aes256Siv::new_from_slice(item_key)
+        .map_err(|_| Error::InvalidData("invalid CKKS key".into()))?
+        .encrypt_in_place_detached(headers.iter(), &mut buffer[..padded])
+        .map_err(|_| Error::Security("CKKS encryption failed".into()))?;
+    let mut result = nonce.to_vec();
+    result.extend_from_slice(&tag);
+    result.extend_from_slice(&buffer[..padded]);
+    Ok(result)
 }
 
 fn aes_siv_encrypt(key: &[u8], plaintext: &[u8], headers: &[Vec<u8>]) -> Result<Vec<u8>> {
@@ -205,6 +293,46 @@ mod tests {
     use p384::ecdh::diffie_hellman;
     use p384::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
     use p384::{EncodedPoint, PublicKey};
+
+    #[test]
+    fn protected_siv_roundtrip_and_error_erasure() -> Result<()> {
+        let key = [0x42; 64];
+        let aad = vec![b"record-id".to_vec()];
+        for length in [0, 1, 19, 20, 21, 97, 1000] {
+            for short in [false, true] {
+                let mut buffer = vec![0x21; length + 40];
+                let ciphertext = encrypt_item_in_place(&key, &mut buffer, length, &aad, short)?;
+                assert_eq!(
+                    decrypt_item(&key, &ciphertext, &aad)?.as_slice(),
+                    vec![0x21; length]
+                );
+                let mut headers = vec![ciphertext[..16].to_vec()];
+                headers.extend_from_slice(&aad);
+                let mut output = vec![0xa5; length + 40];
+                let size = siv_decrypt_into(&key, &ciphertext[16..], &headers, &mut output)?;
+                assert_eq!(&output[..length], vec![0x21; length]);
+                assert_eq!(output[length], 0x80);
+                assert!(output[length + 1..size].iter().all(|byte| *byte == 0));
+                for (bad_key, bad_cipher, bad_headers) in [
+                    (&[0; 64][..], &ciphertext[16..], headers.as_slice()),
+                    (&key[..], &ciphertext[16..31], headers.as_slice()),
+                    (&key[..], &ciphertext[16..], &[][..]),
+                ] {
+                    output.fill(0xa5);
+                    assert!(
+                        siv_decrypt_into(bad_key, bad_cipher, bad_headers, &mut output).is_err()
+                    );
+                    assert!(output.iter().all(|byte| *byte == 0));
+                }
+                let mut small = [0xa5; 1];
+                assert!(siv_decrypt_into(&key, &ciphertext[16..], &headers, &mut small).is_err());
+                assert_eq!(small, [0]);
+            }
+        }
+        assert!(encrypt_item_in_place(&key, &mut [0; 19], 0, &[], false).is_err());
+        assert!(encrypt_item_in_place(&key, &mut [0; 40], usize::MAX, &[], false).is_err());
+        Ok(())
+    }
 
     #[test]
     fn ckks_write_padding_and_key_wrapping_match_the_existing_reader() -> Result<()> {

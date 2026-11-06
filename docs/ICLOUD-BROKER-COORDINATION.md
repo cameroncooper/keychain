@@ -17,9 +17,24 @@ a private borrowed `SelectedScalar`. That value has no plaintext accessor,
 serialization or reusable grant. It can prepare encrypted CKKS data and sign
 only the selected record. The primary decrypted scalar and assembled X9.63
 input use checked locked, dump-excluded, non-inherited memory. They are wiped
-when the operation returns, including errors. Existing plist/encryption buffers
-zeroize on drop; not every encoder allocation or library temporary is yet
-individually locked. That audit remains required before production activation.
+when the operation returns, including errors. Creation serializes a zero-filled
+private-data placeholder directly into a bounded 64-KiB protected allocation.
+A strict flat binary-plist locator identifies that data object; only after the
+serializer has finished are the real bytes inserted and encrypted in place.
+Fresh item keys and key-wrapping plaintext also use protected allocations.
+Fetch verification unwraps/decrypts directly into protected memory, checks the
+key, and erases private data before the owned plist parser sees the metadata.
+Decryption errors wipe the entire destination, including authentication failures.
+
+AES key-schedule and CMAC state cleanup features are explicitly enabled;
+AES-SIV also zeroizes its retained encryption key on drop. This does not prove
+erasure or locking of every cryptographic/compiler stack copy. Existing account
+TLK/class-key resolution still uses zeroizing heap buffers; this change does not
+implement protected root unsealing or harden every legacy software/read path.
+No secrets enter the plist writer's owned event table on this creation path.
+Tests cover the encoder/reader round trip, bounded and malformed binary plists,
+mapping protections at both buffer sizes, an isolated memlock-failure process,
+and in-place cryptographic compatibility/error erasure.
 
 Within that lifetime, the coordinator:
 
@@ -67,5 +82,5 @@ close the worker channel on cancel/expiry, and return promptly so the scalar is
 wiped. A late Apple response remains an uncertain journaled attempt, with no
 automatic replay. Worker responses need request/step correlation and strict
 framing; no deserialize shortcut may construct VerifiedUpload from client JSON.
-This transport, memory audit, scoped live Apple tests, real biometric creation
+This transport, remaining library/scratch memory review, scoped live Apple tests, real biometric creation
 and browser/other-device validation remain gates before enabling iCloud creation.

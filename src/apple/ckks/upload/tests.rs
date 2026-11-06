@@ -1,6 +1,7 @@
 use super::super::{FieldValue, test_support::server_record};
 use super::*;
 use crate::security::{FileRootKeySource, KeyRef, RootKeySource, SoftwareFileBackend};
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use std::sync::{
     Arc,

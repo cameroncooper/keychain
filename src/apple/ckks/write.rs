@@ -139,7 +139,29 @@ impl CurrentKey {
         &self.pointer
     }
 
-    pub fn seal_new_item(&self, item: &DecryptedItem) -> Result<Record> {
+    fn encrypted_record(&self, id: &str, item_key: &[u8]) -> Result<Record> {
+        let wrapped = aes_siv_wrap_key(&self.key, item_key)?;
+        let record = Record {
+            server: None,
+            name: id.into(),
+            record_type: "item".into(),
+            fields: BTreeMap::from([
+                (
+                    "parentkeyref".into(),
+                    FieldValue::Reference(self.key_id.clone()),
+                ),
+                (
+                    "wrappedkey".into(),
+                    FieldValue::String(STANDARD.encode(wrapped)),
+                ),
+                ("gen".into(), FieldValue::Integer(0)),
+                ("encver".into(), FieldValue::Integer(2)),
+            ]),
+        };
+        Ok(record)
+    }
+
+    fn validate_new_item(&self, item: &DecryptedItem) -> Result<()> {
         let id = uuid::Uuid::parse_str(&item.record_id)
             .map_err(|_| invalid("new item ID is not a UUID"))?;
         if id.get_version_num() != 4 || self.occupied.contains(&item.record_id) {
@@ -169,6 +191,55 @@ impl CurrentKey {
                 "only explicitly synchronizable items can be prepared",
             ));
         }
+        Ok(())
+    }
+
+    /// The plist writer sees zeros, never the private key. Only the final
+    /// locked allocation receives the real key, then in-place SIV overwrites it.
+    pub fn seal_new_passkey(
+        &self,
+        credential: &crate::model::PasskeyCredential,
+        private: &[u8],
+    ) -> Result<Record> {
+        let template = crate::passkey::sync_item_template(credential, private)?;
+        self.validate_new_item(&template)?;
+        let fields: BTreeMap<_, _> = template
+            .fields
+            .iter()
+            .filter(|(name, _)| !matches!(name.as_str(), "sync" | "UUID"))
+            .collect();
+        let mut plaintext = super::secret_plist::Plaintext::new()?;
+        plist::to_writer_binary(&mut plaintext, &fields)?;
+        let range = super::secret_plist::secret_range(plaintext.bytes())?;
+        if range.len() != private.len()
+            || plaintext.bytes()[range.clone()]
+                .iter()
+                .any(|byte| *byte != 0)
+        {
+            return Err(invalid("invalid private-data serialization placeholder"));
+        }
+        plaintext.buffer()[range].copy_from_slice(private);
+        let mut item_key = keychain_sep_driver::memory::SecretBuffer::new()
+            .map_err(|e| Error::io("CKKS item key memory", e))?;
+        rand::rngs::OsRng
+            .try_fill_bytes(&mut item_key.as_mut_array()[..64])
+            .map_err(|_| Error::Security("CKKS item key randomness unavailable".into()))?;
+        let mut record = self.encrypted_record(&credential.id, &item_key.as_array()[..64])?;
+        let aad = authenticated_data_v2(&record, &self.key_id)?;
+        let length = plaintext.len();
+        let data = crate::apple::crypto::encrypt_item_in_place(
+            &item_key.as_array()[..64],
+            plaintext.buffer(),
+            length,
+            &aad,
+            false,
+        )?;
+        record.fields.insert("data".into(), FieldValue::Bytes(data));
+        Ok(record)
+    }
+
+    pub fn seal_new_item(&self, item: &DecryptedItem) -> Result<Record> {
+        self.validate_new_item(item)?;
         let secret_length = item
             .fields
             .get("v_Data")
@@ -186,29 +257,107 @@ impl CurrentKey {
         plist::to_writer_binary(&mut plaintext, &sync_fields)?;
         let mut item_key = Zeroizing::new([0u8; 64]);
         rand::rngs::OsRng.fill_bytes(item_key.as_mut());
-        let wrapped = aes_siv_wrap_key(&self.key, item_key.as_ref())?;
-        let mut record = Record {
-            server: None,
-            name: item.record_id.clone(),
-            record_type: "item".into(),
-            fields: BTreeMap::from([
-                (
-                    "parentkeyref".into(),
-                    FieldValue::Reference(self.key_id.clone()),
-                ),
-                (
-                    "wrappedkey".into(),
-                    FieldValue::String(STANDARD.encode(wrapped)),
-                ),
-                ("gen".into(), FieldValue::Integer(0)),
-                ("encver".into(), FieldValue::Integer(2)),
-            ]),
-        };
+        let mut record = self.encrypted_record(&item.record_id, item_key.as_ref())?;
         let aad = authenticated_data_v2(&record, &self.key_id)?;
         let data = encrypt_item(item_key.as_ref(), &plaintext.0, &aad, secret_length < 20)?;
         record.fields.insert("data".into(), FieldValue::Bytes(data));
         Ok(record)
     }
+}
+
+/// Verify a prepared/fetched creation item without decoding its private bytes
+/// into plist-owned data or RecoveredPasskey's software-import representation.
+pub(super) fn verify_new_passkey(
+    record: &Record,
+    keys: &BTreeMap<String, Zeroizing<Vec<u8>>>,
+    credential: &crate::model::PasskeyCredential,
+    public: &str,
+) -> Result<()> {
+    let parent = record
+        .string("parentkeyref")
+        .ok_or_else(|| invalid("missing wrapping-key reference"))?;
+    let class_key = keys
+        .get(parent)
+        .ok_or_else(|| invalid("authenticated wrapping key unavailable"))?;
+    let wrapped = record
+        .string("wrappedkey")
+        .and_then(|value| STANDARD.decode(value).ok())
+        .ok_or_else(|| invalid("invalid wrapped key"))?;
+    let mut item_key = keychain_sep_driver::memory::SecretBuffer::new()
+        .map_err(|e| Error::io("CKKS verification key memory", e))?;
+    let key_length =
+        crate::apple::crypto::siv_decrypt_into(class_key, &wrapped, &[], item_key.as_mut_array())?;
+    if key_length != 64 {
+        return Err(invalid("invalid decrypted item key"));
+    }
+    let data = record
+        .bytes("data")
+        .filter(|data| data.len() >= 32)
+        .ok_or_else(|| invalid("truncated item ciphertext"))?;
+    let mut headers = vec![data[..16].to_vec()];
+    headers.extend(authenticated_data_v2(record, parent)?);
+    let mut plaintext = super::secret_plist::Plaintext::new()?;
+    let padded = crate::apple::crypto::siv_decrypt_into(
+        &item_key.as_array()[..64],
+        &data[16..],
+        &headers,
+        plaintext.buffer(),
+    )?;
+    let length = plaintext.buffer()[..padded]
+        .iter()
+        .rposition(|byte| *byte != 0)
+        .filter(|index| {
+            padded % 20 == 0 && padded - *index <= 40 && plaintext.buffer()[*index] == 0x80
+        })
+        .ok_or_else(|| invalid("invalid item padding"))?;
+    let range = super::secret_plist::secret_range(&plaintext.buffer()[..length])?;
+    if STANDARD.encode(&plaintext.buffer()[range.start..range.start + 65]) != public {
+        return Err(Error::Security(
+            "fetched upload changed its public key".into(),
+        ));
+    }
+    let expected =
+        crate::passkey::sync_item_template(credential, &plaintext.buffer()[range.clone()])?;
+    // Erase before plist's owned parser can clone the data object. All genuine
+    // primary private-data buffers remain in the checked protected allocation;
+    // cryptographic objects and compiler temporaries have separate lifetimes.
+    plaintext.buffer()[range].fill(0);
+    let value = plist::Value::from_reader(std::io::Cursor::new(&plaintext.buffer()[..length]))?;
+    let plist::Value::Dictionary(fields) = value else {
+        return Err(invalid("expected a flat key item"));
+    };
+    let actual = DecryptedItem {
+        record_id: record.name.clone(),
+        fields,
+    };
+    let projection: BTreeMap<_, _> = expected
+        .fields
+        .iter()
+        .filter(|(name, _)| !matches!(name.as_str(), "sync" | "UUID"))
+        .collect();
+    if actual.fields.len() != projection.len() {
+        return Err(invalid("fetched upload changed its metadata fields"));
+    }
+    for (name, value) in projection {
+        let field = actual
+            .fields
+            .get(name)
+            .ok_or_else(|| invalid("missing fetched metadata"))?;
+        let same = if let (Some(a), Some(b)) = (field.as_date(), value.as_date()) {
+            let a = std::time::SystemTime::from(a);
+            let b = std::time::SystemTime::from(b);
+            a.duration_since(b).unwrap_or_else(|error| error.duration())
+                <= std::time::Duration::from_micros(1)
+        } else {
+            field == value
+        };
+        if !same {
+            return Err(Error::Security(
+                "fetched upload changed its credential metadata".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 // Prevent an oversized plaintext from being fully allocated before rejecting it.
@@ -331,7 +480,7 @@ mod tests {
         let f = Fixture::new()?;
         let current = f.current()?;
         let item = f.item()?;
-        let record = current.seal_new_item(&item)?;
+        let record = current.seal_new_passkey(&f.passkey, &f.private)?;
         assert_eq!(current.zone(), "Passwords");
         assert_eq!(
             current.key_id(),
@@ -348,6 +497,12 @@ mod tests {
         );
         let class_keys =
             BTreeMap::from([(current.key_id().into(), Zeroizing::new(f.class_key.clone()))]);
+        verify_new_passkey(
+            &record,
+            &class_keys,
+            &f.passkey,
+            &STANDARD.encode(&f.private[..65]),
+        )?;
         let decoded =
             crate::apple::pipeline::decrypt_items(std::slice::from_ref(&record), &class_keys);
         assert_eq!(decoded.len(), 1);

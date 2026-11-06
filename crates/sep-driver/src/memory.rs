@@ -16,22 +16,31 @@ pub fn make_process_nondumpable() -> io::Result<()> {
     Ok(())
 }
 
-pub struct SecretBuffer {
+pub type SecretBuffer = LockedBuffer<MAX_BLOB>;
+
+/// Fixed final-size protected allocation; no grow/reallocation or unprotected fallback.
+pub struct LockedBuffer<const N: usize> {
     pointer: NonNull<u8>,
     mapped_len: usize,
 }
 
-impl SecretBuffer {
+impl<const N: usize> LockedBuffer<N> {
     /// Creates its final allocation and installs protections before secret input.
     /// Any failed protection aborts allocation, with no unprotected fallback.
     pub fn new() -> io::Result<Self> {
+        if N == 0 || N > 1024 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "secret allocation size is out of bounds",
+            ));
+        }
         // SAFETY: sysconf with _SC_PAGESIZE takes no caller-owned memory.
         let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
         if page <= 0 {
             return Err(io::Error::other("cannot determine runtime page size"));
         }
         let page = page as usize;
-        let mapped_len = MAX_BLOB.div_ceil(page) * page;
+        let mapped_len = N.div_ceil(page) * page;
         // SAFETY: anonymous private mapping, kernel-selected address, no file or
         // inherited allocation. The returned mapping is exclusively owned here.
         let raw = unsafe {
@@ -74,15 +83,15 @@ impl SecretBuffer {
         Ok(buffer)
     }
 
-    pub fn as_mut_array(&mut self) -> &mut [u8; MAX_BLOB] {
-        // SAFETY: mapping is writable, at least MAX_BLOB bytes, and exclusively
+    pub fn as_mut_array(&mut self) -> &mut [u8; N] {
+        // SAFETY: mapping is writable, at least N bytes, and exclusively
         // borrowed for the returned reference's lifetime. Alignment for u8 is 1.
-        unsafe { &mut *self.pointer.as_ptr().cast::<[u8; MAX_BLOB]>() }
+        unsafe { &mut *self.pointer.as_ptr().cast::<[u8; N]>() }
     }
 
-    pub fn as_array(&self) -> &[u8; MAX_BLOB] {
+    pub fn as_array(&self) -> &[u8; N] {
         // SAFETY: mapping remains live and readable while self is borrowed.
-        unsafe { &*self.pointer.as_ptr().cast::<[u8; MAX_BLOB]>() }
+        unsafe { &*self.pointer.as_ptr().cast::<[u8; N]>() }
     }
 
     pub fn mapping_len(&self) -> usize {
@@ -90,7 +99,7 @@ impl SecretBuffer {
     }
 }
 
-impl Drop for SecretBuffer {
+impl<const N: usize> Drop for LockedBuffer<N> {
     fn drop(&mut self) {
         // SAFETY: exclusively owned mapping remains writable until munmap below.
         let all = unsafe { std::slice::from_raw_parts_mut(self.pointer.as_ptr(), self.mapped_len) };
@@ -108,8 +117,47 @@ mod tests {
     use super::*;
 
     #[test]
+    fn protection_failure_has_no_unlocked_fallback() {
+        const CHILD: &str = "KEYCHAIN_TEST_ZERO_MEMLOCK";
+        if std::env::var_os(CHILD).is_some() {
+            let limit = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            // SAFETY: only this isolated test child changes its process limit.
+            assert_eq!(unsafe { libc::setrlimit(libc::RLIMIT_MEMLOCK, &limit) }, 0);
+            assert!(LockedBuffer::<65536>::new().is_err());
+            return;
+        }
+        // Root may have CAP_IPC_LOCK and bypass RLIMIT_MEMLOCK altogether.
+        // SAFETY: geteuid takes no arguments and does not mutate process state.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let status = std::process::Command::new(
+            std::env::current_exe().unwrap_or_else(|e| panic!("test exe: {e}")),
+        )
+        .args([
+            "--exact",
+            "memory::tests::protection_failure_has_no_unlocked_fallback",
+        ])
+        .env(CHILD, "1")
+        .status()
+        .unwrap_or_else(|e| panic!("isolated test: {e}"));
+        assert!(status.success());
+    }
+
+    #[test]
     fn secret_mapping_is_locked_dump_excluded_and_not_inherited() {
-        let mut buffer = SecretBuffer::new().unwrap_or_else(|e| panic!("secret allocation: {e}"));
+        check_mapping::<MAX_BLOB>();
+        check_mapping::<65536>();
+        assert!(LockedBuffer::<0>::new().is_err());
+        assert!(LockedBuffer::<1048577>::new().is_err());
+    }
+
+    fn check_mapping<const N: usize>() {
+        let mut buffer =
+            LockedBuffer::<N>::new().unwrap_or_else(|e| panic!("secret allocation: {e}"));
         buffer.as_mut_array()[..32].fill(0xa5);
         let start = buffer.pointer.as_ptr() as usize;
         let header = format!("{start:x}-{:x}", start + buffer.mapping_len());

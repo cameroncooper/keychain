@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use crate::proto::{Fields, Value, Writer, decode_fields, first_bytes, first_string, first_u64};
 use crate::{Error, Result};
 
+mod secret_plist;
 #[cfg(test)]
 pub(crate) mod test_support;
 pub mod upload;

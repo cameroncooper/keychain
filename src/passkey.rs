@@ -261,6 +261,23 @@ pub fn encode_sync_item(
     credential: &PasskeyCredential,
     private_x963: &[u8],
 ) -> Result<crate::apple::pipeline::DecryptedItem> {
+    encode_sync_item_data(credential, private_x963, true)
+}
+
+/// Serializer input containing only public metadata and a zeroed private-data
+/// placeholder. Insert the real bytes only after serialization into locked memory.
+pub(crate) fn sync_item_template(
+    credential: &PasskeyCredential,
+    private_x963: &[u8],
+) -> Result<crate::apple::pipeline::DecryptedItem> {
+    encode_sync_item_data(credential, private_x963, false)
+}
+
+fn encode_sync_item_data(
+    credential: &PasskeyCredential,
+    private_x963: &[u8],
+    include_private: bool,
+) -> Result<crate::apple::pipeline::DecryptedItem> {
     if credential.provenance != crate::model::PasskeyProvenance::Synced
         || credential.signing_key.backend_id == "sep-native-v1"
     {
@@ -370,7 +387,14 @@ pub fn encode_sync_item(
         fields.insert(name.into(), Value::Integer(0.into()));
     }
     // Add secret bytes last, after all fallible metadata validation/encoding.
-    fields.insert("v_Data".into(), Value::Data(private_x963.to_vec()));
+    fields.insert(
+        "v_Data".into(),
+        Value::Data(if include_private {
+            private_x963.to_vec()
+        } else {
+            vec![0; private_x963.len()]
+        }),
+    );
     Ok(crate::apple::pipeline::DecryptedItem {
         record_id: credential.id.clone(),
         fields,
