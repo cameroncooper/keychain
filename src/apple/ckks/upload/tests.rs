@@ -35,6 +35,39 @@ fn read_only_readiness_rejects_a_class_key_wrapped_under_another_root() -> Resul
     Ok(())
 }
 
+#[test]
+fn proposed_record_review_requires_absence_and_preserves_pointer_preconditions() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let mut snapshot = fixture
+        .io
+        .fetch_zone(&fixture.plan.binding().zone, &|| Ok(()))?;
+    let proposed = Uuid::new_v4();
+    let review = snapshot.review_new_record(proposed)?;
+    assert_eq!(review.record_id, proposed);
+    assert_eq!(review.pointer_record_sha256.len(), 64);
+    assert_eq!(review.pointer_change_tag_sha256.len(), 64);
+    assert_eq!(
+        snapshot.review_new_record(proposed)?.pointer_record_sha256,
+        review.pointer_record_sha256
+    );
+    assert!(snapshot.review_new_record(Uuid::nil()).is_err());
+    // Reuse of any existing UUID is refused, even under different case.
+    let existing = snapshot
+        .records
+        .iter()
+        .find_map(|record| Uuid::parse_str(&record.name).ok())
+        .ok_or_else(|| invalid("fixture has no class-key UUID"))?;
+    assert!(snapshot.review_new_record(existing).is_err());
+    let pointer = snapshot
+        .records
+        .iter_mut()
+        .find(|record| record.record_type == "currentkey")
+        .ok_or_else(|| invalid("fixture pointer"))?;
+    pointer.server = None;
+    assert!(snapshot.review_new_record(proposed).is_err());
+    Ok(())
+}
+
 /// Offline cross-module integration fixture. Runs the real encoder, CKKS
 /// encryption, durable coordinator and simulated fetch/decrypt verification.
 /// No receipt constructor is exposed to production or browser IPC.

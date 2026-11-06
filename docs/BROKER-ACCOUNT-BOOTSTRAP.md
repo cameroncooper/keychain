@@ -75,10 +75,20 @@ The check does not initialize a missing account registry, start a worker, sign i
 retry escrow, capture a fingerprint or write Apple records. It fetches recoverable
 shares and the complete Passwords zone, verifies self-shares using the enrolled
 identity, and resolves the current class-A key on a protected computation stack.
-It does not decrypt password items. JSON output contains only owner, zone name,
-record/root counts and the successful hierarchy check; it is not an upload receipt.
+It does not decrypt password items. JSON output contains only owner, account
+fingerprint, zone name, record/root counts and the successful hierarchy check;
+it is not an upload receipt.
 Missing/expired tokens, untrusted shares or an incomplete hierarchy fail closed.
 Socket connect and subsequent transport IO share one monotonic deadline.
+
+For a concrete proposed creation, append `--new-record <UUID-v4>`. The read-only
+check also rejects an existing UUID (including a case variant), validates the
+current pointer's raw zone/account/reference, and returns its selected class-key
+ID plus SHA-256 fingerprints of the retained server record and change tag. It
+creates neither a key nor encrypted item. This review identifies a precondition
+to inspect before a separately authorized write; it is not a promise of absence
+at send time or permission to write. The coordinator must still check a fresh
+complete snapshot and use its create-only/unchanged-pointer policies.
 
 For candidate validation before production enrollment, import the broker package
 into a separate root-only registry with `--worker-socket` pointing to a disposable

@@ -1,8 +1,9 @@
 # CloudKit atomic save implementation and validation
 
 Implemented 2026-11-06 in `apple::cloudkit::atomic`. The concrete `AppleUploadIo`
-adapter implements the upload coordinator's read/write interface. No CLI or
-browser operation invokes it yet, and no live Apple write has been performed.
+adapter implements the upload coordinator's read/write interface. The broker's
+creation path is connected behind a default-off deployment flag; the installed
+production service leaves that flag off. No live Apple write has been performed.
 This is implemented framing and policy validation, with Apple acceptance and
 atomicity still requiring the live gates below.
 
@@ -59,9 +60,10 @@ a lost response. These are synthetic fixtures, not captured Apple wire evidence.
 
 Remaining gates:
 
-1. Complete fresh local authentication and read-only metadata validation. The
-   previous cached-token probe returned 401; no new authentication was attempted
-   for this implementation.
+1. Read-only account validation is complete for the staged candidate: after fresh
+   authentication, the isolated root/worker check fetched all 16 Passwords records,
+   authenticated one TLK and resolved the current class-A key. This proves token
+   acceptance at that check, not future validity or write acceptance.
 2. Prepare a concrete disposable creation/upload plan and obtain explicit
    authorization for that account, zone and new record UUID. Inspect the exact
    pointer/tag and encrypted item before sending any write.
@@ -87,3 +89,12 @@ These are read/format observations only: no atomic save, absence reconciliation,
 TLK unwrap, broker account enrollment or other-device acceptance was performed.
 Live negative/positive writes still require the concrete scoped authorization
 and verification gates above.
+
+The [disposable live-test scope](LIVE-ICLOUD-TEST.md) now fixes the account review,
+new UUID, RP and username. Its isolated read-only review confirms UUID absence
+and validates/fingerprints the raw current pointer and change tag. The separate
+administrator example has default inspection and one-send negative/positive
+modes, with offline replay/uncertainty/scope tests. It saves the exact diagnostic
+ciphertext and altered pointer before a send; the normal encrypted coordinator
+journal also retains the staged credential and upload state. Scope approval and
+fresh biometric readiness remain pending. No write mode has been executed.

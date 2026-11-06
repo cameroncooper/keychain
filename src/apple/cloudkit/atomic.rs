@@ -458,7 +458,11 @@ fn validate_worker_fetch(binding: &Binding, body: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn validate_pointer_reference(raw: &[u8], zone: &ZoneIdentity, parent: &str) -> Result<()> {
+pub(crate) fn validate_pointer_reference(
+    raw: &[u8],
+    zone: &ZoneIdentity,
+    parent: &str,
+) -> Result<()> {
     fn check_zone(raw: &[u8], zone: &ZoneIdentity) -> Result<()> {
         let fields = decode_fields(raw)?;
         for (field, name, kind) in [(1, &zone.name, 6), (2, &zone.owner, 7)] {

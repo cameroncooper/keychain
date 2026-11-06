@@ -66,7 +66,60 @@ pub struct Snapshot {
     records: Vec<Record>,
     tlks: Vec<RecoveredTlk>,
 }
+
+/// Read-only metadata for reviewing one proposed creation. This is neither a
+/// prepared encrypted item nor proof of authorization, absence at send time,
+/// successful registration or cloud backup.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NewRecordReview {
+    pub record_id: Uuid,
+    pub current_class_key_id: String,
+    pub pointer_record_sha256: String,
+    pub pointer_change_tag_sha256: String,
+}
 impl Snapshot {
+    pub fn review_new_record(&self, id: Uuid) -> Result<NewRecordReview> {
+        use sha2::{Digest, Sha256};
+        if id.get_version_num() != 4 {
+            return Err(invalid("proposed record UUID must be v4"));
+        }
+        if self
+            .records
+            .iter()
+            .any(|record| Uuid::parse_str(&record.name).ok() == Some(id))
+        {
+            return Err(invalid(
+                "proposed record UUID already exists in the fetched zone",
+            ));
+        }
+        // Resolve again here so this review cannot be called on an unchecked
+        // current-key projection. Secret key material never leaves this stack.
+        crate::security::secret_compute(|| {
+            let current = CurrentKey::from_snapshot(
+                &self.zone.name,
+                &self.records,
+                &self.tlks,
+                KeyClass::WhenUnlocked,
+            )?;
+            let metadata = current.current_pointer().server_precondition(&self.zone)?;
+            crate::apple::cloudkit::atomic::validate_pointer_reference(
+                &metadata.encoded_record,
+                &self.zone,
+                current.key_id(),
+            )?;
+            let tag = metadata
+                .change_tag
+                .as_deref()
+                .ok_or_else(|| invalid("pointer change tag"))?;
+            Ok(NewRecordReview {
+                record_id: id,
+                current_class_key_id: current.key_id().into(),
+                pointer_record_sha256: hex::encode(Sha256::digest(&metadata.encoded_record)),
+                pointer_change_tag_sha256: hex::encode(Sha256::digest(tag.as_bytes())),
+            })
+        })
+    }
     /// Verify the current class-A hierarchy without decrypting any item.
     /// Counts are diagnostic metadata, never an upload authorization receipt.
     pub(crate) fn readiness_counts(&self) -> Result<(usize, usize)> {

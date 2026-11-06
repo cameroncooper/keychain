@@ -12,6 +12,12 @@ share/hierarchy-fetch gate; scoped atomic-save, biometric creation and
 other-device acceptance gates remain open. Details are in
 [broker account bootstrap](docs/BROKER-ACCOUNT-BOOTSTRAP.md).
 
+The [disposable iCloud test](docs/LIVE-ICLOUD-TEST.md) is now prepared with a fixed
+new UUID and a private live pointer/absence review. The isolated administrator
+harness has passed offline controls and non-capturing inspection; its sealed SEP
+item recipient is provisioned. Write-scope approval and fingerprint readiness
+are pending. No iCloud write or new-passkey creation has been performed.
+
 This is the application design and implementation order. The current
 [SEP handoff](SEP-INTEGRATION.md), [driver API](docs/sep-driver/README.md),
 [decryption contract](docs/sep-driver/DECRYPTION.md) and

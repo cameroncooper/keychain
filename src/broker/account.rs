@@ -28,10 +28,13 @@ pub const MAX_BOOTSTRAP: usize = 64 * 1024;
 #[derive(Serialize)]
 pub struct AccountCheck {
     pub owner: u32,
+    pub account_fingerprint: String,
     pub zone: String,
     pub records: usize,
     pub authenticated_roots: usize,
     pub current_class_a_resolved: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposed_record: Option<crate::apple::ckks::upload::NewRecordReview>,
 }
 
 fn invalid(message: &str) -> Error {
@@ -369,7 +372,12 @@ impl super::registry::Registry {
     }
     /// Administrator-only preflight against an already running enrolled worker.
     /// Does not start services, create keys, capture biometrics or save records.
-    pub fn check_account(&self, owner: u32, deadline: std::time::Instant) -> Result<AccountCheck> {
+    pub fn check_account(
+        &self,
+        owner: u32,
+        deadline: std::time::Instant,
+        new_record: Option<uuid::Uuid>,
+    ) -> Result<AccountCheck> {
         use crate::apple::ckks::upload::{Binding, UploadIo};
         use sha2::{Digest, Sha256};
         if keychain_sep_driver::peer::effective_uid() != 0 {
@@ -382,6 +390,9 @@ impl super::registry::Registry {
             Ok(())
         };
         check()?;
+        if new_record.is_some_and(|id| id.get_version_num() != 4) {
+            return Err(invalid("proposed record UUID must be v4"));
+        }
         let account = self.load_account(owner)?;
         let scope = account.scope();
         let binding = Binding {
@@ -409,13 +420,18 @@ impl super::registry::Registry {
         let mut io = self.account_upload_io(owner, client, &check)?;
         let snapshot = io.fetch_zone(&scope.zone, &check)?;
         let (records, authenticated_roots) = snapshot.readiness_counts()?;
+        let proposed_record = new_record
+            .map(|id| snapshot.review_new_record(id))
+            .transpose()?;
         check()?;
         Ok(AccountCheck {
             owner,
+            account_fingerprint: scope.account_fingerprint.clone(),
             zone: scope.zone.name.clone(),
             records,
             authenticated_roots,
             current_class_a_resolved: true,
+            proposed_record,
         })
     }
     fn account_path(&self, owner: u32) -> PathBuf {

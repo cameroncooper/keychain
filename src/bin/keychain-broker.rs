@@ -28,6 +28,10 @@ enum Command {
     CheckAccount {
         #[arg(long, default_value_t=120, value_parser=clap::value_parser!(u64).range(1..=600))]
         timeout: u64,
+        /// Review absence and key-pointer fingerprints for a proposed v4 UUID.
+        /// Does not create a key, prepare ciphertext or write to Apple.
+        #[arg(long)]
+        new_record: Option<uuid::Uuid>,
     },
     /// Enroll an existing Octagon agreement key from an administrator PIPE.
     /// Does not sign in, generate a peer, fetch shares or write Apple records.
@@ -88,9 +92,15 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     let registry = Registry::open(&cli.registry)?;
     match cli.command {
-        Command::CheckAccount { timeout } => {
-            let result =
-                registry.check_account(cli.owner, Instant::now() + Duration::from_secs(timeout))?;
+        Command::CheckAccount {
+            timeout,
+            new_record,
+        } => {
+            let result = registry.check_account(
+                cli.owner,
+                Instant::now() + Duration::from_secs(timeout),
+                new_record,
+            )?;
             println!("{}", serde_json::to_string(&result)?);
         }
         Command::ImportAccount {
