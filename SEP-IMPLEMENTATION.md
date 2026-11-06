@@ -2,6 +2,16 @@
 
 Status: agreed design, 2026-11-05; application integration in progress.
 
+Latest account preflight (2026-11-06): an isolated dedicated-UID worker accepted
+the encrypted real-profile candidate. Root-side `check-account` fetched all 16
+Passwords records, authenticated one zone TLK with the existing enrolled peer
+identity and resolved the current class-A key. The temporary broker registry was
+removed and the worker stopped. Production credentials remain unpublished and
+the iCloud write flag remains off. This closes the read-only candidate/token and
+share/hierarchy-fetch gate; scoped atomic-save, biometric creation and
+other-device acceptance gates remain open. Details are in
+[broker account bootstrap](docs/BROKER-ACCOUNT-BOOTSTRAP.md).
+
 This is the application design and implementation order. The current
 [SEP handoff](SEP-INTEGRATION.md), [driver API](docs/sep-driver/README.md),
 [decryption contract](docs/sep-driver/DECRYPTION.md) and

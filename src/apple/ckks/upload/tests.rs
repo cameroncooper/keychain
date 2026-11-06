@@ -8,6 +8,33 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+#[test]
+fn read_only_readiness_requires_a_resolvable_current_class_a_key() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let mut snapshot = fixture
+        .io
+        .fetch_zone(&fixture.plan.binding().zone, &|| Ok(()))?;
+    let (records, roots) = snapshot.readiness_counts()?;
+    assert_eq!(records, snapshot.records.len());
+    assert_eq!(roots, 1);
+    snapshot
+        .records
+        .retain(|record| record.record_type != "currentkey");
+    assert!(snapshot.readiness_counts().is_err());
+    Ok(())
+}
+
+#[test]
+fn read_only_readiness_rejects_a_class_key_wrapped_under_another_root() -> Result<()> {
+    let mut fixture = Fixture::new()?;
+    let mut snapshot = fixture
+        .io
+        .fetch_zone(&fixture.plan.binding().zone, &|| Ok(()))?;
+    snapshot.tlks[0].key[0] ^= 1;
+    assert!(snapshot.readiness_counts().is_err());
+    Ok(())
+}
+
 /// Offline cross-module integration fixture. Runs the real encoder, CKKS
 /// encryption, durable coordinator and simulated fetch/decrypt verification.
 /// No receipt constructor is exposed to production or browser IPC.

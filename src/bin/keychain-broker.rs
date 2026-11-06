@@ -24,6 +24,11 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Read-only account preflight using an already running enrolled worker.
+    CheckAccount {
+        #[arg(long, default_value_t=120, value_parser=clap::value_parser!(u64).range(1..=600))]
+        timeout: u64,
+    },
     /// Enroll an existing Octagon agreement key from an administrator PIPE.
     /// Does not sign in, generate a peer, fetch shares or write Apple records.
     ImportAccount {
@@ -73,8 +78,21 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     if matches!(&cli.command, Command::Serve { socket: None, .. }) {
         verify_pairing(cli.owner, std::path::Path::new("/etc/keychain/sep-owner"))?;
     }
+    if matches!(&cli.command, Command::CheckAccount { .. })
+        && !cli
+            .registry
+            .join(format!("account-{}.enc", cli.owner))
+            .try_exists()?
+    {
+        return Err("no enrolled account; account check will not initialize a registry".into());
+    }
     let registry = Registry::open(&cli.registry)?;
     match cli.command {
+        Command::CheckAccount { timeout } => {
+            let result =
+                registry.check_account(cli.owner, Instant::now() + Duration::from_secs(timeout))?;
+            println!("{}", serde_json::to_string(&result)?);
+        }
         Command::ImportAccount {
             worker_uid,
             worker_socket,

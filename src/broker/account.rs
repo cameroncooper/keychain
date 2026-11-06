@@ -24,6 +24,16 @@ use crate::{Error, Result};
 
 pub const MAX_BOOTSTRAP: usize = 64 * 1024;
 
+/// Read-only diagnostic result; contains no item values or authorization grant.
+#[derive(Serialize)]
+pub struct AccountCheck {
+    pub owner: u32,
+    pub zone: String,
+    pub records: usize,
+    pub authenticated_roots: usize,
+    pub current_class_a_resolved: bool,
+}
+
 fn invalid(message: &str) -> Error {
     Error::Security(format!("broker account: {message}"))
 }
@@ -356,6 +366,57 @@ impl super::registry::Registry {
     ) -> Result<crate::apple::worker::WorkerUploadIo<'a>> {
         let account = self.load_account(owner)?;
         crate::apple::worker::WorkerUploadIo::for_account(client, &account, &self.backend, check)
+    }
+    /// Administrator-only preflight against an already running enrolled worker.
+    /// Does not start services, create keys, capture biometrics or save records.
+    pub fn check_account(&self, owner: u32, deadline: std::time::Instant) -> Result<AccountCheck> {
+        use crate::apple::ckks::upload::{Binding, UploadIo};
+        use sha2::{Digest, Sha256};
+        if keychain_sep_driver::peer::effective_uid() != 0 {
+            return Err(invalid("account check requires root"));
+        }
+        let check = || {
+            if std::time::Instant::now() >= deadline {
+                return Err(crate::security::sep::ProviderError::Expired.into());
+            }
+            Ok(())
+        };
+        check()?;
+        let account = self.load_account(owner)?;
+        let scope = account.scope();
+        let binding = Binding {
+            owner,
+            account_fingerprint: scope.account_fingerprint.clone(),
+            peer_id: scope.peer_id.clone(),
+            zone: scope.zone.clone(),
+            transaction: uuid::Uuid::new_v4(),
+            request_sha256: hex::encode(Sha256::digest(
+                [
+                    b"keychain/read-only-account-check/v1\0".as_slice(),
+                    &serde_json::to_vec(scope)?,
+                ]
+                .concat(),
+            )),
+        };
+        let client = crate::apple::worker::WorkerClient::connect(
+            &account.worker().socket,
+            account.worker().uid,
+            binding,
+            deadline,
+            &check,
+            &check,
+        )?;
+        let mut io = self.account_upload_io(owner, client, &check)?;
+        let snapshot = io.fetch_zone(&scope.zone, &check)?;
+        let (records, authenticated_roots) = snapshot.readiness_counts()?;
+        check()?;
+        Ok(AccountCheck {
+            owner,
+            zone: scope.zone.name.clone(),
+            records,
+            authenticated_roots,
+            current_class_a_resolved: true,
+        })
     }
     fn account_path(&self, owner: u32) -> PathBuf {
         self.directory.join(format!("account-{owner}.enc"))

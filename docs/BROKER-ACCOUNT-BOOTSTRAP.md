@@ -62,6 +62,33 @@ procedure is in [NETWORK-WORKER.md](../contrib/NETWORK-WORKER.md).
 
 ## Fetch verification
 
+An administrator can explicitly check an enrolled account against its already
+running network worker:
+
+```sh
+sudo -n /usr/libexec/keychain/keychain-broker \
+  --registry /var/lib/keychain-broker/1001 --owner 1001 \
+  check-account --timeout 120
+```
+
+The check does not initialize a missing account registry, start a worker, sign in,
+retry escrow, capture a fingerprint or write Apple records. It fetches recoverable
+shares and the complete Passwords zone, verifies self-shares using the enrolled
+identity, and resolves the current class-A key on a protected computation stack.
+It does not decrypt password items. JSON output contains only owner, zone name,
+record/root counts and the successful hierarchy check; it is not an upload receipt.
+Missing/expired tokens, untrusted shares or an incomplete hierarchy fail closed.
+Socket connect and subsequent transport IO share one monotonic deadline.
+
+For candidate validation before production enrollment, import the broker package
+into a separate root-only registry with `--worker-socket` pointing to a disposable
+worker's private runtime directory. Deliver the encrypted network candidate to
+that worker with `LoadCredentialEncrypted`, using the dedicated service UID and
+separate state/runtime directories. Run `check-account` against that temporary
+registry; never point it at the production socket by accident. Stop the disposable
+service and remove the temporary registry after checking. The production packages
+and the default-off write flag remain unchanged.
+
 `Registry::account_upload_io` loads the validated account and connects it to an
 already authenticated worker client. Scope must match exactly. The protocol has
 one new read-only operation for recoverable shares; the concrete worker permits
@@ -120,6 +147,15 @@ encryption operation. This key is root-only (mode 0400); it is not an Octagon ro
 SEP key or new Apple identity. The initial failed network export produced an empty
 encrypted candidate, which was removed before the validated candidates were made.
 The provisioning-ID validation correction is described in NETWORK-WORKER.md.
-Token acceptance and authenticated share/zone fetching remain unverified for the
-service candidates. The production worker is inactive, its published credential
-is absent and the broker's synced-creation flag remains off.
+The subsequent isolated live `check-account` passed: Apple accepted the candidate
+credentials, the complete Passwords fetch returned 16 records, one authenticated
+zone root was recovered and the current class-A key resolved. No item plaintext,
+biometric operation or Apple save was involved. The disposable worker was stopped
+and its temporary root registry removed. Its private service ADI state is retained
+under `/var/lib/keychain-network-candidate-20261106` so subsequent validation need
+not reseed its mutable identity state.
+
+This proves read-only acceptance at the time of the check, not future token
+validity, atomic-save behavior or other-device use. The production worker is
+inactive, its published credential is absent, the production account remains
+unenrolled and the broker's synced-creation flag remains off.

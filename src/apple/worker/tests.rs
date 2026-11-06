@@ -6,6 +6,46 @@ use std::sync::{
 };
 use std::thread;
 
+#[test]
+fn connect_backlog_is_bounded_and_checks_cancellation() -> Result<()> {
+    let directory = tempfile::tempdir().map_err(|e| Error::io("temporary socket", e))?;
+    let path = directory.path().join("full.sock");
+    let listener =
+        std::os::unix::net::UnixListener::bind(&path).map_err(|e| Error::io(&path, e))?;
+    let listener = socket2::Socket::from(listener);
+    listener.listen(1).map_err(|e| Error::io(&path, e))?;
+    let mut queued = Vec::new();
+    let mut full = false;
+    for _ in 0..8 {
+        match connect_bounded(
+            &path,
+            Instant::now() + Duration::from_millis(30),
+            &|| Ok(()),
+        ) {
+            Ok(connection) => queued.push(connection),
+            Err(_) => {
+                full = true;
+                break;
+            }
+        }
+    }
+    assert!(full && queued.len() >= 2);
+    let started = Instant::now();
+    assert!(connect_bounded(&path, started + Duration::from_millis(80), &|| Ok(())).is_err());
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let checks = std::cell::Cell::new(0);
+    let canceled = || {
+        checks.set(checks.get() + 1);
+        Err(invalid("synthetic cancellation"))
+    };
+    let result = connect_bounded(&path, until(), &canceled);
+    assert!(
+        matches!(result, Err(Error::Security(message)) if message.contains("synthetic cancellation"))
+    );
+    assert!(checks.get() >= 1);
+    Ok(())
+}
+
 fn binding() -> Binding {
     Binding {
         owner: keychain_sep_driver::peer::effective_uid().saturating_add(1),

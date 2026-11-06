@@ -22,6 +22,41 @@ const MAX_HEADER: usize = 16 * 1024;
 const MAX_PAYLOAD: usize = 64 * 1024 * 1024;
 const IO_TICK: Duration = Duration::from_millis(40);
 
+fn connect_bounded(
+    socket: &Path,
+    deadline: Instant,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<UnixStream> {
+    async_io::block_on(futures_lite::future::or(
+        async {
+            check()?;
+            let stream = async_io::Async::<UnixStream>::connect(socket)
+                .await
+                .map_err(|e| Error::io(socket, e))?;
+            check()?;
+            if Instant::now() >= deadline {
+                return Err(crate::security::sep::ProviderError::Expired.into());
+            }
+            let stream = stream.into_inner().map_err(|e| Error::io(socket, e))?;
+            // Channel uses short blocking read/write timeouts after connection.
+            stream
+                .set_nonblocking(false)
+                .map_err(|e| Error::io(socket, e))?;
+            Ok(stream)
+        },
+        async {
+            loop {
+                check()?;
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(crate::security::sep::ProviderError::Expired.into());
+                }
+                async_io::Timer::after(remaining.min(IO_TICK)).await;
+            }
+        },
+    ))
+}
+
 pub mod service;
 
 /// Static account selection supplied by trusted service credentials. Per-call
@@ -345,7 +380,10 @@ impl<'a> WorkerClient<'a> {
             }
         }
         Self::authenticate(
-            UnixStream::connect(socket).map_err(|e| Error::io(socket, e))?,
+            connect_bounded(socket, deadline, &|| {
+                check()?;
+                handshake_check()
+            })?,
             worker_uid,
             binding,
             deadline,

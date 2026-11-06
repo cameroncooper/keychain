@@ -67,6 +67,26 @@ pub struct Snapshot {
     tlks: Vec<RecoveredTlk>,
 }
 impl Snapshot {
+    /// Verify the current class-A hierarchy without decrypting any item.
+    /// Counts are diagnostic metadata, never an upload authorization receipt.
+    pub(crate) fn readiness_counts(&self) -> Result<(usize, usize)> {
+        crate::security::secret_compute(|| {
+            let _current = CurrentKey::from_snapshot(
+                &self.zone.name,
+                &self.records,
+                &self.tlks,
+                KeyClass::WhenUnlocked,
+            )?;
+            let roots = self
+                .tlks
+                .iter()
+                .filter(|root| root.zone_name == self.zone.name)
+                .map(|root| &root.uuid)
+                .collect::<BTreeSet<_>>()
+                .len();
+            Ok((self.records.len(), roots))
+        })
+    }
     /// Fetch every page before absence can authorize a retry or a new save.
     pub fn fetch(
         transport: &crate::apple::cloudkit::CloudKitTransport<'_>,
