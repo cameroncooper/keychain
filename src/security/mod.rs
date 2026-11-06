@@ -76,6 +76,7 @@ pub enum Purpose {
     BrokerAccount = 9,
     BrokerLogin = 10,
     VaultIndex = 11,
+    RecordRemoval = 12,
 }
 
 impl Purpose {
@@ -92,6 +93,7 @@ impl Purpose {
             9 => Ok(Self::BrokerAccount),
             10 => Ok(Self::BrokerLogin),
             11 => Ok(Self::VaultIndex),
+            12 => Ok(Self::RecordRemoval),
             _ => Err(crate::Error::InvalidData(format!(
                 "unknown encrypted-state purpose {value}"
             ))),
@@ -111,6 +113,7 @@ impl Purpose {
             Self::BrokerAccount => b"broker-account",
             Self::BrokerLogin => b"broker-login",
             Self::VaultIndex => b"vault-index",
+            Self::RecordRemoval => b"record-removal",
         }
     }
 }

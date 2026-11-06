@@ -291,10 +291,10 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 223 passing tests, twenty-three ignored (three Apple network and twenty privileged
-integration tests). Eleven registry, five coordination and one account-bootstrap test passed separately as root, including
+Workspace checks: 227 passing tests, twenty-five ignored (three Apple network and twenty-two privileged
+integration tests). Thirteen registry, five coordination and one account-bootstrap test passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
-The separate-UID worker and systemd startup tests also pass (nineteen privileged
+The separate-UID worker and systemd startup tests also pass (twenty-one privileged
 library tests total).
 Eleven browser service-worker flow tests also pass. Strict Clippy is clean.
 The broker now exits after an idle interval without interrupting queued/active
@@ -493,3 +493,14 @@ its full usable mapping on success or Rust unwind; setup failure never runs the
 callback on an ordinary stack. This does not establish erasure of register copies,
 unreviewed heap storage or account root/class keys. Hardware and live account
 acceptance gates remain open.
+
+
+Explicit native-record removal is now implemented in authenticated owner IPC,
+with exact key-reference selection, a durable purpose-separated removal marker,
+interrupted-unlink recovery and refusal to recreate the registration ID. It does
+not remove synced recovery copies or perform SEP erasure; see
+[local removal](docs/SEP-LOCAL-REMOVAL.md). Browser/general CLI deletion UX is not
+exposed. Native registration now retains its pre-CREATE intent after key storage
+and delivery, so a missing committed key cannot trigger silent replacement.
+Existing saved records backfill that guard when explicitly reopened. These are
+synthetic-tested persistence changes; live biometric/account gates remain open.

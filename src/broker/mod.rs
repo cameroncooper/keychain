@@ -45,6 +45,9 @@ pub enum Operation {
         request_details_json: String,
     },
     ListCredentials,
+    RemoveLocal {
+        selection: registry::LocalRemoval,
+    },
     ListLogins,
     LoginProtectionState {
         record: String,
@@ -410,6 +413,20 @@ impl Broker {
             | Operation::ReplaceStagedLogin { .. }
             | Operation::DiscardStagedLogin { .. } => {
                 return self.execute_login(id, operation, canceled, session);
+            }
+            Operation::RemoveLocal { selection } => {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                let check = || {
+                    if canceled.load(Ordering::Acquire) || !session.valid() {
+                        return Err(crate::security::sep::ProviderError::Canceled.into());
+                    }
+                    if Instant::now() >= deadline {
+                        return Err(crate::security::sep::ProviderError::Expired.into());
+                    }
+                    Ok(())
+                };
+                self.registry.remove_local(self.owner, &selection, &check)?;
+                return Ok(serde_json::json!({"removed":true}));
             }
             Operation::ListCredentials => {
                 return Ok(serde_json::to_value(

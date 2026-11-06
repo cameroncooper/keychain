@@ -35,8 +35,11 @@ same registration transaction and details.
 2. The wrapped key, public point, random credential ID, RP/account metadata and
    request binding are durably saved as Prepared. Prepared entries are absent
    from browser and CLI inventory. Reopening this transaction reuses the exact
-   saved identity. A changed request, owner, corrupt record or missing metadata
-   root fails closed.
+   saved identity. The encrypted creation intent remains after the key is saved
+   and delivered. If that key file disappears, replay refuses another CREATE.
+   Reopening an older saved record explicitly backfills a missing intent; it
+   cannot reconstruct evidence already lost with both old files before upgrade.
+   A changed request, owner, corrupt record or missing metadata root fails closed.
 3. A fresh biometric native signature binds `authenticatorData || SHA256(clientDataJSON)`.
    The typed authorization result must match the key/message and require UV.
    Signature verification against the new public point must also pass. The
@@ -101,3 +104,11 @@ independently verify the registered key and flags, repeat in a fresh process and
 after reboot, and validate cancellation on the real driver. iCloud creation,
 CKKS upload/fetch reconciliation and successful use from another trusted device
 remain part of the plan. No Apple writes are implemented or performed here.
+
+Explicit local native-record removal is now implemented in the owner broker IPC;
+see [durable removal and recovery limits](SEP-LOCAL-REMOVAL.md). No production
+browser/CLI deletion action is exposed. Native creation retains its pre-CREATE
+intent instead of deleting it after saving the wrapped key. The privileged
+registration test now covers legacy intent backfill and a missing committed key:
+neither case may execute a replacement CREATE. No real credentials were removed
+or regenerated during these tests.

@@ -13,6 +13,8 @@ mod login;
 pub use login::{LoginRecord, LoginState, LoginSummary};
 mod protected;
 mod registration;
+mod removal;
+pub use removal::LocalRemoval;
 mod synced_registration;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -202,6 +204,7 @@ impl Registry {
                 || id.starts_with("synced-create-")
                 || id.starts_with("account-")
                 || id.starts_with("login-")
+                || id.starts_with("removed-")
             {
                 continue;
             }
@@ -223,6 +226,9 @@ impl Registry {
                     records.push(record.credential);
                 }
             } else {
+                if self.removed_for_owner(id, owner)? {
+                    continue;
+                }
                 let record = self.load(id, owner)?;
                 if !record.diagnostic && record.registered {
                     records.push(record.credential);
@@ -292,6 +298,7 @@ impl Registry {
     }
     fn filename(&self, id: &str) -> Result<PathBuf> {
         crate::paths::validate_record_id(id)?;
+        self.refuse_removed(id)?;
         Ok(self.directory.join(format!("{id}.enc")))
     }
     pub fn load(&self, id: &str, owner: u32) -> Result<Record> {

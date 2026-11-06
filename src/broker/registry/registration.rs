@@ -37,6 +37,41 @@ impl Registry {
         if path.try_exists().map_err(|e| Error::io(&path, e))? {
             let record = self.load(&id, owner)?;
             Self::check_registration(&record, context)?;
+            // Backfill the retained intent when reopening an older saved record.
+            // This cannot recover a key/intent pair already lost before upgrade.
+            let intent_path = self.directory.join(format!("{id}.pending.enc"));
+            let expected = Intent {
+                version: 1,
+                owner,
+                transaction,
+                binding: context.binding().into(),
+            };
+            if intent_path
+                .try_exists()
+                .map_err(|e| Error::io(&intent_path, e))?
+            {
+                let data = read_bounded(&intent_path)?;
+                if data.len() > 4096 {
+                    return Err(Error::Security("registration intent exceeds limit".into()));
+                }
+                let plain = self.backend.open(Purpose::Vault, &data)?;
+                let intent: Intent = serde_json::from_slice(&plain)?;
+                if intent.version != expected.version
+                    || intent.owner != owner
+                    || intent.transaction != transaction
+                    || intent.binding != expected.binding
+                {
+                    return Err(Error::Security(
+                        "registration intent identity mismatch".into(),
+                    ));
+                }
+            } else {
+                let plain = zeroize::Zeroizing::new(serde_json::to_vec(&expected)?);
+                create_private_exclusive(
+                    &intent_path,
+                    &self.backend.seal(Purpose::Vault, &plain)?,
+                )?;
+            }
             return Ok(record);
         }
         let intent_path = self.directory.join(format!("{id}.pending.enc"));
@@ -124,10 +159,8 @@ impl Registry {
         // returns an identity that only existed in the original process memory.
         let stored = self.load(&record.credential.id, owner)?;
         Self::check_registration(&stored, context)?;
-        std::fs::remove_file(&intent_path).map_err(|e| Error::io(&intent_path, e))?;
-        std::fs::File::open(&self.directory)
-            .and_then(|dir| dir.sync_all())
-            .map_err(|e| Error::io(&self.directory, e))?;
+        // Retain the pre-CREATE intent. If the saved key later disappears, this
+        // transaction must refuse CREATE rather than silently change identity.
         Ok(stored)
     }
 
@@ -332,12 +365,31 @@ mod tests {
         let path = registry
             .filename(&transaction.to_string())
             .unwrap_or_else(|e| panic!("path: {e}"));
+        // Simulate an older saved record lacking a retained intent. Explicit
+        // reopening backfills the guard before returning that existing key.
+        let intent_path = dir.path().join(format!("{transaction}.pending.enc"));
+        std::fs::remove_file(&intent_path).unwrap_or_else(|e| panic!("old intent: {e}"));
+        registry
+            .prepare_registration(1001, transaction, &context, || panic!("replaced old key"))
+            .unwrap_or_else(|e| panic!("backfill: {e}"));
+        assert!(intent_path.exists());
         atomic_write_private(&path, b"incomplete encrypted record")
             .unwrap_or_else(|e| panic!("mutate: {e}"));
         assert!(
             registry
                 .prepare_registration(1001, transaction, &context, || panic!(
                     "replaced corrupt record"
+                ))
+                .is_err()
+        );
+        std::fs::remove_file(&path).unwrap_or_else(|e| panic!("lost key: {e}"));
+        drop(registry);
+        let registry =
+            Registry::open(dir.path()).unwrap_or_else(|e| panic!("reopen lost key: {e}"));
+        assert!(
+            registry
+                .prepare_registration(1001, transaction, &context, || panic!(
+                    "regenerated missing committed key"
                 ))
                 .is_err()
         );
