@@ -578,3 +578,14 @@ items; the two original passkey baselines remain unchanged. This establishes the
 native creation/login RP gate, not reboot or iCloud creation. The old synced demo
 credential still lacks RP acceptance because the server no longer recognizes its
 ID. A fresh Apple-created synced fixture is needed to test that remaining path.
+
+
+Fresh synced RP acceptance now also passed: the user created a fresh Apple
+Passwords credential for `testuser12345` on an Apple device. Sync fetched its new
+record ID without changing a protected key in place, and preserved the native
+credential. The new synced item completed biometric migration, then real Chromium
+login succeeded. Post-use public metadata matches all intended baselines. Native
+creation/login and synced decrypt/software-signing now both have RP acceptance.
+This does not satisfy complete-chain reboot, source retirement, Rust-created
+iCloud save/atomicity or other-device use of a Rust-created key. The iCloud writer
+remains disabled and no service account has been enrolled yet.

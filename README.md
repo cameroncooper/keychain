@@ -156,8 +156,8 @@ There are deliberate initial limits:
 
 - Device-only creation is implemented through the SEP broker: choose **This device**, then use the
   OS fingerprint prompt. Native keys stay in the broker registry and appear in `list`/`show`.
-  Real Chromium registration and login passed on the development M1; reboot and
-  broader platform acceptance remain open. See
+  Real Chromium registration/login and migrated iCloud passkey login passed on
+  the development M1; reboot and broader platform acceptance remain open. See
   [registration lifecycle and limits](docs/SEP-REGISTRATION.md).
 - iCloud-syncable creation and Apple uploads are wired behind a default-off deployment flag.
   Live Apple write/fetch/other-device validation is still required before enabling that choice.

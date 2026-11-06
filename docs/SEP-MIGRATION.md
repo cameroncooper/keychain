@@ -126,3 +126,30 @@ real browser-to-broker biometric execution, not successful RP signature verifica
 or login. The original credential remains retained. Fresh device-only registration
 and authentication are now the next browser test; a still-registered fresh synced
 credential is needed for positive synced-migration RP acceptance.
+
+
+## Fresh synced browser acceptance — 2026-11-06
+
+To replace the expired demo registration, the user registered a new Apple
+Passwords passkey for `testuser12345` on an Apple device in the same iCloud
+account. A normal sync fetched a distinct record,
+`AC1C6EC4-5281-4BFA-8B4C-01618A9F9697`, with a new credential fingerprint. It did
+not change the old protected record's key identity in place. The native local-only
+record `22fde9bf-71e2-4844-a4b6-da69b95a125f` survived sync unchanged, as did the
+Apple.com public baseline; unified inventory remained five entries.
+
+With explicit readiness, the fresh synced record then completed biometric
+protection at revision 1, retaining its software recovery copy and original
+synced identity. The user immediately authenticated as `testuser12345` in the
+isolated Chromium window and reported success. This is positive RP acceptance
+for synced-item SEP decrypt/software-signing through the real extension and
+desktop prompt, superseding the expired old ID's inconclusive RP result.
+
+A subsequent metadata comparison matched the fresh synced pre-migration baseline,
+the native baseline and the unchanged Apple.com baseline. The user-created public
+fixture is privately retained in ignored
+`.sep-check-main-webauthn-20261106/public-fresh-synced-before.json`. The installed
+broker retains only `--allow-item-decrypt`; the network worker is inactive. This
+was Apple-device creation followed by normal read-only sync and local migration,
+not creation/upload by the Rust iCloud writer. Post-reboot validation, retirement
+of old source copies and Rust-created iCloud/other-device acceptance remain open.

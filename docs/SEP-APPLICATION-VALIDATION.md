@@ -322,3 +322,16 @@ not supply successful RP verification of the old migrated synced credential:
 that separate browser request reached the fingerprint operation, then the demo
 rejected its missing/expired ID before checking the signature. Fresh synced
 registration on an Apple device is the next migration acceptance fixture.
+
+
+## Fresh synced browser authentication — 2026-11-06
+
+The user re-registered `testuser12345` with Apple Passwords on an Apple device,
+synced the new iCloud record and authorized its biometric migration at revision 1.
+The user then reported successful Chromium authentication through the desktop
+prompt. Exact synced record: `AC1C6EC4-5281-4BFA-8B4C-01618A9F9697`. Fresh public
+metadata matches its pre-migration baseline. The native passkey survived the sync
+and remains unchanged, as does Apple.com. See
+[fresh synced acceptance](SEP-MIGRATION.md#fresh-synced-browser-acceptance--2026-11-06).
+Both native and synced browser-signing paths now have actual RP acceptance;
+complete-chain reboot and Rust-originated iCloud upload/other-device use do not.
