@@ -1,7 +1,8 @@
 # Disposable iCloud creation acceptance test
 
-Prepared 2026-11-06. No write authorization has been given and no Apple save has
-been sent. This scope is a proposed test, not permission to execute it.
+Prepared 2026-11-06. The user approved this scoped test after the explicit
+write-approval request. No Apple save has been sent. Each biometric operation
+still requires separately coordinated readiness.
 
 ## Fixed scope
 
@@ -33,9 +34,17 @@ recipient are staged under `/var/lib/keychain-live-write-check-20261106`. Recipi
 creation did not start capture. The installed diagnostic passed default inspection
 and refused an unconfirmed negative-write invocation, with registry file
 sizes/mtimes unchanged and both workers inactive. The synthetic inspection request
-was then removed. No real RP request has been frozen and no draft, attempt,
-negative evidence or registration response exists yet. Both write approval and
-fingerprint readiness remain pending.
+was then removed. After scope approval, a fresh authenticated Apple preflight
+matched the exact reviewed account, unused UUID and pointer hashes. Real creation
+options were obtained from webauthn.io for the scoped username, with required UV,
+resident platform credential, ES256 and no existing excluded credentials. The
+complete request plus bridge origin was frozen as the root-only `request.json`
+in that directory and passed the installed helper's non-capturing inspection.
+No draft, attempt, negative evidence or registration response exists yet. The
+first write test is waiting for fresh fingerprint readiness. A site challenge
+is time-sensitive; if it expires before key preparation, obtain a new challenge
+explicitly before staging a key. Once a draft/intent exists, preserve its frozen
+request and key rather than changing the request to work around a failure.
 
 ## Execution gates
 
@@ -48,10 +57,10 @@ fingerprint readiness remain pending.
    refusal and no replay after rejection, uncertainty or unexpected acceptance.
    Use the tested root-owned executable and the pinned review, not a browser IPC
    extension. This diagnostic does not enable production browser creation.
-3. Obtain explicit user authorization for the fixed scope above: one negative
-   precondition attempt, then one positive create only after definite rejection
-   and independent absence verification. Fingerprint readiness is separate from
-   permission to write.
+3. Explicit user authorization was obtained for the fixed scope above: one
+   negative precondition attempt, then one positive create only after definite
+   rejection and independent absence verification. Fingerprint readiness is
+   separate from permission to write.
 4. Use an isolated broker registry/worker and the retained private candidate
    identity. Freeze the real site's request, transaction, user and storage choice.
    Stop if the account or reviewed hierarchy differs. Durably seal the new scalar
