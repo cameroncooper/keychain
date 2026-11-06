@@ -291,7 +291,7 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 159 passing tests, thirteen ignored (three Apple network and ten privileged
+Workspace checks: 165 passing tests, thirteen ignored (three Apple network and ten privileged
 integration tests). All nine registry tests passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
 Nine browser service-worker flow tests also pass. Strict Clippy is clean.
@@ -392,7 +392,14 @@ acceptance. The decoder now retains zone/owner, change tags and opaque server
 record bytes. A paginated read adapter and encrypted upload coordinator persist
 prepared ciphertext/identity and attempts, reconcile uncertain outcomes through
 fetch/decrypt verification and require explicit retries after confirmed absence.
-Nine coordinator tests pass, including persistence faults and key-pointer changes.
+Sixteen coordinator tests pass, including persistence faults and key-pointer changes.
+After a definite rejection, explicit re-encryption fetches complete absence and
+prepares the same credential against the authenticated current key. Superseded
+ciphertexts remain journaled and recognizable, including a late commit from an
+older uncertain request. Unknown ciphertext, altered identity and uncertain or
+accepted re-encryption are refused. History/send limits retain reconciliation
+without permitting unlimited retries or unbounded storage. This is offline
+coordinator evidence; no production write transport is enabled.
 The broker can now generate and durably seal a syncable key into an isolated
 account/request-bound draft, refusing interrupted-key regeneration and storage
 path collisions. Drafts remain outside eligible inventory and generic import

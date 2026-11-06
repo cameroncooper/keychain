@@ -71,9 +71,31 @@ in-memory session until reopening, since rename/fsync failure can leave either
 old or new durable bytes. The broker also refuses root regeneration after an
 initialized root disappears, including in a running process.
 
-Ten offline coordinator tests cover acceptance/fetch separation, independent
+Explicit re-encryption after a rejected precondition is now implemented. The
+coordinator first fetches complete absence, then invokes the selected-secret
+preparation callback with that snapshot. `PreparedUpload::encrypt_from_snapshot`
+uses its authenticated current class-A key; the coordinator independently
+revalidates ciphertext, public point, immutable metadata and owner/account/peer/
+request/transaction binding before checkpointing. Preparation never sends. An
+uncertain, accepted or verified upload cannot enter this path. Failed fetch,
+canceled preparation, wrong identity or stale key leaves the original journal
+unchanged; a failed checkpoint requires reopening rather than trusting RAM.
+
+Every superseded ciphertext/pointer stays in the encrypted journal. A timed-out
+request can commit late even after a subsequent retry is rejected. Fetch
+reconciliation therefore checks the current and retained exact ciphertexts,
+then independently decrypts and verifies the matching credential before issuing
+backup evidence. A same-identity record with unrecognized ciphertext is refused,
+and no existing record is overwritten. Re-encryption is bounded to eight superseded
+plans plus the current plan and sixteen send attempts; exhausting a budget stops before the secret
+callback while keeping reconciliation available. No raw scalar or reusable UV
+grant is added to the journal.
+
+Sixteen offline coordinator tests cover acceptance/fetch separation, independent
 decryption/public-point checks, pagination, changed bindings, locks/tampering,
 lost responses, explicit retries, precondition failures and checkpoint faults.
+These include real synthetic class-key rotation, late superseded commits,
+changed archived identity, bounded history and re-encryption checkpoint failure.
 A privileged upload-only registry test checks namespace isolation and missing-root
 refusal. These tests use synthetic roots and a simulated server, and are not live
 Apple upload evidence.
@@ -134,7 +156,7 @@ Apple acceptance evidence.
 The updated release service binaries were installed on 2026-11-06. The existing
 disposable profile passed the installed broker/native-host availability check
 with `--availability-only`; it did not start biometric capture or perform a
-registration, assertion or Apple write. The full workspace has 159 passing
+registration, assertion or Apple write. The full workspace has 165 passing
 tests with thirteen intentionally ignored tests; the nine disposable registry tests
 also passed separately as root. Strict Clippy and the release build passed.
 
@@ -148,9 +170,9 @@ Remaining integration work:
    saves items with current-key pointers atomically under the unchanged-record
    policy. The private protobuf framing for those safeguards is not yet verified;
    an ordinary create request alone is insufficient.
-3. Connect the durable coordinator to the broker/browser creation path and add
-   reconciled re-encryption for a rejected stale-key attempt. An uncertain
-   attempt must not lose its existing identity or prepared ciphertext.
+3. Connect the durable coordinator, including its implemented rejected-upload
+   re-encryption and retained-ciphertext reconciliation, to the broker/browser
+   creation path. Preserve identity and all possibly committed ciphertexts.
 4. Verify Apple acceptance and subsequent authenticated fetch/decryption before
    reporting an iCloud save or enabling normal backed-up use. A local round trip
    or HTTP success alone is insufficient. Browser BE/BS flags must follow the

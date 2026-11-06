@@ -133,8 +133,8 @@ impl CurrentKey {
     pub fn key_id(&self) -> &str {
         &self.key_id
     }
-    /// Preserve for the future atomic upload precondition. This does not contain
-    /// server change tags, which still need to be retained by the wire decoder.
+    /// Preserve the selected pointer, including any retained server encoding and
+    /// change tag, for the upload coordinator's atomic precondition.
     pub fn current_pointer(&self) -> &Record {
         &self.pointer
     }

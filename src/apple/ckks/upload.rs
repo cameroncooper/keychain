@@ -24,6 +24,7 @@ use crate::security::{KeyAlgorithm, KeyUsage, Purpose, SecurityBackend};
 use crate::{Error, Result};
 
 const MAX_JOURNAL: usize = 8 * 1024 * 1024;
+const MAX_REBASES: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -201,6 +202,35 @@ impl VerifiedUpload {
 }
 
 impl PreparedUpload {
+    /// Encrypt the existing credential under the authenticated current class-A
+    /// key. The caller keeps plaintext inside its selected-secret operation;
+    /// neither this plan nor its journal contains a raw scalar.
+    pub fn encrypt_from_snapshot(
+        binding: Binding,
+        credential: PasskeyCredential,
+        private_x963: &[u8],
+        snapshot: &Snapshot,
+    ) -> Result<Self> {
+        binding.validate()?;
+        if snapshot.zone != binding.zone {
+            return Err(invalid(
+                "encryption snapshot belongs to another account/zone",
+            ));
+        }
+        let current = CurrentKey::from_snapshot(
+            &binding.zone.name,
+            &snapshot.records,
+            &snapshot.tlks,
+            KeyClass::WhenUnlocked,
+        )?;
+        let item = crate::passkey::encode_sync_item(&credential, private_x963)?;
+        let record = current.seal_new_item(&item)?;
+        let public = private_x963
+            .get(..65)
+            .ok_or_else(|| invalid("truncated private key"))?;
+        Self::from_snapshot(binding, credential, public, record, snapshot)
+    }
+
     pub fn from_snapshot(
         binding: Binding,
         credential: PasskeyCredential,
@@ -239,6 +269,11 @@ impl PreparedUpload {
     }
 }
 impl PlanData {
+    fn same_credential(&self, other: &Self) -> bool {
+        self.binding == other.binding
+            && self.credential == other.credential
+            && self.public_sec1 == other.public_sec1
+    }
     fn validate(&self) -> Result<()> {
         self.binding.validate()?;
         let credential = &self.credential;
@@ -353,6 +388,10 @@ struct Journal {
     plan: PlanData,
     phase: Phase,
     attempts: Vec<Uuid>,
+    /// Preserve earlier exact ciphertexts: a timed-out request can commit late
+    /// even if a subsequent retry was explicitly rejected. All variants must
+    /// represent the same immutable credential, account and browser request.
+    superseded: Vec<PlanData>,
 }
 
 /// The accepted record must include its server encoding, tag and zone. A
@@ -446,6 +485,7 @@ impl<'a> UploadStore<'a> {
                 plan: upload.0,
                 phase: Phase::Prepared,
                 attempts: vec![],
+                superseded: vec![],
             },
             _lock: lock,
             healthy: true,
@@ -475,6 +515,7 @@ impl<'a> UploadStore<'a> {
         if journal.version != 1
             || journal.plan.binding != *binding
             || journal.attempts.len() > 16
+            || journal.superseded.len() > MAX_REBASES
             || journal.attempts.iter().any(|id| id.get_version_num() != 4)
             || journal.attempts.iter().collect::<BTreeSet<_>>().len() != journal.attempts.len()
         {
@@ -494,6 +535,12 @@ impl<'a> UploadStore<'a> {
             _ => (),
         }
         journal.plan.validate()?;
+        for previous in &journal.superseded {
+            previous.validate()?;
+            if !previous.same_credential(&journal.plan) {
+                return Err(invalid("superseded upload changed its bound credential"));
+            }
+        }
         Ok(Session {
             store: self,
             path,
@@ -585,7 +632,23 @@ impl Session<'_> {
             .iter()
             .find(|r| r.name == self.journal.plan.record.name)
         {
-            self.journal.plan.verify_payload(record, &snapshot)?;
+            let prepared = std::iter::once(&self.journal.plan)
+                .chain(&self.journal.superseded)
+                .find(|plan| {
+                    plan.record.record_type == record.record_type
+                        && plan
+                            .record
+                            .fields
+                            .iter()
+                            .all(|(key, value)| record.fields.get(key) == Some(value))
+                })
+                .ok_or_else(|| {
+                    Error::Security(
+                        "fetched record differs from every retained upload; refusing overwrite"
+                            .into(),
+                    )
+                })?;
+            prepared.verify_payload(record, &snapshot)?;
             let tag = record
                 .server_precondition(&zone)?
                 .change_tag
@@ -673,677 +736,78 @@ impl Session<'_> {
         self.check_pointer(&snapshot)?;
         self.checkpoint(Phase::Prepared)
     }
+
+    /// Explicit re-encryption/rebase after a definite precondition rejection.
+    /// First fetch complete absence; only then let the selected-secret operation
+    /// prepare the same credential under that snapshot's authenticated key.
+    /// This does not send. Earlier ciphertexts and attempt history stay durable
+    /// so a late commit of an older request remains independently verifiable.
+    pub fn reprepare_after_rejection(
+        &mut self,
+        io: &mut dyn UploadIo,
+        prepare: impl FnOnce(&Binding, &PasskeyCredential, &Snapshot) -> Result<PreparedUpload>,
+    ) -> Result<()> {
+        self.check_healthy()?;
+        if self.journal.phase != Phase::Rejected {
+            return Err(Error::Refused(
+                "only a rejected upload may be re-encrypted".into(),
+            ));
+        }
+        if self.journal.attempts.len() >= 16 {
+            return Err(Error::Refused("upload retry budget exhausted".into()));
+        }
+        if self.journal.superseded.len() >= MAX_REBASES {
+            return Err(Error::Refused(
+                "upload re-encryption budget exhausted; all prior ciphertexts retained".into(),
+            ));
+        }
+        let snapshot = io.fetch_zone(&self.journal.plan.binding.zone)?;
+        if snapshot.zone != self.journal.plan.binding.zone {
+            return Err(invalid("re-encryption snapshot changed account/zone"));
+        }
+        if snapshot
+            .records
+            .iter()
+            .any(|record| record.name == self.journal.plan.record.name)
+        {
+            return Err(Error::Refused(
+                "the record exists; reconcile it before preparing another upload".into(),
+            ));
+        }
+        let candidate = prepare(
+            &self.journal.plan.binding,
+            &self.journal.plan.credential,
+            &snapshot,
+        )?;
+        if !candidate.0.same_credential(&self.journal.plan) {
+            return Err(Error::Security(
+                "re-encryption changed the credential, key or request binding".into(),
+            ));
+        }
+        // Revalidate against the snapshot fetched by THIS operation, including
+        // its fresh pointer/tag and independent decryption/public-key checks.
+        let public = STANDARD
+            .decode(&candidate.0.public_sec1)
+            .map_err(|_| invalid("invalid re-encryption point"))?;
+        let candidate = PreparedUpload::from_snapshot(
+            candidate.0.binding,
+            candidate.0.credential,
+            &public,
+            candidate.0.record,
+            &snapshot,
+        )?;
+        if serde_json::to_vec(&candidate.0)? != serde_json::to_vec(&self.journal.plan)? {
+            self.journal.superseded.push(self.journal.plan.clone());
+            self.journal.plan = candidate.0;
+        }
+        // As with every checkpoint, persistence failure poisons this in-memory
+        // session. Reopen to determine whether the old or new plan is durable.
+        self.checkpoint(Phase::Prepared)
+    }
 }
 fn invalid(message: &str) -> Error {
     Error::InvalidData(format!("CKKS upload: {message}"))
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
-    use super::super::{FieldValue, test_support::server_record};
-    use super::*;
-    use crate::security::{FileRootKeySource, KeyRef, RootKeySource, SoftwareFileBackend};
-    use p256::elliptic_curve::sec1::ToEncodedPoint;
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-
-    /// Offline cross-module integration fixture. Runs the real encoder, CKKS
-    /// encryption, durable coordinator and simulated fetch/decrypt verification.
-    /// No receipt constructor is exposed to production or browser IPC.
-    pub(crate) fn verified_for(
-        binding: Binding,
-        credential: PasskeyCredential,
-        private_x963: &[u8],
-    ) -> Result<VerifiedUpload> {
-        let mut f = Fixture::new()?;
-        f.io.zone = binding.zone.clone();
-        f.io.records =
-            f.io.records
-                .iter()
-                .map(|record| {
-                    let tag = record
-                        .server
-                        .as_ref()
-                        .and_then(|metadata| metadata.change_tag.as_deref())
-                        .ok_or_else(|| invalid("test change tag"))?;
-                    server_record(record, &binding.zone, tag)
-                })
-                .collect::<Result<Vec<_>>>()?;
-        let snapshot = f.io.fetch_zone(&binding.zone)?;
-        let current = CurrentKey::from_snapshot(
-            &binding.zone.name,
-            &snapshot.records,
-            &snapshot.tlks,
-            KeyClass::WhenUnlocked,
-        )?;
-        let item = crate::passkey::encode_sync_item(&credential, private_x963)?;
-        let record = current.seal_new_item(&item)?;
-        let plan = PreparedUpload::from_snapshot(
-            binding,
-            credential,
-            private_x963
-                .get(..65)
-                .ok_or_else(|| invalid("test public point"))?,
-            record,
-            &snapshot,
-        )?;
-        let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(plan)?;
-        session.advance(&mut f.io)?;
-        session.verified_upload()
-    }
-
-    #[test]
-    fn prepare_checks_encrypted_identity_before_creating_a_journal() -> Result<()> {
-        let mut f = Fixture::new()?;
-        let snapshot = f.io.fetch_zone(&f.plan.0.binding.zone)?;
-        let other = p256::SecretKey::from_slice(&[8u8; 32]).map_err(|_| invalid("test key"))?;
-        let public = other.public_key().to_encoded_point(false);
-        assert!(
-            PreparedUpload::from_snapshot(
-                f.plan.0.binding.clone(),
-                f.plan.0.credential.clone(),
-                public.as_bytes(),
-                f.plan.0.record.clone(),
-                &snapshot
-            )
-            .is_err()
-        );
-        let expected = STANDARD
-            .decode(&f.plan.0.public_sec1)
-            .map_err(|_| invalid("test point"))?;
-        let mut metadata = f.plan.0.credential.clone();
-        metadata.username = "different-user".into();
-        assert!(
-            PreparedUpload::from_snapshot(
-                f.plan.0.binding.clone(),
-                metadata,
-                &expected,
-                f.plan.0.record.clone(),
-                &snapshot
-            )
-            .is_err()
-        );
-        assert!(
-            std::fs::read_dir(&f.directory)
-                .map_err(|e| Error::io(&f.directory, e))?
-                .next()
-                .is_none()
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn snapshot_fetch_requires_all_pages_and_rejects_partial_or_repeated_cursors() -> Result<()> {
-        use crate::proto::{Writer, decode_fields, first_bytes};
-        let f = Fixture::new()?;
-        let change = |record: &Record| -> Result<Vec<u8>> {
-            Ok(Writer::new()
-                .message(
-                    5,
-                    &record
-                        .server
-                        .as_ref()
-                        .ok_or_else(|| invalid("test server metadata"))?
-                        .encoded_record,
-                )
-                .finish())
-        };
-        let first = Writer::new()
-            .message(1, &change(&f.io.records[0])?)
-            .bytes(2, b"cursor-1")
-            .uint64(4, 1)
-            .finish();
-        let last = Writer::new()
-            .message(1, &change(&f.io.records[1])?)
-            .uint64(4, 3)
-            .finish();
-        let mut calls = 0;
-        let snapshot = Snapshot::fetch_with(f.io.zone.clone(), f.io.tlks.clone(), |request| {
-            calls += 1;
-            if calls == 1 {
-                assert!(first_bytes(&decode_fields(request)?, 1).is_none());
-                Ok(first.clone())
-            } else {
-                assert_eq!(
-                    first_bytes(&decode_fields(request)?, 1),
-                    Some(b"cursor-1".as_slice())
-                );
-                Ok(last.clone())
-            }
-        })?;
-        assert_eq!(calls, 2);
-        assert_eq!(snapshot.records.len(), 2);
-        let repeat = Writer::new().bytes(2, b"cursor-1").uint64(4, 1).finish();
-        assert!(
-            Snapshot::fetch_with(f.io.zone.clone(), f.io.tlks.clone(), |_| Ok(repeat.clone()))
-                .is_err()
-        );
-        assert!(
-            Snapshot::fetch_with(f.io.zone.clone(), f.io.tlks.clone(), |_| Ok(Writer::new()
-                .uint64(4, 1)
-                .finish()))
-            .is_err()
-        );
-        Ok(())
-    }
-
-    struct FailableRoot {
-        inner: FileRootKeySource,
-        denied: Arc<AtomicBool>,
-    }
-    impl RootKeySource for FailableRoot {
-        fn root_key(&self) -> Result<Zeroizing<[u8; 32]>> {
-            if self.denied.load(Ordering::Acquire) {
-                return Err(Error::Refused("synthetic persistence failure".into()));
-            }
-            self.inner.root_key()
-        }
-    }
-    struct Fixture {
-        _root: tempfile::TempDir,
-        directory: PathBuf,
-        backend: SoftwareFileBackend,
-        denied: Arc<AtomicBool>,
-        plan: PreparedUpload,
-        io: FakeIo,
-    }
-    impl Fixture {
-        fn new() -> Result<Self> {
-            let root = tempfile::tempdir().map_err(|e| Error::io("temporary root", e))?;
-            let paths = crate::paths::AppPaths::for_test(&root.path().join("crypto"))?;
-            let denied = Arc::new(AtomicBool::new(false));
-            let source = FailableRoot {
-                inner: FileRootKeySource::new(paths.clone()),
-                denied: denied.clone(),
-            };
-            let backend = SoftwareFileBackend::with_root_source(paths, Box::new(source));
-            let directory = root.path().join("uploads");
-            std::fs::create_dir(&directory).map_err(|e| Error::io(&directory, e))?;
-            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
-                .map_err(|e| Error::io(&directory, e))?;
-            let zone = ZoneIdentity {
-                name: "Passwords".into(),
-                owner: "test-ck-owner".into(),
-            };
-            let binding = Binding {
-                owner: 1001,
-                account_fingerprint: format!("SHA256:{}", STANDARD.encode([1u8; 32])),
-                peer_id: format!("SHA256:{}", STANDARD.encode([2u8; 32])),
-                transaction: Uuid::new_v4(),
-                request_sha256: "a1".repeat(32),
-                zone: zone.clone(),
-            };
-            let id = binding.transaction.to_string();
-            let credential = PasskeyCredential {
-                provenance: PasskeyProvenance::Synced,
-                id: id.clone(),
-                rp_id: "example.com".into(),
-                credential_id: URL_SAFE_NO_PAD.encode([3u8; 20]),
-                user_handle: URL_SAFE_NO_PAD.encode(b"user"),
-                username: "User".into(),
-                display_name: "Test User".into(),
-                created_at: 1700000000.0,
-                modified_at: 1700000000.0,
-                signing_key: KeyRef {
-                    backend_id: "sep-protected-software-v1".into(),
-                    key_id: id,
-                    usage: KeyUsage::WebAuthnSigning,
-                    algorithm: KeyAlgorithm::P256,
-                },
-            };
-            let secret =
-                p256::SecretKey::from_slice(&[7u8; 32]).map_err(|_| invalid("test scalar"))?;
-            let public = secret.public_key().to_encoded_point(false);
-            let mut private = Zeroizing::new(public.as_bytes().to_vec());
-            private.extend_from_slice(&secret.to_bytes());
-            let tlk_id = Uuid::new_v4().to_string();
-            let class_id = Uuid::new_v4().to_string();
-            let root_key = [4u8; 64];
-            let class_key = [5u8; 64];
-            let pointer = Record {
-                server: None,
-                name: "classA".into(),
-                record_type: "currentkey".into(),
-                fields: BTreeMap::from([(
-                    "parentkeyref".into(),
-                    FieldValue::Reference(class_id.clone()),
-                )]),
-            };
-            let class = Record {
-                server: None,
-                name: class_id,
-                record_type: "synckey".into(),
-                fields: BTreeMap::from([
-                    ("parentkeyref".into(), FieldValue::Reference(tlk_id.clone())),
-                    ("class".into(), FieldValue::String("classA".into())),
-                    (
-                        "wrappedkey".into(),
-                        FieldValue::String(STANDARD.encode(
-                            crate::apple::crypto::aes_siv_wrap_key(&root_key, &class_key)?,
-                        )),
-                    ),
-                ]),
-            };
-            let records = vec![
-                server_record(&pointer, &zone, "pointer-1")?,
-                server_record(&class, &zone, "key-1")?,
-            ];
-            let tlks = vec![RecoveredTlk {
-                uuid: tlk_id,
-                zone_name: zone.name.clone(),
-                keyclass: "tlk".into(),
-                key: Zeroizing::new(root_key.to_vec()),
-            }];
-            let current =
-                CurrentKey::from_snapshot(&zone.name, &records, &tlks, KeyClass::WhenUnlocked)?;
-            let record =
-                current.seal_new_item(&crate::passkey::encode_sync_item(&credential, &private)?)?;
-            let snapshot = Snapshot::new(zone.clone(), records.clone(), tlks.clone())?;
-            let plan = PreparedUpload::from_snapshot(
-                binding,
-                credential,
-                public.as_bytes(),
-                record,
-                &snapshot,
-            )?;
-            let io = FakeIo {
-                zone,
-                records,
-                tlks,
-                remote: None,
-                writes: vec![],
-                lost_response: false,
-                commit: true,
-                reject: false,
-                tamper_fetch: false,
-                poison_ack: None,
-            };
-            Ok(Self {
-                _root: root,
-                directory,
-                backend,
-                denied,
-                plan,
-                io,
-            })
-        }
-    }
-    struct FakeIo {
-        zone: ZoneIdentity,
-        records: Vec<Record>,
-        tlks: Vec<RecoveredTlk>,
-        remote: Option<Record>,
-        writes: Vec<(Uuid, Record)>,
-        lost_response: bool,
-        commit: bool,
-        reject: bool,
-        tamper_fetch: bool,
-        poison_ack: Option<Arc<AtomicBool>>,
-    }
-    impl UploadIo for FakeIo {
-        fn fetch_zone(&mut self, zone: &ZoneIdentity) -> Result<Snapshot> {
-            assert_eq!(zone, &self.zone);
-            let mut records = self.records.clone();
-            if let Some(remote) = &self.remote {
-                let mut record = remote.clone();
-                if self.tamper_fetch {
-                    record.fields.insert("gen".into(), FieldValue::Integer(999));
-                    record = server_record(&record, zone, "tampered")?;
-                }
-                records.push(record);
-            }
-            Snapshot::new(zone.clone(), records, self.tlks.clone())
-        }
-        fn create_atomic(
-            &mut self,
-            attempt: Uuid,
-            zone: &ZoneIdentity,
-            record: &Record,
-            pointer: &Record,
-        ) -> Result<SaveOutcome> {
-            assert_eq!(zone, &self.zone);
-            assert_eq!(
-                pointer.server_precondition(zone)?.change_tag.as_deref(),
-                Some("pointer-1")
-            );
-            self.writes.push((attempt, record.clone()));
-            if self.reject {
-                return Ok(SaveOutcome::PreconditionFailed);
-            }
-            if self.commit {
-                self.remote = Some(server_record(record, zone, "saved-1")?);
-            }
-            if self.lost_response {
-                return Err(Error::Apple("synthetic lost response".into()));
-            }
-            if let Some(denied) = &self.poison_ack {
-                denied.store(true, Ordering::Release);
-            }
-            Ok(SaveOutcome::Accepted(
-                self.remote
-                    .clone()
-                    .ok_or_else(|| invalid("no simulated server record"))?,
-            ))
-        }
-    }
-
-    #[test]
-    fn verified_backup_registration_requires_matching_receipt_and_fresh_protected_signature()
-    -> Result<()> {
-        use crate::passkey::registration::CreationContext;
-        use crate::security::authorization::{AuthorizedSignature, SigningProtection};
-        use p256::ecdsa::{Signature, SigningKey, signature::Signer};
-        let mut f = Fixture::new()?;
-        let credential = f.plan.0.credential.clone();
-        let details = serde_json::json!({
-            "rp":{"id":credential.rp_id,"name":"Example"},
-            "user":{"id":credential.user_handle,"name":credential.username,"displayName":credential.display_name},
-            "challenge":URL_SAFE_NO_PAD.encode([23u8;32]),
-            "pubKeyCredParams":[{"type":"public-key","alg":-7}],
-            "extensions":{"remoteDesktopClientOverride":{"origin":"https://example.com","sameOriginWithAncestors":true}}
-        });
-        let context = CreationContext::parse(&details.to_string())?;
-        f.plan.0.binding.request_sha256 = context.binding().into();
-        let binding = f.plan.0.binding.clone();
-        let public = STANDARD
-            .decode(&f.plan.0.public_sec1)
-            .map_err(|_| invalid("test public"))?;
-        let key = SigningKey::from_slice(&[7u8; 32]).map_err(|_| invalid("test key"))?;
-        let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
-        assert!(session.verified_upload().is_err());
-        session.advance(&mut f.io)?;
-        let receipt = session.verified_upload()?;
-        let sign = |protection, uv| {
-            let key = &key;
-            move |reference: &KeyRef, message: &[u8], _| -> Result<AuthorizedSignature> {
-                let signature: Signature = key.sign(message);
-                Ok(AuthorizedSignature::new(
-                    signature.to_der().as_bytes().to_vec(),
-                    reference,
-                    message,
-                    uv,
-                    protection,
-                ))
-            }
-        };
-        let registration = context.finish_synced_registration(
-            &binding,
-            &receipt,
-            &credential,
-            &public,
-            sign(SigningProtection::SepProtectedSoftware, true),
-        )?;
-        let auth = URL_SAFE_NO_PAD
-            .decode(registration.response.authenticator_data)
-            .map_err(|_| invalid("test auth"))?;
-        assert_eq!(auth[32], 0x5d);
-        assert_eq!(registration.id, credential.credential_id);
-        for (protection, uv) in [
-            (SigningProtection::Software, true),
-            (SigningProtection::SepNative, true),
-            (SigningProtection::SepProtectedSoftware, false),
-        ] {
-            assert!(
-                context
-                    .finish_synced_registration(
-                        &binding,
-                        &receipt,
-                        &credential,
-                        &public,
-                        sign(protection, uv)
-                    )
-                    .is_err()
-            );
-        }
-        // Every binding component is checked before invoking the signer.
-        for field in 0..6 {
-            let mut changed = binding.clone();
-            match field {
-                0 => changed.owner += 1,
-                1 => changed.account_fingerprint = format!("SHA256:{}", STANDARD.encode([9u8; 32])),
-                2 => changed.peer_id = format!("SHA256:{}", STANDARD.encode([9u8; 32])),
-                3 => changed.transaction = Uuid::new_v4(),
-                4 => changed.request_sha256 = "f1".repeat(32),
-                _ => changed.zone.owner = "another-owner".into(),
-            }
-            assert!(
-                context
-                    .finish_synced_registration(
-                        &changed,
-                        &receipt,
-                        &credential,
-                        &public,
-                        |_, _, _| panic!("changed binding reached signer")
-                    )
-                    .is_err()
-            );
-        }
-        let mut changed = credential.clone();
-        changed.credential_id = URL_SAFE_NO_PAD.encode([9u8; 20]);
-        assert!(
-            context
-                .finish_synced_registration(
-                    &binding,
-                    &receipt,
-                    &changed,
-                    &public,
-                    |_, _, _| panic!("changed credential reached signer")
-                )
-                .is_err()
-        );
-        assert!(
-            context
-                .finish_synced_registration(
-                    &binding,
-                    &receipt,
-                    &credential,
-                    &[0u8; 65],
-                    |_, _, _| panic!("changed point reached signer")
-                )
-                .is_err()
-        );
-        let mut changed_details = details;
-        changed_details["challenge"] = serde_json::json!(URL_SAFE_NO_PAD.encode([24u8; 32]));
-        let changed_context = CreationContext::parse(&changed_details.to_string())?;
-        assert!(
-            changed_context
-                .finish_synced_registration(
-                    &binding,
-                    &receipt,
-                    &credential,
-                    &public,
-                    |_, _, _| panic!("changed request reached signer")
-                )
-                .is_err()
-        );
-        drop(session);
-        let reopened = UploadStore::new(&f.directory, &f.backend)?.resume(&binding)?;
-        reopened
-            .verified_upload()?
-            .verify_identity(&binding, &credential, &public)?;
-        Ok(())
-    }
-
-    #[test]
-    fn accepted_upload_requires_independent_fetch_and_reopens_without_another_write() -> Result<()>
-    {
-        let mut f = Fixture::new()?;
-        let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
-        assert_eq!(session.phase()?, &Phase::Prepared);
-        assert!(
-            UploadStore::new(&f.directory, &f.backend)?
-                .resume(f.plan.binding())
-                .is_err()
-        ); // Per-transaction lock.
-        session.advance(&mut f.io)?;
-        assert!(matches!(session.phase()?, Phase::FetchVerified { .. }));
-        assert_eq!(f.io.writes.len(), 1);
-        assert_eq!(session.credential(), &f.plan.0.credential);
-        drop(session);
-        let mut session = UploadStore::new(&f.directory, &f.backend)?.resume(f.plan.binding())?;
-        session.advance(&mut f.io)?;
-        assert_eq!(f.io.writes.len(), 1);
-        let bytes = std::fs::read(&session.path).map_err(|e| Error::io(&session.path, e))?;
-        assert!(!bytes.windows(b"Test User".len()).any(|s| s == b"Test User"));
-        assert!(f.backend.open(Purpose::Vault, &bytes).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn ambiguous_commit_reconciles_exact_identity_and_never_resends_automatically() -> Result<()> {
-        let mut f = Fixture::new()?;
-        f.io.lost_response = true;
-        let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
-        assert!(session.advance(&mut f.io).is_err());
-        assert!(matches!(session.phase()?, Phase::Attempted { .. }));
-        drop(session);
-        let mut session = UploadStore::new(&f.directory, &f.backend)?.resume(f.plan.binding())?;
-        session.advance(&mut f.io)?; // Server already has this exact ciphertext/key.
-        assert!(matches!(session.phase()?, Phase::FetchVerified { .. }));
-        assert_eq!(f.io.writes.len(), 1);
-        Ok(())
-    }
-
-    #[test]
-    fn unresolved_absence_requires_explicit_retry_with_identical_ciphertext() -> Result<()> {
-        let mut f = Fixture::new()?;
-        f.io.lost_response = true;
-        f.io.commit = false;
-        let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
-        assert!(session.advance(&mut f.io).is_err());
-        assert!(session.advance(&mut f.io).is_err());
-        assert_eq!(f.io.writes.len(), 1);
-        session.retry_after_absence(&mut f.io)?;
-        f.io.lost_response = false;
-        f.io.commit = true;
-        session.advance(&mut f.io)?;
-        assert_eq!(f.io.writes.len(), 2);
-        assert_ne!(f.io.writes[0].0, f.io.writes[1].0);
-        assert_eq!(f.io.writes[0].1, f.io.writes[1].1);
-        assert!(matches!(session.phase()?, Phase::FetchVerified { .. }));
-        Ok(())
-    }
-
-    #[test]
-    fn changed_pointer_or_atomic_rejection_preserves_key_without_sending_again() -> Result<()> {
-        for reject_at_server in [false, true] {
-            let mut f = Fixture::new()?;
-            f.io.reject = reject_at_server;
-            if !reject_at_server {
-                f.io.records[0] = server_record(&f.io.records[0], &f.io.zone, "rotated-tag")?;
-            }
-            let mut session =
-                UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
-            assert!(session.advance(&mut f.io).is_err());
-            assert_eq!(session.phase()?, &Phase::Rejected);
-            assert_eq!(f.io.writes.len(), usize::from(reject_at_server));
-            drop(session);
-            let mut session =
-                UploadStore::new(&f.directory, &f.backend)?.resume(f.plan.binding())?;
-            assert!(session.advance(&mut f.io).is_err());
-            assert_eq!(
-                session.credential().signing_key,
-                f.plan.0.credential.signing_key
-            );
-            assert_eq!(f.io.writes.len(), usize::from(reject_at_server));
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn acceptance_or_http_success_is_not_fetch_verification_when_payload_changes() -> Result<()> {
-        let mut f = Fixture::new()?;
-        f.io.tamper_fetch = true;
-        let mut session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
-        assert!(session.advance(&mut f.io).is_err());
-        assert!(matches!(session.phase()?, Phase::Accepted { .. }));
-        assert!(session.verified_upload().is_err());
-        assert_eq!(f.io.writes.len(), 1);
-        drop(session);
-        let mut session = UploadStore::new(&f.directory, &f.backend)?.resume(f.plan.binding())?;
-        assert!(session.advance(&mut f.io).is_err());
-        assert!(!matches!(session.phase()?, Phase::FetchVerified { .. }));
-        Ok(())
-    }
-
-    #[test]
-    fn checkpoint_failures_poison_memory_and_reconcile_the_durable_attempt_after_reopen()
-    -> Result<()> {
-        for after_send in [false, true] {
-            let mut f = Fixture::new()?;
-            let mut session =
-                UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
-            if after_send {
-                f.io.poison_ack = Some(f.denied.clone());
-            } else {
-                f.denied.store(true, Ordering::Release);
-            }
-            assert!(session.advance(&mut f.io).is_err());
-            assert!(session.phase().is_err());
-            assert!(session.verified_upload().is_err());
-            assert!(session.advance(&mut f.io).is_err());
-            assert_eq!(f.io.writes.len(), usize::from(after_send));
-            f.denied.store(false, Ordering::Release);
-            drop(session);
-            let mut session =
-                UploadStore::new(&f.directory, &f.backend)?.resume(f.plan.binding())?;
-            if after_send {
-                assert!(matches!(session.phase()?, Phase::Attempted { .. }));
-            } else {
-                assert_eq!(session.phase()?, &Phase::Prepared);
-            }
-            f.io.poison_ack = None;
-            session.advance(&mut f.io)?;
-            assert!(matches!(session.phase()?, Phase::FetchVerified { .. }));
-            assert_eq!(f.io.writes.len(), 1);
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn resume_refuses_changed_account_peer_request_or_plan_and_detects_ciphertext_tampering()
-    -> Result<()> {
-        let f = Fixture::new()?;
-        let session = UploadStore::new(&f.directory, &f.backend)?.prepare(f.plan.clone())?;
-        drop(session);
-        for field in ["account", "peer", "request", "owner", "zone"] {
-            let mut binding = f.plan.binding().clone();
-            match field {
-                "account" => {
-                    binding.account_fingerprint = format!("SHA256:{}", STANDARD.encode([9u8; 32]))
-                }
-                "peer" => binding.peer_id = format!("SHA256:{}", STANDARD.encode([9u8; 32])),
-                "request" => binding.request_sha256 = "f1".repeat(32),
-                "owner" => binding.owner += 1,
-                _ => binding.zone.owner = "different-owner".into(),
-            }
-            assert!(
-                UploadStore::new(&f.directory, &f.backend)?
-                    .resume(&binding)
-                    .is_err()
-            );
-        }
-        let mut changed = f.plan.clone();
-        changed.0.public_sec1 = STANDARD.encode([0u8; 65]);
-        assert!(
-            UploadStore::new(&f.directory, &f.backend)?
-                .prepare(changed)
-                .is_err()
-        );
-        let path = f
-            .directory
-            .join(format!("upload-{}.enc", f.plan.binding().transaction));
-        let mut bytes = read_bounded(&path)?;
-        let end = bytes.len() - 1;
-        bytes[end] ^= 1;
-        atomic_write_private(&path, &bytes)?;
-        assert!(
-            UploadStore::new(&f.directory, &f.backend)?
-                .resume(f.plan.binding())
-                .is_err()
-        );
-        Ok(())
-    }
-}
+pub(crate) mod tests;
