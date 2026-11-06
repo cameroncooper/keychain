@@ -1,11 +1,11 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use keychain::apple::worker::service::{self, Credentials, ServiceConfig};
 use keychain::config::Config;
 use keychain::paths::{AppPaths, StateLock, read_bounded};
-use keychain::security::{RootKeySource, SoftwareFileBackend};
+use keychain::security::{RootKeySource, SecurityBackend, SoftwareFileBackend};
 use keychain::store::StateStore;
 use keychain::{Error, Result};
-use std::io::{IsTerminal, Write};
+use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 use zeroize::Zeroizing;
@@ -30,11 +30,19 @@ enum Command {
         #[arg(long, default_value_t = 120, value_parser = clap::value_parser!(u64).range(1..=86400))]
         idle_timeout: u64,
     },
-    /// Export minimal credentials from the existing local profile to a PIPE.
-    /// Pipe directly to sudo systemd-creds encrypt; never write plaintext to disk.
-    Export,
+    /// Export a minimal enrollment package from the existing profile to a private PIPE.
+    /// Network target: systemd-creds encrypt. Broker target: root broker import-account.
+    Export {
+        #[arg(long, value_enum, default_value_t = ExportTarget::Network)]
+        target: ExportTarget,
+    },
     /// Validate systemd-supplied credentials without helper startup or Apple IO.
     CheckCredentials,
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum ExportTarget {
+    Network,
+    Broker,
 }
 struct ExistingRoot(PathBuf);
 impl RootKeySource for ExistingRoot {
@@ -57,11 +65,12 @@ fn credentials_directory() -> Result<PathBuf> {
             Error::Config("start this worker through its systemd service credentials".into())
         })
 }
-fn export() -> Result<()> {
+fn export(target: ExportTarget) -> Result<()> {
     let owner = keychain_sep_driver::peer::effective_uid();
-    if owner == 0 || std::io::stdout().is_terminal() {
-        return Err(Error::Refused("run export as the profile owner and pipe directly to sudo systemd-creds encrypt --with-key=host --name=network-account - OUTPUT".into()));
+    if owner == 0 {
+        return Err(Error::Refused("run export as the profile owner and use the private pipe for the selected enrollment target".into()));
     }
+    keychain::paths::require_private_pipe(&std::io::stdout(), owner)?;
     let paths = AppPaths::discover()?;
     let _lock = StateLock::acquire(&paths)?;
     let config = Config::load(&paths)?;
@@ -84,20 +93,27 @@ fn export() -> Result<()> {
     let peer = store
         .load_octagon()?
         .ok_or_else(|| Error::Config("existing joined peer missing".into()))?;
-    let seed = Zeroizing::new(read_bounded(
-        &paths.anisette_dir().join("macos/machine.json"),
-    )?);
-    let credentials = Credentials::from_account(owner, &account, &device, &peer, &seed)?;
+    let encoded = match target {
+        ExportTarget::Network => {
+            let seed = Zeroizing::new(read_bounded(
+                &paths.anisette_dir().join("macos/machine.json"),
+            )?);
+            Credentials::from_account(owner, &account, &device, &peer, &seed)?.encode()?
+        }
+        ExportTarget::Broker => backend
+            .prepare_account_bootstrap(owner, &account, &device, &peer)?
+            .encode()?,
+    };
     std::io::stdout()
         .lock()
-        .write_all(&credentials.encode()?)
-        .map_err(|e| Error::io("encrypted-credential input pipe", e))
+        .write_all(&encoded)
+        .map_err(|e| Error::io("administrator bootstrap pipe", e))
 }
 fn run(cli: Cli) -> Result<()> {
     keychain_sep_driver::memory::make_process_nondumpable()
         .map_err(|e| Error::io("worker memory policy", e))?;
     match cli.command {
-        Command::Export => export(),
+        Command::Export { target } => export(target),
         Command::CheckCredentials => {
             service::load_credentials(&credentials_directory()?)?;
             println!("worker credentials validated; no helper or Apple request started");

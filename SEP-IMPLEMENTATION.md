@@ -291,8 +291,8 @@ presentation, guidance and Cancel/Escape, with no approval button or biometric
 success message from UI to broker. Systemd templates and deployment notes are in
 [contrib/SEP-SERVICES.md](contrib/SEP-SERVICES.md).
 
-Workspace checks: 196 passing tests, nineteen ignored (three Apple network and sixteen privileged
-integration tests). Nine registry and five coordination tests passed separately as root, including
+Workspace checks: 199 passing tests, twenty ignored (three Apple network and seventeen privileged
+integration tests). Nine registry, five coordination and one account-bootstrap test passed separately as root, including
 wrong-owner, ciphertext-tamper, missing-root refusal and staged replacement recovery.
 Nine browser service-worker flow tests also pass. Strict Clippy is clean.
 The broker now exits after an idle interval without interrupting queued/active
@@ -429,8 +429,13 @@ reads/writes; a constructor-time guard cannot substitute for them. Session check
 use an uncached login1 snapshot with a 250-ms timeout and fail closed. The separate
 worker executable/service and minimal encrypted credential export
 now exist; a synthetic systemd startup check verifies delivered credentials,
-separate UID, scope rejection and idle exit without Apple/SEP IO. Broker account/
-root bootstrap, worker-start wiring and remaining library/scratch memory review
+separate UID, scope rejection and idle exit without Apple/SEP IO. Explicit root
+account enrollment now imports only the existing Octagon agreement identity,
+verifies its signed permanent info and persists an immutable enrollment intent.
+The broker authenticates recoverable/live self-shares and constructs its own
+complete preflight snapshot; a root integration test exercises raw share/page
+framing through that path. See [account bootstrap](docs/BROKER-ACCOUNT-BOOTSTRAP.md).
+Worker-start/coordinator/browser wiring and remaining library/scratch memory review
 remain required before exposing this path over IPC; see
 [coordination limits](docs/ICLOUD-BROKER-COORDINATION.md). The production
 Apple adapter and iCloud browser choice remain unconnected to production flows.

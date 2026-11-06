@@ -22,7 +22,7 @@ fn binding() -> Binding {
 fn until() -> Instant {
     Instant::now() + Duration::from_secs(3)
 }
-fn pair<'a>(
+pub(crate) fn pair<'a>(
     binding: &Binding,
     check: &'a dyn Fn() -> Result<()>,
     deadline: Instant,
@@ -40,6 +40,31 @@ fn join(handle: thread::JoinHandle<Result<()>>) -> Result<()> {
     handle
         .join()
         .unwrap_or_else(|_| panic!("worker thread panic"))
+}
+
+/// Fake pre-authenticated channel ONLY in tests; peer UID enforcement is covered
+/// separately by disposable service-process checks. Replies contain raw records.
+pub(crate) fn root_read_fixture(
+    socket: UnixStream,
+    binding: Binding,
+    recovery: Vec<u8>,
+    page: Vec<u8>,
+) -> thread::JoinHandle<Result<()>> {
+    thread::spawn(move || {
+        let check = || Ok(());
+        let peer = binding.peer_id.clone();
+        let mut channel = Channel::new(socket, binding, until(), &check)?;
+        let (kind, request) = channel.read(0)?;
+        assert_eq!(kind, Kind::RecoverableShares);
+        assert_eq!(
+            request,
+            crate::apple::cuttlefish::encode_fetch_recoverable_tlkshares_request(&peer)
+        );
+        channel.write(0, kind, &recovery)?;
+        let (kind, _) = channel.read(1)?;
+        assert_eq!(kind, Kind::FetchPage);
+        channel.write(1, kind, &page)
+    })
 }
 
 #[test]
@@ -226,6 +251,9 @@ fn kernel_uid_authentication_cannot_be_replaced_by_scope_fields() -> Result<()> 
     let (socket, _other) = UnixStream::pair().map_err(|e| Error::io("pair", e))?;
     struct Never(Binding);
     impl NetworkBackend for Never {
+        fn recoverable_shares(&mut self, _: &[u8]) -> Result<Vec<u8>> {
+            panic!("untrusted client reached backend")
+        }
         fn binding(&self) -> &Binding {
             &self.0
         }
@@ -381,6 +409,9 @@ fn root_dedicated_worker_handshake_and_raw_io() -> Result<()> {
             calls: usize,
         }
         impl NetworkBackend for Echo {
+            fn recoverable_shares(&mut self, _: &[u8]) -> Result<Vec<u8>> {
+                panic!("not a recoverable-share fixture")
+            }
             fn binding(&self) -> &Binding {
                 &self.binding
             }

@@ -120,6 +120,18 @@ impl AppleUploadIo<'_, '_> {
     pub(crate) fn worker_binding(&self) -> &Binding {
         &self.binding
     }
+    pub(crate) fn fetch_recoverable_shares(&self, body: &[u8]) -> Result<Vec<u8>> {
+        if body
+            != crate::apple::cuttlefish::encode_fetch_recoverable_tlkshares_request(
+                &self.binding.peer_id,
+            )
+        {
+            return Err(invalid(
+                "recoverable-share request differs from enrolled peer",
+            ));
+        }
+        self.transport.invoke("fetchRecoverableTLKShares", body)
+    }
     pub(crate) fn fetch_page(&self, body: &[u8]) -> Result<Vec<u8>> {
         validate_worker_fetch(&self.binding, body)?;
         self.transport.fetch_records(body)

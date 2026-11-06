@@ -1,7 +1,7 @@
 use std::env;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 use fs2::FileExt;
@@ -10,6 +10,26 @@ use uuid::Uuid;
 use crate::{Error, Result};
 
 pub const MAX_STATE_FILE: u64 = 64 * 1024 * 1024;
+
+/// Administrative secret exports/imports use a private pipe, not a regular
+/// redirected file or terminal. FD duplication here is safe and CLOEXEC.
+pub fn require_private_pipe(fd: &impl std::os::fd::AsFd, owner: u32) -> Result<()> {
+    let file = File::from(
+        fd.as_fd()
+            .try_clone_to_owned()
+            .map_err(|e| Error::io("administrator pipe", e))?,
+    );
+    let meta = file
+        .metadata()
+        .map_err(|e| Error::io("administrator pipe", e))?;
+    if !meta.file_type().is_fifo()
+        || meta.mode() & 0o077 != 0
+        || (meta.uid() != 0 && meta.uid() != owner)
+    {
+        return Err(Error::Refused("administrator key material requires a private pipe owned by root or the selected profile owner".into()));
+    }
+    Ok(())
+}
 
 /// Preserve Apple's record-name case, accepting only the hyphenated UUID shape
 /// as a single filename component. Generated local UUIDs use lowercase.
@@ -255,6 +275,30 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
+    #[test]
+    fn administrative_private_pipes_refuse_files_and_sockets() -> Result<()> {
+        use std::process::{Command, Stdio};
+        let owner = keychain_sep_driver::peer::effective_uid();
+        let file = tempfile::tempfile().map_err(|e| Error::io("test file", e))?;
+        assert!(require_private_pipe(&file, owner).is_err());
+        let (socket, _) =
+            std::os::unix::net::UnixStream::pair().map_err(|e| Error::io("test socket", e))?;
+        assert!(require_private_pipe(&socket, owner).is_err());
+        let mut child = Command::new("/usr/bin/cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .map_err(|e| Error::io("pipe test child", e))?;
+        let pipe = child
+            .stdin
+            .take()
+            .ok_or_else(|| Error::Security("pipe test stdin missing".into()))?;
+        let result = require_private_pipe(&pipe, owner);
+        drop(pipe);
+        let status = child.wait().map_err(|e| Error::io("pipe test child", e))?;
+        assert!(status.success());
+        result
+    }
     #[test]
     fn apple_record_case_is_preserved_but_unsafe_or_alternate_shapes_are_rejected() {
         for id in [

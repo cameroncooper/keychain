@@ -24,6 +24,14 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Enroll an existing Octagon agreement key from an administrator PIPE.
+    /// Does not sign in, generate a peer, fetch shares or write Apple records.
+    ImportAccount {
+        #[arg(long, value_parser=clap::value_parser!(u32).range(1..))]
+        worker_uid: u32,
+        #[arg(long, default_value = "/run/keychain-network/worker.sock")]
+        worker_socket: PathBuf,
+    },
     Serve {
         #[arg(long)]
         socket: Option<PathBuf>,
@@ -64,6 +72,32 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
     }
     let registry = Registry::open(&cli.registry)?;
     match cli.command {
+        Command::ImportAccount {
+            worker_uid,
+            worker_socket,
+        } => {
+            use keychain::broker::account::{Bootstrap, MAX_BOOTSTRAP, WorkerSettings};
+            use std::io::Read;
+            keychain::paths::require_private_pipe(&std::io::stdin(), cli.owner)?;
+            let mut bytes = zeroize::Zeroizing::new(Vec::new());
+            std::io::stdin()
+                .take(MAX_BOOTSTRAP as u64 + 1)
+                .read_to_end(&mut bytes)?;
+            let input = Bootstrap::decode(&bytes)?;
+            let account = registry.enroll_account(
+                cli.owner,
+                &input,
+                WorkerSettings {
+                    uid: worker_uid,
+                    socket: worker_socket,
+                },
+            )?;
+            println!(
+                "enrolled existing Octagon agreement identity for owner {} ({})",
+                account.scope().owner,
+                account.scope().account_fingerprint
+            );
+        }
         Command::PrepareItemKey { device } => {
             let mut device = keychain_sep_driver::Device::open(&device)?;
             println!(

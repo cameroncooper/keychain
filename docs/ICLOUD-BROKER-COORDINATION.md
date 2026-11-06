@@ -72,8 +72,10 @@ reply validation/fetch verification still run there. The worker independently
 checks canonical request scope before HTTP. A disposable different-UID process
 test verifies the real kernel peer checks and handshake. The production worker
 service and selective credential export now exist; its actual systemd startup
-test passed with synthetic data. Broker account/root bootstrap, worker startup
-and browser connection remain unfinished. The UploadIo
+test passed with synthetic data. The separate [broker account bootstrap](BROKER-ACCOUNT-BOOTSTRAP.md)
+now pins the existing signed identity, imports its agreement key and authenticates
+recoverable/live self-shares before constructing the initial complete snapshot.
+Worker startup, coordinator connection and browser integration remain unfinished. The UploadIo
 supplied to this coordinator is still a trusted internal dependency, not an owner
 RPC. Direct AppleUploadIo inside the privileged broker remains prohibited; its
 installed AF_UNIX-only restrictions are retained. Start/authenticate the worker

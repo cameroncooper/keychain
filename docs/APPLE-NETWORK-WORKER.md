@@ -2,7 +2,7 @@
 
 `src/apple/worker.rs` implements the socket protocol and broker-side `UploadIo`.
 The separate worker executable/service and minimal credential export now exist;
-the broker account bootstrap/browser path is not enabled.
+the broker account enrollment path exists but its browser path is not enabled.
 The broker keeps its AF_UNIX-only service restriction. No Apple write or biometric
 capture was used to validate this transport.
 
@@ -95,8 +95,12 @@ socket authentication, wrong owner/peer refusal and idle exit with synthetic dat
 and non-loopback traffic denied. No real account package has been exported or
 applied, and live Apple authentication remains unverified.
 
-The broker's trusted account/Octagon-root bootstrap and worker start/connect
-configuration remain unfinished. Do not grant the worker the owner's home,
+The broker's [account enrollment and authenticated root bootstrap](BROKER-ACCOUNT-BOOTSTRAP.md)
+now verify and pin the existing agreement identity through an administrator pipe.
+The worker has a canonical enrolled-peer read-only recoverable-share operation;
+recoverable and live self-shares are verified/unwrapped in the broker before
+constructing its complete initial snapshot. No real account has been enrolled.
+Worker start/connect and coordinator/browser configuration remain unfinished. Do not grant the worker the owner's home,
 reuse the owner socket or accept owner-submitted snapshots/roots. Keep account
 HTTP credentials in the worker and authenticated Octagon roots in the broker.
 

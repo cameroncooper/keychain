@@ -532,6 +532,21 @@ fn upload_adapter_binds_authenticated_account_joined_peer_and_record_without_net
         },
     };
     let mut adapter = AppleUploadIo::new(&transport, &peer, binding.clone(), vec![])?;
+    let wrong_share_request =
+        crate::apple::cuttlefish::encode_fetch_recoverable_tlkshares_request("another-peer");
+    assert!(
+        adapter
+            .fetch_recoverable_shares(&wrong_share_request)
+            .is_err()
+    );
+    let mut duplicate_share_request =
+        crate::apple::cuttlefish::encode_fetch_recoverable_tlkshares_request(&peer.peer_id);
+    duplicate_share_request.extend(Writer::new().string(1, &peer.peer_id).finish());
+    assert!(
+        adapter
+            .fetch_recoverable_shares(&duplicate_share_request)
+            .is_err()
+    );
     let save = fixture()?;
     assert!(
         adapter

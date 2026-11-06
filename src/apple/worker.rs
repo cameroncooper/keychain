@@ -26,7 +26,8 @@ pub mod service;
 
 /// Static account selection supplied by trusted service credentials. Per-call
 /// transaction/browser bindings arrive only from the authenticated root broker.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccountScope {
     pub owner: u32,
     pub account_fingerprint: String,
@@ -34,6 +35,26 @@ pub struct AccountScope {
     pub zone: ZoneIdentity,
 }
 impl AccountScope {
+    pub(crate) fn validate(&self) -> Result<()> {
+        use base64::{Engine, engine::general_purpose::STANDARD};
+        let hash = |value: &str| {
+            value
+                .strip_prefix("SHA256:")
+                .filter(|value| value.len() == 44)
+                .and_then(|value| STANDARD.decode(value).ok())
+                .is_some_and(|value| value.len() == 32)
+        };
+        if self.owner == 0
+            || !hash(&self.account_fingerprint)
+            || !hash(&self.peer_id)
+            || self.zone.name != "Passwords"
+            || self.zone.owner.is_empty()
+            || self.zone.owner.len() > 512
+        {
+            return Err(invalid("invalid enrolled account scope"));
+        }
+        Ok(())
+    }
     fn accepts(&self, binding: &Binding) -> bool {
         self.owner == binding.owner
             && self.account_fingerprint == binding.account_fingerprint
@@ -47,6 +68,7 @@ impl AccountScope {
 enum Kind {
     Hello,
     FetchPage,
+    RecoverableShares,
     Save,
     Failed,
     AuthenticationRequired,
@@ -399,6 +421,7 @@ impl<'a> WorkerClient<'a> {
 pub trait NetworkBackend {
     fn binding(&self) -> &Binding;
     fn fetch_page(&mut self, request: &[u8]) -> Result<Vec<u8>>;
+    fn recoverable_shares(&mut self, request: &[u8]) -> Result<Vec<u8>>;
     fn save_stream(&mut self, request: &[u8]) -> Result<Vec<u8>>;
 }
 impl NetworkBackend for AppleUploadIo<'_, '_> {
@@ -410,6 +433,9 @@ impl NetworkBackend for AppleUploadIo<'_, '_> {
     }
     fn save_stream(&mut self, request: &[u8]) -> Result<Vec<u8>> {
         self.send_prepared_save(request)
+    }
+    fn recoverable_shares(&mut self, request: &[u8]) -> Result<Vec<u8>> {
+        self.fetch_recoverable_shares(request)
     }
 }
 
@@ -492,6 +518,9 @@ fn serve_bound(channel: &mut Channel<'_>, backend: &mut dyn NetworkBackend) -> R
             Kind::Save if !request.is_empty() && request.len() <= 2 * 1024 * 1024 => {
                 backend.save_stream(&request)
             }
+            Kind::RecoverableShares if !request.is_empty() && request.len() <= 1024 => {
+                backend.recoverable_shares(&request)
+            }
             _ => return Err(invalid("invalid worker operation")),
         };
         match result {
@@ -516,8 +545,60 @@ pub struct WorkerUploadIo<'a> {
     client: WorkerClient<'a>,
     device: DeviceConfig,
     roots: Vec<RecoveredTlk>,
+    initial: Option<Snapshot>,
 }
 impl<'a> WorkerUploadIo<'a> {
+    /// Only a validated root-registry Account can choose the unwrap identity.
+    /// The worker returns signed/wrapped records, never authoritative root keys.
+    pub(crate) fn for_account(
+        mut client: WorkerClient<'a>,
+        account: &crate::broker::account::Account,
+        backend: &dyn crate::security::SecurityBackend,
+        check: &dyn Fn() -> Result<()>,
+    ) -> Result<Self> {
+        if !account.scope().accepts(&client.channel.binding) {
+            return Err(invalid("worker binding differs from enrolled account"));
+        }
+        let request = crate::apple::cuttlefish::encode_fetch_recoverable_tlkshares_request(
+            &account.scope().peer_id,
+        );
+        let result = (|| {
+            let raw = client.exchange_checked(Kind::RecoverableShares, &request, check)?;
+            let parsed = crate::apple::cuttlefish::parse_recoverable_tlkshares_response(&raw)?;
+            if parsed.share_records.len() > 4096 {
+                return Err(invalid("recoverable share count exceeds limit"));
+            }
+            let shares = parsed
+                .share_records
+                .iter()
+                .map(|record| crate::apple::ckks::parse_record(record))
+                .collect::<Result<Vec<_>>>()?;
+            let records = Snapshot::fetch_records_with(&account.scope().zone, |body| {
+                client.exchange_checked(Kind::FetchPage, body, check)
+            })?;
+            let live_shares = records
+                .iter()
+                .filter(|record| record.record_type == "tlkshare")
+                .cloned()
+                .collect::<Vec<_>>();
+            let roots = account.authenticate_roots(backend, &shares, &live_shares, check)?;
+            let snapshot = Snapshot::new(account.scope().zone.clone(), records, roots.clone())?;
+            check()?;
+            Ok((roots, snapshot))
+        })();
+        match result {
+            Ok((roots, snapshot)) => Ok(Self {
+                client,
+                device: account.device(),
+                roots,
+                initial: Some(snapshot),
+            }),
+            Err(error) => {
+                client.channel.close();
+                Err(error)
+            }
+        }
+    }
     pub fn new(
         client: WorkerClient<'a>,
         device: DeviceConfig,
@@ -530,6 +611,7 @@ impl<'a> WorkerUploadIo<'a> {
             client,
             device,
             roots: authenticated_roots,
+            initial: None,
         })
     }
 }
@@ -542,13 +624,19 @@ impl UploadIo for WorkerUploadIo<'_> {
         if zone != &self.client.channel.binding.zone {
             return Err(invalid("fetch zone differs from fixed scope"));
         }
-        let result = Snapshot::fetch_with(zone.clone(), self.roots.clone(), |body| {
-            self.client.exchange_checked(Kind::FetchPage, body, check)
-        })
-        .and_then(|snapshot| {
+        let result = (|| {
+            check()?;
+            self.client.channel.guard()?;
+            if let Some(snapshot) = self.initial.take() {
+                check()?;
+                return Ok(snapshot);
+            }
+            let snapshot = Snapshot::fetch_with(zone.clone(), self.roots.clone(), |body| {
+                self.client.exchange_checked(Kind::FetchPage, body, check)
+            })?;
             check()?;
             Ok(snapshot)
-        });
+        })();
         if result.is_err() {
             self.client.channel.close();
         }
@@ -586,4 +674,4 @@ impl UploadIo for WorkerUploadIo<'_> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

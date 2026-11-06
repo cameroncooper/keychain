@@ -230,23 +230,43 @@ impl SoftwareFileBackend {
         Ok(secret)
     }
 
-    fn insert_p384_secret(&self, usage: KeyUsage, secret: &SecretKey) -> Result<KeyRef> {
+    fn insert_p384_secret(
+        &self,
+        usage: KeyUsage,
+        secret: &SecretKey,
+        reuse: bool,
+    ) -> Result<KeyRef> {
         let _guard = self
             .keys_lock
             .lock()
             .map_err(|_| Error::Security("software key database lock poisoned".into()))?;
         let mut db = self.load_keys()?;
+        // Imports are restart-safe: reuse an identical P-384 key/usage after a
+        // metadata checkpoint failure. Generated keys remain fresh scalars.
+        let scalar = Zeroizing::new(secret.to_bytes());
+        let encoded = Zeroizing::new(B64.encode(scalar.as_slice()));
+        if let Some((id, _)) = db.keys.iter().find(|(_, record)| {
+            reuse
+                && record.usage == usage
+                && record.algorithm == KeyAlgorithm::P384
+                && record.scalar_b64 == *encoded
+        }) {
+            return Ok(KeyRef {
+                backend_id: BACKEND_ID.into(),
+                key_id: id.clone(),
+                usage,
+                algorithm: KeyAlgorithm::P384,
+            });
+        }
         let key_id = Uuid::new_v4().to_string();
-        let mut scalar = Zeroizing::new(secret.to_bytes().to_vec());
         db.keys.insert(
             key_id.clone(),
             KeyRecord {
                 usage,
                 algorithm: KeyAlgorithm::P384,
-                scalar_b64: B64.encode(scalar.as_slice()),
+                scalar_b64: encoded.to_string(),
             },
         );
-        scalar.zeroize();
         self.save_keys(&db)?;
         Ok(KeyRef {
             backend_id: BACKEND_ID.into(),
@@ -316,6 +336,35 @@ impl SoftwareFileBackend {
 }
 
 impl SecurityBackend for SoftwareFileBackend {
+    fn prepare_account_bootstrap(
+        &self,
+        owner: u32,
+        account: &crate::model::AccountState,
+        device: &crate::model::DeviceIdentity,
+        peer: &crate::model::OctagonState,
+    ) -> Result<crate::broker::account::Bootstrap> {
+        if peer.signing_key.usage != KeyUsage::Signing
+            || peer.signing_key.algorithm != KeyAlgorithm::P384
+        {
+            return Err(Error::Security(
+                "Octagon signing key policy mismatch".into(),
+            ));
+        }
+        let signing = self.public_spki(&peer.signing_key)?;
+        let secret = self.key_secret_p384(&peer.encryption_key, Some(KeyUsage::Agreement))?;
+        let mut private = Zeroizing::new(
+            secret
+                .public_key()
+                .to_encoded_point(false)
+                .as_bytes()
+                .to_vec(),
+        );
+        let scalar = Zeroizing::new(secret.to_bytes());
+        private.extend_from_slice(&scalar);
+        crate::broker::account::Bootstrap::from_private(
+            owner, account, device, peer, &signing, &private,
+        )
+    }
     fn prepare_passkey_protection(
         &self,
         credential: &crate::model::PasskeyCredential,
@@ -404,7 +453,7 @@ impl SecurityBackend for SoftwareFileBackend {
     }
 
     fn generate_p384(&self, usage: KeyUsage) -> Result<KeyRef> {
-        self.insert_p384_secret(usage, &SecretKey::random(&mut OsRng))
+        self.insert_p384_secret(usage, &SecretKey::random(&mut OsRng), false)
     }
 
     fn import_p384_x963(&self, usage: KeyUsage, private_x963: &[u8]) -> Result<KeyRef> {
@@ -420,7 +469,7 @@ impl SecurityBackend for SoftwareFileBackend {
                 "P-384 private scalar does not match its public point".into(),
             ));
         }
-        self.insert_p384_secret(usage, &secret)
+        self.insert_p384_secret(usage, &secret, true)
     }
 
     fn import_p256_x963(&self, usage: KeyUsage, private_x963: &[u8]) -> Result<KeyRef> {

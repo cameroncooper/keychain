@@ -12,7 +12,8 @@ public account/device/peer scope and a seed of the already provisioned local Mac
 anisette identity. The export code selects that token rather than serializing
 all account tokens; it never loads the vault or exports Octagon private keys.
 It refuses unjoined/mismatched peers and never creates an account encryption root.
-Export runs as the profile owner and requires piped stdout. It does not fork or
+Export runs as the profile owner and requires a private pipe (terminals and
+regular redirected files are refused). It does not fork or
 start a helper with loaded credential material. The shell starts the encryption
 process separately; no plaintext intermediate file is needed.
 
@@ -117,7 +118,9 @@ credentials and seed persistence/refusal. These checks have passed; they do not
 prove live Apple token acceptance or upload atomicity. Real credentials have not
 been exported/applied during implementation.
 
-Production still needs the broker's trusted account/Octagon-root bootstrap and
-configured worker-start/connect path. Do not accept owner-supplied snapshots,
+The broker's separate [agreement-key enrollment and authenticated root bootstrap](../docs/BROKER-ACCOUNT-BOOTSTRAP.md)
+now exist. The broker/worker packages are intentionally separate and neither has
+been applied to the real account. Production still needs the configured
+worker-start/connect path and coordinator/browser wiring. Do not accept owner-supplied snapshots,
 roots or uploaded flags. Then connect the existing creation coordinator and
 browser iCloud choice, followed by scoped live Apple and biometric/browser tests.

@@ -34,8 +34,8 @@ pub struct Record {
 }
 
 pub struct Registry {
-    directory: PathBuf,
-    backend: SoftwareFileBackend,
+    pub(super) directory: PathBuf,
+    pub(super) backend: SoftwareFileBackend,
 }
 
 /// Guard the directory that actually holds broker envelopes, including upload
@@ -160,7 +160,7 @@ impl Registry {
         }
         Ok(())
     }
-    fn update_lock(&self) -> Result<std::fs::File> {
+    pub(super) fn update_lock(&self) -> Result<std::fs::File> {
         use std::os::unix::fs::OpenOptionsExt;
         let path = self.directory.join(".update.lock");
         let file = std::fs::OpenOptions::new()
@@ -196,7 +196,10 @@ impl Registry {
             if matches!(id, "item-recipient" | "synced-inventory") {
                 continue;
             }
-            if id.starts_with("upload-") || id.starts_with("synced-create-") {
+            if id.starts_with("upload-")
+                || id.starts_with("synced-create-")
+                || id.starts_with("account-")
+            {
                 continue;
             }
             scanned += 1;

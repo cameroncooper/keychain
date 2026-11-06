@@ -1,5 +1,6 @@
 //! Privileged selected-credential operations. Transport peers supply UID; request
 //! fields never override key ownership, session policy or stored provenance.
+pub mod account;
 mod native;
 mod protected;
 mod registration;

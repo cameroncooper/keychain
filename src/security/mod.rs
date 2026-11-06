@@ -61,6 +61,7 @@ pub enum Purpose {
     ProtectionMigration = 6,
     TrustRepair = 7,
     SyncUpload = 8,
+    BrokerAccount = 9,
 }
 
 impl Purpose {
@@ -74,6 +75,7 @@ impl Purpose {
             6 => Ok(Self::ProtectionMigration),
             7 => Ok(Self::TrustRepair),
             8 => Ok(Self::SyncUpload),
+            9 => Ok(Self::BrokerAccount),
             _ => Err(crate::Error::InvalidData(format!(
                 "unknown encrypted-state purpose {value}"
             ))),
@@ -90,6 +92,7 @@ impl Purpose {
             Self::ProtectionMigration => b"protection-migration",
             Self::TrustRepair => b"trust-repair",
             Self::SyncUpload => b"sync-upload",
+            Self::BrokerAccount => b"broker-account",
         }
     }
 }
@@ -109,6 +112,19 @@ pub struct BackendCapabilities {
 pub trait SecurityBackend: Send + Sync {
     fn backend_id(&self) -> &'static str;
     fn capabilities(&self) -> BackendCapabilities;
+    /// Explicit administrator bootstrap of the existing Octagon agreement key.
+    /// Unsupported/non-exportable backends refuse; this never generates a peer.
+    fn prepare_account_bootstrap(
+        &self,
+        _owner: u32,
+        _account: &crate::model::AccountState,
+        _device: &crate::model::DeviceIdentity,
+        _peer: &crate::model::OctagonState,
+    ) -> Result<crate::broker::account::Bootstrap> {
+        Err(crate::Error::Refused(
+            "account backend cannot prepare broker bootstrap".into(),
+        ))
+    }
     fn protection_capabilities(&self) -> authorization::ProtectionCapabilities {
         authorization::ProtectionCapabilities::default()
     }

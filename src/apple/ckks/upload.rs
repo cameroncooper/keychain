@@ -85,6 +85,15 @@ impl Snapshot {
         tlks: Vec<RecoveredTlk>,
         mut read: impl FnMut(&[u8]) -> Result<Vec<u8>>,
     ) -> Result<Self> {
+        let records = Self::fetch_records_with(&zone, &mut read)?;
+        Self::new(zone, records, tlks)
+    }
+    /// Complete raw TLS-backed records before root authentication; never use
+    /// these alone as absence/backup evidence. Snapshot construction follows it.
+    pub(crate) fn fetch_records_with(
+        zone: &ZoneIdentity,
+        mut read: impl FnMut(&[u8]) -> Result<Vec<u8>>,
+    ) -> Result<Vec<Record>> {
         let zone_id = super::record_zone_identifier(&zone.name, &zone.owner);
         let mut records = Vec::new();
         let mut token: Option<Vec<u8>> = None;
@@ -95,7 +104,7 @@ impl Snapshot {
             let page = super::parse_retrieve_changes_response(&read(&request)?)?;
             for record in &page.records {
                 bytes = bytes
-                    .checked_add(record.server_precondition(&zone)?.encoded_record.len())
+                    .checked_add(record.server_precondition(zone)?.encoded_record.len())
                     .ok_or_else(|| invalid("snapshot size overflow"))?;
             }
             if bytes > 64 * 1024 * 1024 || records.len() + page.records.len() > 65536 {
@@ -103,7 +112,7 @@ impl Snapshot {
             }
             records.extend(page.records);
             if page.status == 3 {
-                return Self::new(zone, records, tlks);
+                return Ok(records);
             }
             let next = page
                 .continuation
@@ -115,7 +124,11 @@ impl Snapshot {
         }
         Err(invalid("snapshot exceeded the 1000-page bound"))
     }
-    fn new(zone: ZoneIdentity, records: Vec<Record>, tlks: Vec<RecoveredTlk>) -> Result<Self> {
+    pub(crate) fn new(
+        zone: ZoneIdentity,
+        records: Vec<Record>,
+        tlks: Vec<RecoveredTlk>,
+    ) -> Result<Self> {
         if records.len() > 65536 || tlks.len() > 4096 {
             return Err(invalid("snapshot exceeds bounds"));
         }
