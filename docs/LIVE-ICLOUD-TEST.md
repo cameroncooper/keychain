@@ -95,6 +95,33 @@ binaries under `/var/lib/keychain-service-backups/update.yyppbbsi`. Native-host
 availability passed without capture. Release build, strict Clippy and 16 broker
 tests passed; 21 privileged/live tests remained ignored.
 
+### Hands-off retry: sensor bring-up failed
+
+The user confirmed the popup also closed without moving the mouse. At 17:21:54
+America/Chicago the agent acknowledged presentation; at 17:21:55 it logged
+focus-loss cancellation. The corresponding retained draft is
+`49050353-2ec4-40d8-b562-1d6725773713`. The component that took focus is not yet
+identified; focus-follows-mouse alone is not an established cause. A separate
+display-only prompt over Chromium stayed presented for five seconds.
+
+The later hands-off attempt at 17:24:47 failed differently: the agent acknowledged
+presentation and logged no focus cancellation. The broker reported uncertain SEP
+completion with errno 5 (EIO). The kernel reported:
+
+```text
+sequence counter: the enclave refused the sensor's reply, status 0x107
+sensor patch: sequence counter init failed before the patch fetch
+verify: the sensor did not come back online
+```
+
+Its draft `4815eb9b-5da4-420a-8029-db28b48ceae9` is retained. These logs locate
+this failure in sensor bring-up, but do not establish the firmware meaning of
+0x107 or whether earlier cancellation caused it. No additional captures, automatic
+retry, module reload or secure-state reset were performed. Driver-side recovery
+is needed before resuming real biometric tests; the earlier focus issue remains
+open separately. A successful fresh browser registration and other-device use
+are still unverified.
+
 Use the fresh review with `--review` and a separate root-private request file
 with `--request`; never overwrite the earlier frozen request. Stop if either
 operation is uncertain or the user cancels. Submit the resulting registration
