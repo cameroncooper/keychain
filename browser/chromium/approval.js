@@ -7,6 +7,8 @@ const accounts = document.querySelector("#accounts");
 const errorText = document.querySelector("#error");
 const approveButton = document.querySelector("#approve");
 const cancelButton = document.querySelector("#cancel");
+const otherOptions = document.querySelector("#other-options");
+const choices = document.querySelector("#choices");
 let creation = false;
 
 function showError(message) {
@@ -16,6 +18,7 @@ function showError(message) {
 function setBusy(busy) {
   approveButton.disabled = busy;
   cancelButton.disabled = busy;
+  otherOptions.disabled = busy;
 }
 
 function accountChoice(candidate, checked) {
@@ -51,23 +54,32 @@ async function load() {
   const inspection = reply.pending.inspection;
   creation = reply.pending.kind === "create";
   if (creation) {
+    document.body.classList.add("creation");
     document.title = "Create a passkey";
     document.querySelector("h1").textContent = "Save a passkey";
+    document.querySelector("#passkey-mark").removeAttribute("hidden");
+    document.querySelector("#next-step").hidden = false;
+    const username = document.querySelector("#username");
+    username.textContent = inspection.username || inspection.displayName || "";
+    username.hidden = !username.textContent;
     document.querySelector("legend").textContent = "Where to save it";
+    choices.hidden = true;
+    otherOptions.hidden = inspection.storageChoices.length < 2;
     const notice = document.querySelector("#notice");
     const updateStorageNotice = () => {
       const selected = new FormData(form).get("passkey");
       notice.textContent = selected === "synced"
-        ? "This passkey is saved in iCloud Keychain and syncs to your other devices. Your desktop will ask for a fingerprint."
+        ? "Save this passkey in your iCloud Keychain, available for sign-in on your other devices."
         : selected === "device-bound"
-        ? "This passkey stays on this device. It is not saved to iCloud and cannot be recovered on another device. Your desktop will ask for a fingerprint."
-        : "Choose where to save the passkey. Your desktop will ask for a fingerprint after you choose.";
+        ? "Save this passkey on this device only. It will not sync to iCloud or be available on your other devices."
+        : "Choose where to save this passkey.";
     };
-    approveButton.textContent = "Create passkey";
+    approveButton.textContent = "Continue";
+    const defaultStorage = inspection.storageChoices.includes("synced") ? "synced" : inspection.storageChoices[0];
     inspection.storageChoices.forEach((choice) => {
       accounts.append(accountChoice({ id: choice,
         displayName: choice === "synced" ? "iCloud Keychain" : "This device",
-        username: inspection.username || inspection.displayName || "Passkey" }, inspection.storageChoices.length === 1));
+        username: choice === "synced" ? "Sync across your devices" : "Device-bound passkey" }, choice === defaultStorage));
     });
     form.addEventListener("change", updateStorageNotice);
     updateStorageNotice();
@@ -76,7 +88,7 @@ async function load() {
     document.querySelector("#notice").textContent = "Your desktop will ask for a fingerprint after you choose an account.";
     approveButton.textContent = "Use passkey";
   }
-  site.textContent = inspection.rpId;
+  site.textContent = creation ? `Save a passkey for ${inspection.rpId}?` : inspection.rpId;
   origin.textContent = inspection.origin;
   if (!creation) inspection.candidates.forEach((candidate, index) => {
     accounts.append(accountChoice(candidate, index === 0));
@@ -107,10 +119,23 @@ form.addEventListener("submit", async (event) => {
   setBusy(false);
 });
 
+otherOptions.addEventListener("click", () => {
+  choices.hidden = !choices.hidden;
+  otherOptions.setAttribute("aria-expanded", String(!choices.hidden));
+  otherOptions.textContent = choices.hidden ? "Other Options" : "Hide Options";
+});
+
 cancelButton.addEventListener("click", async () => {
   setBusy(true);
   await chrome.runtime.sendMessage({ type: "deny", requestId });
   window.close();
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !cancelButton.disabled) {
+    event.preventDefault();
+    cancelButton.click();
+  }
 });
 
 chrome.runtime.onMessage.addListener((message) => {

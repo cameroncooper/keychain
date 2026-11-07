@@ -81,6 +81,13 @@ RP success, fresh Chromium authentication and use from a trusted Apple device
 are being checked separately. No extra signing or capture was started by these
 read-only checks, and production creation remains disabled.
 
+The user subsequently confirmed registration and Chromium login worked for this
+fresh credential. This closes the RP creation/login gate for this isolated
+iCloud-write flow. Other-device use remains open. The subsequent save-dialog
+work changes the browser's storage chooser, with iCloud selected by default when
+offered and device-only storage under Other Options; native biometric policy is
+unchanged.
+
 After the manifest correction the browser displayed the storage chooser. Choosing
 iCloud then returned `prompt was not presented`, with no new creation draft. A
 separate display-only request received the expected Visible acknowledgment. The

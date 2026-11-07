@@ -7,9 +7,13 @@ described in [service deployment](../contrib/SEP-SERVICES.md). Reload the unpack
 extension after updating its service worker.
 
 The application window shows the validated RP/origin, account and storage choice.
-Currently it offers **This device** only and explains that the credential is not
-saved to iCloud or recoverable on another device. Choosing it closes this window
-before the OS fingerprint prompt appears. Canceling/closing the application
+It is a Chromium extension popup, separate from the native GPUI fingerprint
+agent. When the broker enables iCloud creation, the compact save summary defaults
+to **iCloud Keychain**, with **This device** under **Other Options**. A device-only
+deployment selects and explains its sole available destination instead. The
+chooser never advertises a destination the broker did not offer. Clicking
+Continue freezes that choice and closes this window before the OS fingerprint
+prompt appears. Canceling/closing the application
 window before choosing storage creates no key. The desktop prompt has guidance and Cancel/Escape, with
 no additional approval button. Website cancellation disconnects the native host
 and broker operation. A restored chooser still routes cancellation through

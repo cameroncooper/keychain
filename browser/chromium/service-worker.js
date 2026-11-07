@@ -69,9 +69,11 @@ async function completeRequest(requestId, kind, result) {
 }
 
 async function openSelection(requestId) {
+  const selection = await pendingRequest(requestId);
   const window = await chrome.windows.create({
     url: `${APPROVAL_PAGE}?requestId=${encodeURIComponent(requestId)}`,
-    type: "popup", width: 440, height: 560, focused: true,
+    type: "popup", width: selection?.kind === "create" ? 480 : 440,
+    height: selection?.kind === "create" ? 500 : 560, focused: true,
   });
   if (canceledRequests.has(requestId) || completedRequests.has(requestId)) {
     await chrome.storage.session.remove(pendingKey(requestId));
