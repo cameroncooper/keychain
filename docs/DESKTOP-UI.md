@@ -95,7 +95,8 @@ and full origin as "Requested origin · browser bridge"; it never calls the ulti
 browser a verified requester. Long values remain inspectable in the scrollable
 content area; Cancel stays outside that area.
 
-The private wire version is 2. Rebuild/install broker, agent and diagnostic tools
+The private wire version is 3. Creation adds a typed storage-selection phase
+before the bound authentication summary. See [native creation](NATIVE-CREATION-PROMPT.md). Rebuild/install broker, agent and diagnostic tools
 together; old or unknown wire versions fail closed without capture. This changes
 neither the credential/cache formats nor the browser native-messaging version.
 There is no compatibility fallback that reconstructs trusted data from prose.
@@ -119,8 +120,9 @@ operations. Never expose an unsupported action just to reproduce a reference ima
 GPUI advertises a modal dialog, but Hyprland on this development machine still
 places it as a tiled toplevel. `contrib/hyprland/keychain.lua` contains an optional
 Hyprland 0.57+ rule, following the [current window-rule syntax](https://wiki.hypr.land/configuring/core/rules/window-rules/),
-for the exact authentication app ID. It makes only that window floating, centered,
-420 × 290 with 16-pixel rounded corners and an opaque background; it grants no trusted-surface identity or authorization. Load
+for the exact authentication app ID. It makes only that window floating and
+centered, with 16-pixel rounded corners and an opaque background. The agent
+chooses 420 × 290 for authentication and 420 × 400 for creation; it grants no trusted-surface identity or authorization. Load
 the module after desktop defaults. On Omarchy, copy it to `~/.config/hypr/keychain.lua`
 and add `require("hypr.keychain")` to `hyprland.lua`, then validate `hyprctl reload`
 and `hyprctl configerrors`. This rule is applied to the development desktop with a
@@ -149,12 +151,14 @@ evidence is not evidence of GPUI-specific behavior.
 The popup uses an original, embedded fine-line fingerprint SVG, a compact header,
 quiet Cancel control, a short heading, and separate broker-supplied operation/account
 text. It does not parse prose to invent a website, claim a verified application
-identity, offer an unsupported password fallback, or display an approval button.
+identity or offer an unsupported password fallback. Authentication has no approval
+button; creation has Continue only during pre-authentication storage selection.
 
 The prompt remains modal to its operation while allowing desktop app switching.
 It deliberately does not set Hyprland `stay_focused` or install a global input grab.
-After the window first becomes active, losing activation sends Cancel and closes
-it. Returning to Keychain never resumes that capture; the requester must start a
+During storage selection, focus changes leave the chooser open and grant no
+authorization. Once the bound authentication summary is acknowledged, losing
+activation sends Cancel and closes it. Returning never resumes that capture; the requester must start a
 new operation. The first Visible acknowledgement now requires both a rendered
 frame and active-window focus. These are presentation checks, not a trusted desktop
 surface or biometric authorization. The broker continues to enforce its own

@@ -1,13 +1,16 @@
 # iCloud passkey creation progress
 
 This implements part of milestone 6 in [the SEP completion plan](../SEP-IMPLEMENTATION.md).
-The browser iCloud choice is connected behind a default-off deployment flag;
-the installed service still offers device-only creation. No Apple record writes
-were proven accepted. One scoped negative save attempt completed biometric unlock
-and local encryption but remains uncertain; its key/journal are retained and an
-independent fetch showed absence. The positive gate remains closed. See
-[live-test evidence](LIVE-ICLOUD-TEST.md). Local preparation and staging do not
-access the network.
+The iCloud choice is connected behind a default-off deployment flag. A scoped
+atomic-precondition rejection and subsequent independent absence check have
+passed. A later Linux-created iCloud credential passed browser registration/login
+and independent cloud fetch/decryption in the isolated deployment. The native
+GPUI storage chooser is now implemented, with live preview acceptance; its full
+browser flow and use of a Linux-created credential on another trusted device
+remain unverified. Production creation stays disabled. Current OS/cancellation
+limits are in [the acceptance record](OS-UPDATE-VALIDATION-20261107.md); detailed
+transaction history is in [live-test evidence](LIVE-ICLOUD-TEST.md). The sections
+below also retain historical implementation checkpoints and their original gates.
 
 `passkey::encode_sync_item` prepares a synchronizable P-256 software-key plist
 from a trusted caller's credential and X9.63 private representation. It preserves

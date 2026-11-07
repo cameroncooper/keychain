@@ -120,6 +120,36 @@ RFC 6238 tests exercise the wrapped production paths.
 
 ## Remaining implementation and acceptance work
 
+### Source and constrained-service follow-up — 2026-11-07
+
+Rechecked the selected-scalar path against current source: validation and signing
+in `broker/protected.rs`, public derivation in
+`broker/registry/synced_registration.rs`, envelope encryption in
+`security/sep/envelope.rs`, and preparation/verification in `apple/ckks/upload.rs`
+and `apple/ckks/write.rs`. Reviewed login MAC/borrowed parsing/protected reply
+serialization and the TOTP computation entry points as well.
+
+The envelope installs protected memory before copying plaintext and returns only
+ciphertext. The CKKS template uses a zero placeholder; verification clears the
+private range before the owned plist parser runs. The reviewed computation
+closures return public results, ciphertext or explicitly revealed output, with
+private inputs borrowed from protected owners. Account root/class-key heap
+owners and original software recovery copies retain the limits above. This
+source review found no additional unprotected selected-scalar copy on these
+paths; it does not prove arbitrary compiler/register/heap erasure.
+
+The complete synthetic selected-creation/upload/signature fixture also passed
+under systemd with `LimitMEMLOCK=1M`, an empty capability set, `PrivateDevices`,
+`ProtectHome`, `ProtectSystem=strict`, `NoNewPrivileges`, and AF_UNIX only.
+Removing capabilities prevents CAP_IPC_LOCK from bypassing the test's budget.
+All 23 reviewed privileged fixtures passed separately without SEP/Apple access.
+The real signing and decrypt primitives passed on the new OS, but the cancellation
+check did not establish clean completion. See
+[current OS acceptance evidence](OS-UPDATE-VALIDATION-20261107.md).
+
+The list below records the original acceptance work; the dated evidence above
+and linked live records determine which parts are now established.
+
 1. Validate the protected worker paths on hardware, including the installed
    service resource policy. Keep the narrower mapping/stack claims above;
    successful tests do not establish universal compiler/register erasure.

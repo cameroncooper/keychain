@@ -1,16 +1,20 @@
 # Syncable creation: broker operation and network boundary
 
 The broker connects browser creation to the isolated network worker and the
-selected-secret coordinator. This path is disabled by default and remains disabled
-on the development machine. No Apple write or biometric capture was performed
-to validate this wiring.
+selected-secret coordinator. Production creation remains disabled. An isolated
+Linux-created iCloud credential has passed browser registration/login and
+independent cloud fetch/decryption; other-device acceptance remains open. See
+[the live record](LIVE-ICLOUD-TEST.md) and
+[current OS verification](OS-UPDATE-VALIDATION-20261107.md).
 
-`Broker::create_synced_registration` checks the configured owner, exact frozen
-request and explicit decrypt/creation deployment flags, serializes the operation and validates
-the active local session. It fetches the initial hierarchy before presenting
-the desktop prompt or holding a scalar. Exclusion disclosure shares the native
-registration path's verified-presence policy. The registry durably stages the
-key before a selected biometric decrypt begins.
+For normal browser creation, the native GPUI window obtains the storage choice
+from the broker's allowed destinations. Continue freezes it; the broker requires
+the bound summary to be drawn and focused before proceeding. The existing
+root-only administrator seam instead uses its separately reviewed fixed scope.
+Both paths fetch the initial hierarchy before holding a selected scalar or
+starting biometric capture. Exclusion disclosure shares the native registration
+path's verified-presence policy. The registry durably stages the key before a
+selected biometric decrypt begins.
 
 The existing protected-signing path and creation now share one selected-scalar
 lifetime. The driver result and exact item binding are checked before creating
@@ -95,15 +99,15 @@ the same PID. Direct AppleUploadIo inside the privileged broker remains prohibit
 its installed AF_UNIX-only restrictions are retained. No broker child is launched
 with the selected scalar live.
 
-The browser offers iCloud only when both `--allow-item-decrypt` and
+The broker offers iCloud only when both `--allow-item-decrypt` and
 `--allow-synced-creation` are configured and a valid root account is enrolled.
 Missing enrollment hides the choice; corrupt/incomplete enrollment fails closed.
-When both storage locations are offered, the application chooser requires an
-explicit choice before the OS fingerprint prompt. It freezes the choice and
-transaction before starting creation and never falls back from iCloud to this
-device on failure. The native host accepts only the two known storage values; it
-cannot supply roots, snapshots or upload receipts. Production units/installers do
-not enable the new write flag.
+The native chooser defaults to iCloud when available and exposes device-only
+storage under Other Options. It freezes the selection before the same window
+transitions to biometric guidance. A failed iCloud operation never falls back to
+device storage. The native host rejects browser-supplied storage; it cannot supply
+roots, snapshots or upload receipts. Production units/installers do not enable
+the write flag. See [native selection](NATIVE-CREATION-PROMPT.md).
 
 UploadIo requires the current operation check on every fetch/save. The coordinator
 passes preflight checks before capture and NativeAuthorization checks throughout

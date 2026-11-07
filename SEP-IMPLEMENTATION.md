@@ -1,54 +1,40 @@
 # SEP integration: design and completion plan
 
-Status: agreed design, 2026-11-05; application integration in progress.
+Status: implementation and acceptance in progress, updated 2026-11-07.
 
-Latest account preflight (2026-11-06): an isolated dedicated-UID worker accepted
-the encrypted real-profile candidate. Root-side `check-account` fetched all 16
-Passwords records, authenticated one zone TLK with the existing enrolled peer
-identity and resolved the current class-A key. The temporary broker registry was
-removed and the worker stopped. Production credentials remain unpublished and
-the iCloud write flag remains off. This closes the read-only candidate/token and
-share/hierarchy-fetch gate; scoped atomic-save, biometric creation and
-other-device acceptance gates remain open. Details are in
-[broker account bootstrap](docs/BROKER-ACCOUNT-BOOTSTRAP.md).
+The native signing/decryption provider, protected software signing, migration,
+selected login/TOTP reveal, native credential creation and iCloud upload path are
+implemented. Isolated testing has established native and migrated-synced Chromium
+login, a scoped atomic-precondition rejection, and Linux-created iCloud passkey
+registration/login with independent cloud fetch/decrypt verification. Those
+successes do not establish other-device use or every hardware cancellation path.
 
-The [disposable iCloud test](docs/LIVE-ICLOUD-TEST.md) is now prepared with a fixed
-new UUID and a private live pointer/absence review. The isolated administrator
-harness has passed offline controls and non-capturing inspection; its sealed SEP
-item recipient is provisioned. After scope approval and fresh readiness, one
-negative attempt completed biometric unlock/local key staging and encryption but
-returned an uncertain save result. The journal/key/ciphertext are retained; an
-independent authenticated fetch showed the UUID absent and pointer unchanged.
-There is no definite rejection or accepted-save/registration proof, so the positive
-gate stays shut. Additional negative retry approval/readiness is separate; the
-updated diagnostic preserves errors/replies and cannot automatically resend.
+Storage selection now lives in the native GPUI window, following the user's later
+UI decision: iCloud is the default when the broker offers it, Other Options
+exposes device-only storage, and Continue binds the destination before the same
+window presents biometric guidance. The extension cannot submit storage. Selection
+tolerates focus changes; the bound authorization state cancels on focus loss.
+The user confirmed the native preview/transition; the new native-choice browser
+registration/login gate remains open. See [native prompt design](docs/NATIVE-CREATION-PROMPT.md).
 
-One separately approved retry captured Apple's explicit atomic/oplock failure
-codes with NONE operation headers. The parser now supports that failure-only
-shape while retaining exact UUID/status/payload checks. Its request/reply capture
-also preserves both request operation IDs before sending for future offline
-validation. The two existing attempts and their sealed key are retained; the
-second reply alone cannot reconstruct its missing expected compare-operation ID,
-so no rejection checkpoint is invented and the positive gate remains closed.
+On kernel `7.2.11-15-1-ARCH`, existing saved-key signing and synthetic decryption
+passed, along with a read-only 18-record Apple preflight. The Escape check returned
+uncertain EIO while sensor initialization timed out. Its attribution is unresolved:
+UI cancellation is recorded, but CANCEL syscall/cleanup timing is not. See
+[the investigation handoff](docs/SEP-CANCELLATION-HANDOFF.md) and
+[current acceptance record](docs/OS-UPDATE-VALIDATION-20261107.md).
 
-Fresh transaction `b2c70bee-8f52-4b7f-9796-4d77d4c2a520` subsequently passed the
-live negative gate after explicit approval/readiness: exact request/reply IDs,
-definite atomic/oplock failure, Rejected journal, complete authenticated absence
-and unchanged pointer. Its positive operation failed before sending: first match/
-authorization refusal, then uncertain SEP completion on a separately requested
-retry. The kernel reported sensor session/sequence-counter initialization failure
-and that the sensor did not come back online. All keys/requests/evidence are
-retained; driver recovery, actual positive save and real RP/other-device use remain
-open. ABI/capability GET_INFO success does not close the sensor-health gate.
+The protected computation source review and constrained 1-MiB/no-capabilities
+synthetic service check passed; broader memory-erasure claims remain excluded.
+The complete objective is not achieved. Clean cancellation/post-cancel reuse,
+remaining live lock/expiry/resume and migrated persistence checks, native-choice
+browser acceptance and use of a Linux-created credential on another Apple device
+still need evidence. Production creation stays disabled, and all existing
+credentials, prior uncertain attempts and recovery copies are retained. Root
+wrapping remains the separately requested follow-up, not a signing prerequisite.
 
-The user then reported successful verification after the driver's existing sensor
-re-registration/bring-up sequence restored it. No application key or state was
-replaced. App diagnostics now log only the numeric errno on uncertain driver
-errors; EACCES wording covers both match and authorization refusal. A separate
-Chromium profile and root test socket are prepared for a fresh ordinary one-touch
-iCloud registration, using the completed negative gate rather than repeating it.
-Main-profile creation remains disabled and live positive/other-device proof is
-still pending.
+Earlier transaction history and exact live evidence remain in
+[the disposable iCloud test record](docs/LIVE-ICLOUD-TEST.md).
 
 This is the application design and implementation order. The current
 [SEP handoff](SEP-INTEGRATION.md), [driver API](docs/sep-driver/README.md),
@@ -73,8 +59,9 @@ user handle and backup provenance when their local protection changes. A
 non-exportable SEP key cannot be uploaded using this API. Changing device-only
 to synced needs a supported replacement/registration flow, not a metadata toggle.
 
-Both creation options are product goals. Device-only WebAuthn registration is
-connected; iCloud creation and Apple CKKS uploads remain incomplete. Uploads require
+Both creation options are implemented. Device-only and isolated iCloud WebAuthn
+registration have passed; other-device acceptance and remaining live gates are
+still incomplete. Uploads require
 explicit account-write authorization before live tests. Diagnostic native key
 creation is not completed passkey registration.
 
@@ -108,8 +95,8 @@ Touch the fingerprint reader
 Cancel
 ```
 
-The session agent owns authentication UI; the browser/application owns account
-selection. Cancel/Escape dismisses and cancels. Display progress, mismatch and
+The session agent owns authentication UI and the pre-authentication storage
+choice. The browser/application still owns multi-account credential selection. Cancel/Escape dismisses and cancels. Display progress, mismatch and
 terminal errors. Offer password fallback only when policy and implementation
 actually support it. A new request after terminal failure needs an explicit
 retry; capture guidance within the existing request is not a hidden retry.
@@ -135,7 +122,7 @@ CLI / browser extension and native host
         | bounded local operation request
         v
 privileged broker <----> user-session prompt agent
-        |               display / guidance / cancel
+        |               storage choice / display / guidance / cancel
         v
 safe Rust driver client -> isolated ioctl bindings -> /dev/sep-bio -> SEP
 ```
@@ -265,7 +252,8 @@ hardware behavior.
 Implement restricted IPC, owner/session mapping, policy checks, device handoff,
 activation packaging and request state machine. Add the session UI with automatic
 capture/dismissal, actual guidance, Cancel/Escape and accessible statuses. Route
-unprivileged CLI diagnostics through it. Keep credential selection outside it.
+unprivileged CLI diagnostics through it. Native storage selection precedes the
+authorization phase; multi-account credential selection remains in the application.
 
 Acceptance: initiate in an app, touch once, complete with no confirmation click.
 Wrong owner/session, spoofed UI success, modified requests, disconnect, agent exit,
@@ -328,7 +316,10 @@ iCloud credential that another trusted device fetches and uses successfully.
 Verify sync preserves both kinds and interrupted registration/upload reconciles
 without silently changing key identity. Live Apple writes need explicit scope.
 
-## Current evidence and remaining work
+## Historical implementation and acceptance notes
+
+These notes retain earlier milestones and limitations. The dated status above
+and linked acceptance records are authoritative for current completion.
 
 Implemented in this worktree: shared backend factory, RootKeySource seam, typed
 authorization/protection capabilities, removal of caller-supplied UV boolean,

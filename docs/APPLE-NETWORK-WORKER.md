@@ -2,9 +2,11 @@
 
 `src/apple/worker.rs` implements the socket protocol and broker-side `UploadIo`.
 The separate worker executable/service and minimal credential export now exist;
-the broker account enrollment path exists but its browser path is not enabled.
-The broker keeps its AF_UNIX-only service restriction. No Apple write or biometric
-capture was used to validate this transport.
+the broker account enrollment path is connected behind a default-off creation
+policy. The broker keeps its AF_UNIX-only service restriction. The initial
+transport tests used synthetic data without Apple/SEP IO; subsequent isolated
+account fetch and browser creation results are recorded in
+[LIVE-ICLOUD-TEST.md](LIVE-ICLOUD-TEST.md). Current production creation remains off.
 
 The broker constructs CloudKit requests and validates the replies. A worker
 performs HTTP using its authenticated account context. The worker channel carries
