@@ -12,13 +12,7 @@
         <h1>Use a passkey?</h1>
         <button type="button" class="secondary" id="cancel">Cancel</button>
       </header>
-      <svg class="passkey-mark" id="passkey-mark" hidden aria-hidden="true" viewBox="0 0 64 64">
-        <defs><linearGradient id="key-background" x2="0" y2="1"><stop stop-color="#a9a9af"/><stop offset="1" stop-color="#85858c"/></linearGradient></defs>
-        <rect width="64" height="64" rx="15" fill="url(#key-background)"/>
-        <path fill="white" fill-rule="evenodd" d="M32 10a12 12 0 0 0-4 23.32V50l4 4 6-6-4-4 4-4-3-3v-3.38A12 12 0 0 0 32 10Zm0 6a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7Z"/>
-      </svg>
       <p class="site" id="site">Loading request…</p>
-      <p class="username" id="username" hidden></p>
       <p class="origin" id="origin"></p>
 
       <form id="approval-form" hidden>
@@ -30,13 +24,10 @@
           This confirms your presence, but the current software backend cannot claim device user
           verification. Requests that require verification are refused.
         </p>
-        <button type="button" class="text-button" id="other-options" hidden
-          aria-expanded="false" aria-controls="choices">Other Options</button>
         <p class="error" id="error" role="alert"></p>
         <div class="actions">
           <button type="submit" class="primary" id="approve">Continue</button>
         </div>
-        <p class="next-step" id="next-step" hidden>Your desktop will ask for a fingerprint next.</p>
       </form>
     </main>
     <script src="approval.js"></script>

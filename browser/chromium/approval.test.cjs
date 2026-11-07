@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 
 // Minimal document fixture; real Chromium rendering is checked separately.
-async function fixture(storageChoices, kind = "create") {
+async function fixture() {
   const inputs = [];
   class Element {
     constructor(tag) {
@@ -43,8 +43,8 @@ async function fixture(storageChoices, kind = "create") {
       onMessage: { addListener() {} },
       async sendMessage(message) {
         messages.push(message);
-        if (message.type === "getPending") return { ok: true, pending: { kind, inspection: {
-          storageChoices, rpId: "example.com", origin: "https://example.com",
+        if (message.type === "getPending") return { ok: true, pending: { kind: "get", inspection: {
+          rpId: "example.com", origin: "https://example.com",
           username: "alice", biometric: true, candidates: [{ id: "credential-1", username: "alice" }],
         } } };
         return { ok: true };
@@ -57,39 +57,8 @@ async function fixture(storageChoices, kind = "create") {
     submit: () => nodes.get("#approval-form").listeners.submit({ preventDefault() {} }) };
 }
 
-test("iCloud is selected regardless of provider ordering, without starting creation", async () => {
-  const f = await fixture(["device-bound", "synced"]);
-  assert.equal(f.inputs.find((input) => input.checked).value, "synced");
-  assert.equal(f.nodes.get("#choices").hidden, true);
-  assert.equal(f.nodes.get("#other-options").hidden, false);
-  assert.deepEqual(f.messages.map((message) => message.type), ["getPending"]);
-  await f.submit();
-  assert.equal(f.messages.at(-1).storage, "synced");
-  assert.equal(f.messages.at(-1).requestId, 42);
-});
-
-test("Other Options changes the submitted destination and its explanation", async () => {
-  const f = await fixture(["synced", "device-bound"]);
-  f.nodes.get("#other-options").click();
-  assert.equal(f.nodes.get("#choices").hidden, false);
-  assert.equal(f.nodes.get("#other-options").attributes["aria-expanded"], "true");
-  f.inputs.find((input) => input.value === "device-bound").checked = true;
-  f.nodes.get("#approval-form").listeners.change();
-  assert.match(f.nodes.get("#notice").textContent, /this device only/);
-  await f.submit();
-  assert.equal(f.messages.at(-1).storage, "device-bound");
-});
-
-test("a device-only provider never defaults to unavailable iCloud storage", async () => {
-  const f = await fixture(["device-bound"]);
-  assert.equal(f.nodes.get("#other-options").hidden, true);
-  assert.match(f.nodes.get("#notice").textContent, /this device only/);
-  await f.submit();
-  assert.equal(f.messages.at(-1).storage, "device-bound");
-});
-
 test("Escape denies the request without sending a create action", async () => {
-  const f = await fixture(["synced", "device-bound"]);
+  const f = await fixture();
   f.document.keydown({ key: "Escape", preventDefault() {} });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(f.messages.at(-1).type, "deny");
@@ -98,7 +67,7 @@ test("Escape denies the request without sending a create action", async () => {
 });
 
 test("the account chooser still submits an assertion selection", async () => {
-  const f = await fixture([], "get");
+  const f = await fixture();
   await f.submit();
   assert.equal(f.messages.at(-1).type, "approve");
   assert.equal(f.messages.at(-1).passkeyId, "credential-1");

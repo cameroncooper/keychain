@@ -2,6 +2,77 @@ use super::*;
 use crate::security::sep::{ProviderError, StoredSepKey};
 
 impl Broker {
+    pub(super) fn native_creation_authorization(
+        &self,
+        id: Uuid,
+        context: &crate::passkey::registration::CreationContext,
+        canceled: Arc<AtomicBool>,
+        session: ActiveSession,
+    ) -> Result<(crate::model::PasskeyProvenance, Arc<NativeAuthorization>)> {
+        use crate::model::PasskeyProvenance as P;
+        use crate::prompt::PromptStorage as S;
+        let allowed = self.creation_storage_choices()?;
+        let default = if allowed.contains(&P::Synced) {
+            P::Synced
+        } else {
+            P::DeviceBound
+        };
+        let choices = allowed
+            .iter()
+            .map(|choice| match choice {
+                P::Synced => S::ICloudSynced,
+                P::DeviceBound => S::DeviceOnly,
+            })
+            .collect();
+        let request = Presentation::passkey(
+            id,
+            PromptOperation::CreatePasskey,
+            context.rp_id(),
+            Some(context.origin()),
+            context.username(),
+            default,
+        );
+        let path = PathBuf::from(format!("/run/user/{}/keychain-auth.sock", self.owner));
+        let check = || {
+            if canceled.load(Ordering::Acquire) || !session.valid() {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "creation request canceled or desktop session invalid",
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        let (storage, prompt) = PromptSession::choose_creation(
+            &path, self.owner, request, choices, &check,
+        )
+        .map_err(|e| match e.kind() {
+            std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::BrokenPipe => ProviderError::Canceled.into(),
+            std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => {
+                ProviderError::Expired.into()
+            }
+            _ => Error::io(&path, e),
+        })?;
+        let storage = match storage {
+            S::ICloudSynced => P::Synced,
+            S::DeviceOnly => P::DeviceBound,
+            _ => return Err(ProviderError::UnsupportedPolicy.into()),
+        };
+        Ok((
+            storage,
+            Arc::new(NativeAuthorization {
+                prompt: Mutex::new(prompt),
+                canceled,
+                session,
+                cancellation_test: false,
+                deadline: Instant::now() + Duration::from_secs(60),
+            }),
+        ))
+    }
+
     pub(super) fn native_authorization(
         &self,
         presentation: Presentation,

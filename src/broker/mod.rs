@@ -75,7 +75,6 @@ pub enum Operation {
     },
     Create {
         transaction: Uuid,
-        storage: crate::model::PasskeyProvenance,
         request_details_json: String,
     },
     ItemRecipient,

@@ -42,41 +42,33 @@ impl Broker {
             }
             Operation::Create {
                 transaction,
-                storage,
                 request_details_json,
             } => {
-                // The application selection is explicit. No cloud-to-local
-                // fallback, user-provided account snapshot or upload receipt.
+                if transaction.get_version_num() != 4 {
+                    return Err(Error::InvalidData(
+                        "creation transaction must be UUID v4".into(),
+                    ));
+                }
+                let context = CreationContext::parse(&request_details_json)?;
+                let (storage, authorization) =
+                    self.native_creation_authorization(id, &context, canceled, session)?;
+                // Only the native selection can choose storage. The selected
+                // scope is locked before any key preparation or SEP capture.
                 if storage == PasskeyProvenance::Synced {
                     let registration = self.create_synced_with_worker(
                         transaction,
                         request_details_json,
-                        canceled,
-                        session,
+                        authorization,
                     )?;
                     return Ok(
                         serde_json::json!({"responseJson":serde_json::to_string(&registration)?, "recordId":transaction.to_string()}),
                     );
                 }
-                let context = CreationContext::parse(&request_details_json)?;
                 let excluded = self
                     .registry
                     .browser_credentials(self.owner)?
                     .into_iter()
                     .find(|credential| context.excludes(credential));
-                let authorization = self.native_authorization(
-                    Presentation::passkey(
-                        id,
-                        PromptOperation::CreatePasskey,
-                        context.rp_id(),
-                        Some(context.origin()),
-                        context.username(),
-                        PasskeyProvenance::DeviceBound,
-                    ),
-                    canceled,
-                    session,
-                    false,
-                )?;
                 authorization.check()?;
                 if let Some(excluded) = excluded {
                     // Disclose exclusion only after verified presence; share the

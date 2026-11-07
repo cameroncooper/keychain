@@ -1,5 +1,37 @@
 # Disposable iCloud creation acceptance test
 
+## Native creation chooser rollout
+
+The storage chooser now lives in the unprivileged GPUI agent. Chromium forwards
+the frozen request without a storage field; the root broker supplies allowed
+destinations, validates the selection, and requires a second acknowledgment of
+the drawn, focused bound summary before proceeding. The same window transitions
+from the Apple-inspired save summary to fingerprint guidance. Private prompt
+protocol 3 rejects earlier versions, replayed selections and unavailable choices.
+
+The root broker and agent were updated together, with prior artifacts retained
+under `/var/lib/keychain-service-backups/update.mi6g06_y`. All release binaries
+were rebuilt serially. There are 234 passing library tests, 26 ignored privileged
+tests, 11 passing browser tests, and passing strict Clippy across all targets with
+the desktop-agent feature. The native popup was verified as floating at 420×400;
+the compositor no longer overrides operation-specific sizes.
+
+The first interactive preview exposed focus-follows-mouse canceling selection
+while the pointer crossed another window. Selection now tolerates focus changes,
+because it grants no authorization. A display-only live check verified selection
+survives focus loss while the bound authorization state still cancels immediately.
+Neither check opened SEP or contacted Apple. The user then confirmed Other
+Options, selection and the same-window transition worked. The preview returned
+an iCloud selection and a second Visible acknowledgment; no credential was created.
+
+The isolated network worker and browser broker were restarted with their existing
+state and thirty-minute idle limits. Chromium was opened with the updated unpacked
+extension and existing isolated profile. The real native-choice registration/login
+test for `keychain-icloud-20261106-5` is pending. Production iCloud creation stays
+disabled, and all earlier drafts/credentials are retained. See
+[the native prompt design](NATIVE-CREATION-PROMPT.md) for the state machine and
+trust boundaries.
+
 ## Fresh registration proposal after the parser fix
 
 The user approved this transaction and readiness for its two fingerprint steps:

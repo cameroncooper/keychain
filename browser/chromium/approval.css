@@ -24,9 +24,7 @@ main { padding: 0 24px 18px; }
   border-bottom: 1px solid var(--line);
 }
 h1 { margin: 0; font-size: 18px; font-weight: 650; }
-.passkey-mark { display: block; width: 56px; height: 56px; margin: 0 auto 16px; }
 .site { margin: 0; font-size: 19px; font-weight: 650; overflow-wrap: anywhere; }
-.username { margin: 8px 0 0; font-size: 14px; overflow-wrap: anywhere; unicode-bidi: plaintext; }
 .origin { margin: 6px 0 20px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 fieldset { margin: 0; padding: 0; border: 0; min-width: 0; }
 legend { margin-bottom: 8px; font-size: 12px; font-weight: 600; color: var(--muted); }
@@ -62,18 +60,6 @@ button:focus-visible, input:focus-visible { outline: 2px solid var(--blue); outl
 button:disabled { cursor: wait; opacity: 0.6; }
 .primary { min-width: 140px; border-color: var(--blue); background: var(--blue); color: white; }
 .secondary { background: var(--tile); color: inherit; }
-.text-button { display: block; margin: 12px auto 0; padding: 3px 8px; background: none; border: 0; color: var(--blue); }
-.next-step { margin: 10px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
-.creation { text-align: center; }
-.creation .dialog-header { text-align: left; }
-.creation .site { font-size: 17px; line-height: 1.4; }
-.creation #approval-form { display: flex; flex-direction: column; }
-.creation .notice { order: 0; margin: 0; color: inherit; }
-.creation #other-options { order: 1; }
-.creation #choices { order: 2; margin-top: 16px; }
-.creation .error { order: 3; }
-.creation .actions { order: 4; justify-content: center; }
-.creation .next-step { order: 5; }
 
 @media (prefers-color-scheme: dark) {
   :root { background: #29292d; color: #f4f4f6; --muted: #b0b0b8; --line: #45454d; --tile: #39393f; --blue: #5ba0ff; }

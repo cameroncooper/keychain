@@ -131,9 +131,9 @@ async function main() {
   }
   if (mode === "--create-and-assert") {
     assert.equal(state.registration, undefined, "fixture already created; use --assert");
-    console.log("CREATE: touch the reader when the desktop prompt asks");
+    console.log("CREATE: choose This device in the native window, then touch when asked");
     const result = await native({ action: "create", transaction: state.transaction,
-      storage: "device-bound", requestDetailsJson: state.details });
+      requestDetailsJson: state.details });
     assert.equal(result.kind, "registration");
     state.registration = JSON.parse(result.responseJson); save(state);
   }

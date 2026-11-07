@@ -162,7 +162,8 @@ There are deliberate initial limits:
 - iCloud-syncable creation and Apple uploads are wired behind a default-off deployment flag.
   Browser registration/login and independent Apple write/fetch verification passed in an isolated
   test deployment; other-device validation remains open before enabling that choice by default.
-  When enabled, the save dialog defaults to iCloud Keychain, with device storage under **Other Options**.
+  The native GPUI save dialog defaults to iCloud Keychain when enabled, with device storage under
+  **Other Options**. The extension forwards requests; storage selection stays in the native dialog.
   The browser never silently substitutes device storage for an iCloud save.
 - Cross-origin iframe requests and unsupported extensions are refused. Creation supports
   `credProps`; the Chromium caller-origin override is always required.

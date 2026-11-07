@@ -69,11 +69,9 @@ async function completeRequest(requestId, kind, result) {
 }
 
 async function openSelection(requestId) {
-  const selection = await pendingRequest(requestId);
   const window = await chrome.windows.create({
     url: `${APPROVAL_PAGE}?requestId=${encodeURIComponent(requestId)}`,
-    type: "popup", width: selection?.kind === "create" ? 480 : 440,
-    height: selection?.kind === "create" ? 500 : 560, focused: true,
+    type: "popup", width: 440, height: 560, focused: true,
   });
   if (canceledRequests.has(requestId) || completedRequests.has(requestId)) {
     await chrome.storage.session.remove(pendingKey(requestId));
@@ -263,62 +261,23 @@ async function denyRequest(requestId) {
 
 async function handleCreate(request) {
   const requestId = request.requestId;
+  if (processingRequests.has(requestId) || completedRequests.has(requestId)) return;
+  processingRequests.add(requestId);
   canceledRequests.delete(requestId);
-  completedRequests.delete(requestId);
   requestKinds.set(requestId, "create");
   try {
-    const reply = await callNative({ version: 1, action: "inspectCreation",
-      requestDetailsJson: request.requestDetailsJson }, requestId);
-    if (!reply.ok) {
-      await completeRequest(requestId, "create", { error: reply.error || domError("UnknownError", "Registration is unavailable") });
-      return;
-    }
-    const inspection = reply.result;
-    if (inspection?.kind !== "creationInspection" || !Array.isArray(inspection.storageChoices) ||
-        inspection.storageChoices.length === 0 || new Set(inspection.storageChoices).size !== inspection.storageChoices.length ||
-        inspection.storageChoices.some((choice) => !["device-bound", "synced"].includes(choice))) {
-      throw new Error("The native host returned invalid registration storage choices");
-    }
-    if (canceledRequests.has(requestId)) return;
-    await chrome.storage.session.set({ [pendingKey(requestId)]: {
-      kind: "create", requestId, requestDetailsJson: request.requestDetailsJson,
-      transaction: crypto.randomUUID(), inspection,
-    } });
-    await openSelection(requestId);
-  } catch (error) {
-    await chrome.storage.session.remove(pendingKey(requestId));
-    await completeRequest(requestId, "create", { error: domError("UnknownError", String(error)) });
-  }
-}
-
-async function createRequest(requestId, storage) {
-  if (processingRequests.has(requestId)) return { ok: false, message: "This request is already being processed" };
-  processingRequests.add(requestId);
-  try {
-    const pending = await pendingRequest(requestId);
-    if (!pending || pending.kind !== "create") return { ok: false, message: "This creation request is no longer active" };
-    if (!pending.inspection.storageChoices.includes(storage)) {
-      return { ok: false, message: "Choose an available storage location" };
-    }
-    // Freeze and consume the application selection before presenting the OS
-    // prompt. A replay cannot create another key or reuse biometric approval.
-    await chrome.storage.session.remove(pendingKey(requestId));
-    await closeSelection(requestId);
-    const reply = await callNative({ version: 1, action: "create", transaction: pending.transaction,
-      storage, requestDetailsJson: pending.requestDetailsJson }, requestId);
+    const reply = await callNative({ version: 1, action: "create",
+      transaction: crypto.randomUUID(), requestDetailsJson: request.requestDetailsJson }, requestId);
     if (!reply.ok) {
       await completeRequest(requestId, "create", { error: reply.error || domError("UnknownError", "Registration failed") });
-      return { ok: false, message: reply.error?.message || "Registration failed" };
+      return;
     }
     if (reply.result?.kind !== "registration" || typeof reply.result.responseJson !== "string") {
       throw new Error("The native host returned an invalid registration");
     }
-    if (canceledRequests.has(requestId)) return { ok: false, message: "The website canceled this request" };
     await completeRequest(requestId, "create", { responseJson: reply.result.responseJson });
-    return { ok: true };
   } catch (error) {
     await completeRequest(requestId, "create", { error: domError("UnknownError", String(error)) });
-    return { ok: false, message: String(error) };
   } finally {
     processingRequests.delete(requestId);
   }
@@ -404,10 +363,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   if (message.type === "approve") {
     void approveRequest(requestId, message.passkeyId).then(sendResponse);
-    return true;
-  }
-  if (message.type === "create") {
-    void createRequest(requestId, message.storage).then(sendResponse);
     return true;
   }
   if (message.type === "deny") {

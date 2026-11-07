@@ -1,5 +1,5 @@
 //! Root-operation / unprivileged-session presentation protocol.
-//! The agent can acknowledge display or cancel; it can never grant authorization.
+//! The agent reports selection, display or cancellation; it never grants biometric authorization.
 use std::io::{self, Read, Write};
 use std::net::Shutdown;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
@@ -19,7 +19,7 @@ pub mod activation;
 const MAX_FRAME: usize = 8192;
 
 /// Private broker/agent protocol. Upgrade both artifacts together; no v1 fallback.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -218,15 +218,29 @@ impl Presentation {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum DisplayEvent {
-    Present { version: u32, request: Presentation },
-    Status { id: Uuid, message: String },
-    Finished { id: Uuid },
+    Present {
+        version: u32,
+        request: Presentation,
+    },
+    ChooseCreation {
+        version: u32,
+        request: Presentation,
+        choices: Vec<PromptStorage>,
+    },
+    Status {
+        id: Uuid,
+        message: String,
+    },
+    Finished {
+        id: Uuid,
+    },
 }
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum AgentEvent {
     Visible { id: Uuid },
     Cancel { id: Uuid },
+    Selected { id: Uuid, storage: PromptStorage },
 }
 
 pub fn write_frame<T: Serialize>(stream: &mut UnixStream, value: &T) -> io::Result<()> {
@@ -262,6 +276,76 @@ pub fn read_presentation(stream: &mut UnixStream) -> io::Result<Presentation> {
     Ok(request)
 }
 
+/// Validate the broker's selection scope before presenting any controls.
+pub fn validate_creation_choices(
+    request: &Presentation,
+    choices: &[PromptStorage],
+) -> io::Result<()> {
+    request.validate()?;
+    if request.operation != PromptOperation::CreatePasskey
+        || choices.is_empty()
+        || choices.len() > 2
+        || !request
+            .storage
+            .is_some_and(|storage| choices.contains(&storage))
+        || choices.iter().any(|storage| {
+            !matches!(
+                storage,
+                PromptStorage::ICloudSynced | PromptStorage::DeviceOnly
+            )
+        })
+        || (choices.len() == 2 && choices[0] == choices[1])
+    {
+        return Err(io::Error::other("invalid creation selection scope"));
+    }
+    Ok(())
+}
+
+pub fn read_initial_presentation(
+    stream: &mut UnixStream,
+) -> io::Result<(Presentation, Option<Vec<PromptStorage>>)> {
+    match read_frame(stream)? {
+        DisplayEvent::Present {
+            version: VERSION,
+            request,
+        } => {
+            request.validate()?;
+            Ok((request, None))
+        }
+        DisplayEvent::ChooseCreation {
+            version: VERSION,
+            request,
+            choices,
+        } => {
+            validate_creation_choices(&request, &choices)?;
+            Ok((request, Some(choices)))
+        }
+        _ => Err(io::Error::other("unsupported prompt protocol or message")),
+    }
+}
+
+fn connect_agent(path: &Path, owner: u32) -> io::Result<UnixStream> {
+    if keychain_sep_driver::peer::effective_uid() != 0 {
+        return Err(io::Error::other(
+            "prompt caller must be the privileged operation service",
+        ));
+    }
+    let meta = std::fs::symlink_metadata(path)?;
+    if !meta.file_type().is_socket()
+        || meta.uid() != owner
+        || meta.permissions().mode() & 0o077 != 0
+    {
+        return Err(io::Error::other(
+            "prompt socket must be private and owned by the selected user",
+        ));
+    }
+    let stream = UnixStream::connect(path)?;
+    if keychain_sep_driver::peer::credentials(&stream)?.uid != owner {
+        return Err(io::Error::other("wrong prompt-agent owner"));
+    }
+    Ok(stream)
+}
+
 pub struct PromptSession {
     stream: UnixStream,
     id: Uuid,
@@ -273,25 +357,8 @@ impl PromptSession {
     /// The trusted caller supplies the owner derived from authenticated session
     /// state. Diagnostic callers may supply it explicitly; production clients may not.
     pub fn connect(path: &Path, owner: u32, request: Presentation) -> io::Result<Self> {
-        if keychain_sep_driver::peer::effective_uid() != 0 {
-            return Err(io::Error::other(
-                "prompt caller must be the privileged operation service",
-            ));
-        }
         request.validate()?;
-        let meta = std::fs::symlink_metadata(path)?;
-        if !meta.file_type().is_socket()
-            || meta.uid() != owner
-            || meta.permissions().mode() & 0o077 != 0
-        {
-            return Err(io::Error::other(
-                "prompt socket must be private and owned by the selected user",
-            ));
-        }
-        let mut stream = UnixStream::connect(path)?;
-        if keychain_sep_driver::peer::credentials(&stream)?.uid != owner {
-            return Err(io::Error::other("wrong prompt-agent owner"));
-        }
+        let mut stream = connect_agent(path, owner)?;
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(1)))?;
         let id = request.id;
@@ -309,6 +376,112 @@ impl PromptSession {
                 return Err(io::Error::other("prompt was not presented"));
             }
         }
+        Self::from_visible(stream, id)
+    }
+
+    /// Selection is not authorization. Only a choice from this root-supplied
+    /// list can be bound; no SEP operation starts until the bound summary is drawn.
+    pub fn choose_creation(
+        path: &Path,
+        owner: u32,
+        request: Presentation,
+        choices: Vec<PromptStorage>,
+        check: &dyn Fn() -> io::Result<()>,
+    ) -> io::Result<(PromptStorage, Self)> {
+        validate_creation_choices(&request, &choices)?;
+        check()?;
+        let stream = connect_agent(path, owner)?;
+        Self::choose_on_stream(stream, request, choices, check)
+    }
+
+    fn choose_on_stream(
+        mut stream: UnixStream,
+        mut request: Presentation,
+        choices: Vec<PromptStorage>,
+        check: &dyn Fn() -> io::Result<()>,
+    ) -> io::Result<(PromptStorage, Self)> {
+        validate_creation_choices(&request, &choices)?;
+        check()?;
+        let id = request.id;
+        stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(1)))?;
+        write_frame(
+            &mut stream,
+            &DisplayEvent::ChooseCreation {
+                version: VERSION,
+                request: request.clone(),
+                choices: choices.clone(),
+            },
+        )?;
+        if !matches!(read_frame(&mut stream)?, AgentEvent::Visible { id: received } if received == id)
+        {
+            return Err(io::Error::other("creation chooser was not presented"));
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        loop {
+            check()?;
+            if std::time::Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "creation selection expired",
+                ));
+            }
+            stream.set_read_timeout(Some(Duration::from_millis(50)))?;
+            let mut byte = [std::mem::MaybeUninit::<u8>::uninit()];
+            match socket2::SockRef::from(&stream).peek(&mut byte) {
+                Ok(0) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Interrupted,
+                        "creation chooser disconnected",
+                    ));
+                }
+                Ok(_) => (),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    continue;
+                }
+                Err(error) => return Err(error),
+            }
+            stream.set_read_timeout(Some(Duration::from_secs(1)))?;
+            let AgentEvent::Selected {
+                id: received,
+                storage,
+            } = read_frame(&mut stream)?
+            else {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "creation selection canceled",
+                ));
+            };
+            if received != id || !choices.contains(&storage) {
+                return Err(io::Error::other(
+                    "selection differs from offered creation scope",
+                ));
+            }
+            check()?;
+            request.storage = Some(storage);
+            write_frame(
+                &mut stream,
+                &DisplayEvent::Present {
+                    version: VERSION,
+                    request,
+                },
+            )?;
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            if !matches!(read_frame(&mut stream)?, AgentEvent::Visible { id: received } if received == id)
+            {
+                return Err(io::Error::other("bound creation summary was not presented"));
+            }
+            check()?;
+            return Ok((storage, Self::from_visible(stream, id)?));
+        }
+    }
+
+    fn from_visible(stream: UnixStream, id: Uuid) -> io::Result<Self> {
         stream.set_read_timeout(None)?;
         let mut input = stream.try_clone()?;
         let canceled = Arc::new(AtomicBool::new(false));
@@ -524,6 +697,150 @@ mod tests {
         assert_eq!(read_presentation(&mut receiver)?, request);
         Ok(())
     }
+    fn creation_request() -> Presentation {
+        let mut request = assertion();
+        request.operation = PromptOperation::CreatePasskey;
+        request
+    }
+
+    #[test]
+    fn chooser_rejects_invalid_or_unavailable_storage_and_old_protocol() -> io::Result<()> {
+        let request = creation_request();
+        for choices in [
+            vec![],
+            vec![PromptStorage::ProtectedLocalCopy],
+            vec![PromptStorage::DeviceOnly],
+            vec![PromptStorage::ICloudSynced, PromptStorage::ICloudSynced],
+        ] {
+            assert!(validate_creation_choices(&request, &choices).is_err());
+        }
+        for version in [1, 2] {
+            let (mut sender, mut receiver) = UnixStream::pair()?;
+            write_frame(
+                &mut sender,
+                &DisplayEvent::ChooseCreation {
+                    version,
+                    request: request.clone(),
+                    choices: vec![PromptStorage::ICloudSynced],
+                },
+            )?;
+            assert!(read_initial_presentation(&mut receiver).is_err());
+        }
+        let mut wrong_operation = request;
+        wrong_operation.operation = PromptOperation::UsePasskey;
+        assert!(
+            validate_creation_choices(&wrong_operation, &[PromptStorage::ICloudSynced]).is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn creation_selection_requires_the_same_id_offered_storage_and_bound_display() -> io::Result<()>
+    {
+        for case in 0..5 {
+            let request = creation_request();
+            let id = request.id;
+            let choices = vec![PromptStorage::ICloudSynced, PromptStorage::DeviceOnly];
+            let (service, mut agent) = UnixStream::pair()?;
+            let peer = std::thread::spawn(move || -> io::Result<()> {
+                let (shown, offered) = read_initial_presentation(&mut agent)?;
+                assert_eq!(shown, request);
+                assert_eq!(offered, Some(choices));
+                write_frame(&mut agent, &AgentEvent::Visible { id })?;
+                let storage = if case == 2 {
+                    PromptStorage::ProtectedLocalCopy
+                } else {
+                    PromptStorage::DeviceOnly
+                };
+                write_frame(
+                    &mut agent,
+                    &AgentEvent::Selected {
+                        id: if case == 1 { Uuid::new_v4() } else { id },
+                        storage,
+                    },
+                )?;
+                if matches!(case, 1 | 2) {
+                    return Ok(());
+                }
+                let bound = read_presentation(&mut agent)?;
+                assert_eq!(bound.storage, Some(PromptStorage::DeviceOnly));
+                assert_eq!(bound.target, shown.target);
+                assert_eq!(bound.account, shown.account);
+                assert_eq!(bound.id, id);
+                if case == 3 {
+                    write_frame(&mut agent, &AgentEvent::Selected { id, storage })?;
+                } else if case == 4 {
+                    write_frame(&mut agent, &AgentEvent::Cancel { id })?;
+                } else {
+                    write_frame(&mut agent, &AgentEvent::Visible { id })?;
+                    // Closing after acknowledgment cancels the live permission.
+                }
+                Ok(())
+            });
+            let result = PromptSession::choose_on_stream(
+                service,
+                creation_request_with_id(id),
+                vec![PromptStorage::ICloudSynced, PromptStorage::DeviceOnly],
+                &|| Ok(()),
+            );
+            assert_eq!(result.is_ok(), case == 0);
+            if let Ok((storage, session)) = result {
+                assert_eq!(storage, PromptStorage::DeviceOnly);
+                for _ in 0..100 {
+                    if session.canceled() {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                assert!(session.canceled());
+            }
+            peer.join()
+                .map_err(|_| io::Error::other("agent fixture failed"))??;
+        }
+        Ok(())
+    }
+
+    fn creation_request_with_id(id: Uuid) -> Presentation {
+        let mut request = creation_request();
+        request.id = id;
+        request
+    }
+
+    #[test]
+    fn request_cancellation_while_selecting_cannot_arm_authorization() -> io::Result<()> {
+        let request = creation_request();
+        let id = request.id;
+        let (service, mut agent) = UnixStream::pair()?;
+        let canceled = Arc::new(AtomicBool::new(false));
+        let signal = canceled.clone();
+        let peer = std::thread::spawn(move || -> io::Result<()> {
+            read_initial_presentation(&mut agent)?;
+            write_frame(&mut agent, &AgentEvent::Visible { id })?;
+            signal.store(true, Ordering::Release);
+            let result: io::Result<DisplayEvent> = read_frame(&mut agent);
+            assert!(result.is_err());
+            Ok(())
+        });
+        assert!(
+            PromptSession::choose_on_stream(
+                service,
+                request,
+                vec![PromptStorage::ICloudSynced],
+                &|| {
+                    if canceled.load(Ordering::Acquire) {
+                        Err(io::Error::other("request canceled"))
+                    } else {
+                        Ok(())
+                    }
+                }
+            )
+            .is_err()
+        );
+        peer.join()
+            .map_err(|_| io::Error::other("agent fixture failed"))??;
+        Ok(())
+    }
+
     #[test]
     fn peer_identity_comes_from_kernel() {
         let (a, _) = UnixStream::pair().unwrap_or_else(|e| panic!("pair: {e}"));

@@ -7,9 +7,6 @@ const accounts = document.querySelector("#accounts");
 const errorText = document.querySelector("#error");
 const approveButton = document.querySelector("#approve");
 const cancelButton = document.querySelector("#cancel");
-const otherOptions = document.querySelector("#other-options");
-const choices = document.querySelector("#choices");
-let creation = false;
 
 function showError(message) {
   errorText.textContent = message;
@@ -18,7 +15,6 @@ function showError(message) {
 function setBusy(busy) {
   approveButton.disabled = busy;
   cancelButton.disabled = busy;
-  otherOptions.disabled = busy;
 }
 
 function accountChoice(candidate, checked) {
@@ -52,45 +48,15 @@ async function load() {
     return;
   }
   const inspection = reply.pending.inspection;
-  creation = reply.pending.kind === "create";
-  if (creation) {
-    document.body.classList.add("creation");
-    document.title = "Create a passkey";
-    document.querySelector("h1").textContent = "Save a passkey";
-    document.querySelector("#passkey-mark").removeAttribute("hidden");
-    document.querySelector("#next-step").hidden = false;
-    const username = document.querySelector("#username");
-    username.textContent = inspection.username || inspection.displayName || "";
-    username.hidden = !username.textContent;
-    document.querySelector("legend").textContent = "Where to save it";
-    choices.hidden = true;
-    otherOptions.hidden = inspection.storageChoices.length < 2;
-    const notice = document.querySelector("#notice");
-    const updateStorageNotice = () => {
-      const selected = new FormData(form).get("passkey");
-      notice.textContent = selected === "synced"
-        ? "Save this passkey in your iCloud Keychain, available for sign-in on your other devices."
-        : selected === "device-bound"
-        ? "Save this passkey on this device only. It will not sync to iCloud or be available on your other devices."
-        : "Choose where to save this passkey.";
-    };
-    approveButton.textContent = "Continue";
-    const defaultStorage = inspection.storageChoices.includes("synced") ? "synced" : inspection.storageChoices[0];
-    inspection.storageChoices.forEach((choice) => {
-      accounts.append(accountChoice({ id: choice,
-        displayName: choice === "synced" ? "iCloud Keychain" : "This device",
-        username: choice === "synced" ? "Sync across your devices" : "Device-bound passkey" }, choice === defaultStorage));
-    });
-    form.addEventListener("change", updateStorageNotice);
-    updateStorageNotice();
-  } else if (inspection.biometric === true) {
+  if (reply.pending.kind !== "get") throw new Error("Unsupported account selection");
+  if (inspection.biometric === true) {
     document.querySelector("h1").textContent = "Choose an account";
     document.querySelector("#notice").textContent = "Your desktop will ask for a fingerprint after you choose an account.";
     approveButton.textContent = "Use passkey";
   }
-  site.textContent = creation ? `Save a passkey for ${inspection.rpId}?` : inspection.rpId;
+  site.textContent = inspection.rpId;
   origin.textContent = inspection.origin;
-  if (!creation) inspection.candidates.forEach((candidate, index) => {
+  inspection.candidates.forEach((candidate, index) => {
     accounts.append(accountChoice(candidate, index === 0));
   });
   form.hidden = false;
@@ -101,15 +67,14 @@ form.addEventListener("submit", async (event) => {
   showError("");
   const selected = new FormData(form).get("passkey");
   if (typeof selected !== "string") {
-    showError(creation ? "Choose where to save the passkey." : "Choose an account first.");
+    showError("Choose an account first.");
     return;
   }
   setBusy(true);
   const reply = await chrome.runtime.sendMessage({
-    type: creation ? "create" : "approve",
+    type: "approve",
     requestId,
     passkeyId: selected,
-    storage: selected,
   });
   if (reply?.ok) {
     window.close();
@@ -117,12 +82,6 @@ form.addEventListener("submit", async (event) => {
   }
   showError(reply?.message || "The passkey request failed.");
   setBusy(false);
-});
-
-otherOptions.addEventListener("click", () => {
-  choices.hidden = !choices.hidden;
-  otherOptions.setAttribute("aria-expanded", String(!choices.hidden));
-  otherOptions.textContent = choices.hidden ? "Other Options" : "Hide Options";
 });
 
 cancelButton.addEventListener("click", async () => {

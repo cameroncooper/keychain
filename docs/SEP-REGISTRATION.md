@@ -1,4 +1,4 @@
-# Device-only passkey registration
+# Native passkey registration
 
 The Chromium adapter now handles creation through the SEP broker. Software-only
 profiles refuse creation. A broker profile sets `credential_broker` to its paired
@@ -6,18 +6,19 @@ socket in the existing private config; pairing and desktop-agent setup are
 described in [service deployment](../contrib/SEP-SERVICES.md). Reload the unpacked
 extension after updating its service worker.
 
-The application window shows the validated RP/origin, account and storage choice.
-It is a Chromium extension popup, separate from the native GPUI fingerprint
-agent. When the broker enables iCloud creation, the compact save summary defaults
-to **iCloud Keychain**, with **This device** under **Other Options**. A device-only
-deployment selects and explains its sole available destination instead. The
-chooser never advertises a destination the broker did not offer. Clicking
-Continue freezes that choice and closes this window before the OS fingerprint
-prompt appears. Canceling/closing the application
-window before choosing storage creates no key. The desktop prompt has guidance and Cancel/Escape, with
-no additional approval button. Website cancellation disconnects the native host
-and broker operation. A restored chooser still routes cancellation through
-`completeCreateRequest` after an MV3 worker suspension.
+The native GPUI window shows the broker-validated RP/origin, account and storage
+choice. When iCloud creation is enabled, it defaults to **iCloud Keychain**, with
+**This device** under **Other Options**. A device-only deployment selects and
+explains its sole available destination. The extension forwards the request and
+result; it cannot choose storage. Browser-supplied storage fields are rejected.
+
+Continue freezes the native selection. The same window then displays fingerprint
+guidance after the broker acknowledges the bound destination. Selection alone
+starts no key creation, network upload or biometric capture. Cancel/Escape,
+window closure, website cancellation and session invalidation end the operation.
+Selection tolerates focus changes; after the bound authorization summary is drawn
+and focused, focus loss cancels authorization. After Continue, storage cannot change during authorization. See the
+[native creation protocol](NATIVE-CREATION-PROMPT.md) for its trust boundaries.
 
 Both the native host and broker validate creation details. Only supported ES256
 platform requests are accepted; user handles, challenges, metadata, exclusions,

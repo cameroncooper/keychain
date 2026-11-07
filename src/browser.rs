@@ -43,7 +43,6 @@ enum HostRequest {
     Create {
         version: u32,
         transaction: uuid::Uuid,
-        storage: crate::model::PasskeyProvenance,
         #[serde(rename = "requestDetailsJson")]
         request_details_json: String,
     },
@@ -209,13 +208,11 @@ fn reply_for_broker_with(
             }),
             HostRequest::Create {
                 transaction,
-                storage,
                 request_details_json,
                 ..
             } => {
                 let result = call(crate::broker::Operation::Create {
                     transaction,
-                    storage,
                     request_details_json,
                 })?;
                 let response_json = result
@@ -574,7 +571,7 @@ mod tests {
     use crate::security::{KeyUsage, SoftwareFileBackend};
 
     #[test]
-    fn creation_is_broker_only_and_freezes_storage_transaction_and_origin_before_ipc() {
+    fn creation_is_broker_only_freezes_request_and_rejects_browser_storage() {
         let details = json!({"rp":{"id":"example.com","name":"Example"},
             "user":{"id":"AQ","name":"user","displayName":"User"},
             "challenge":URL_SAFE_NO_PAD.encode([0u8;32]),
@@ -582,18 +579,16 @@ mod tests {
             "extensions":{"remoteDesktopClientOverride":{"origin":"https://example.com","sameOriginWithAncestors":true}}});
         let transaction = uuid::Uuid::new_v4();
         let mut request = json!({"version":1,"action":"create","transaction":transaction,
-            "storage":"device-bound","requestDetailsJson":details.to_string()});
+            "requestDetailsJson":details.to_string()});
         let reply = reply_for_broker_with(request.to_string().as_bytes(), |operation| {
             let crate::broker::Operation::Create {
                 transaction: seen,
-                storage,
                 request_details_json,
             } = operation
             else {
                 panic!("wrong operation")
             };
             assert_eq!(seen, transaction);
-            assert_eq!(storage, crate::model::PasskeyProvenance::DeviceBound);
             assert_eq!(request_details_json, details.to_string());
             Ok(json!({"responseJson":"{}","recordId":transaction}))
         });
@@ -603,17 +598,18 @@ mod tests {
             Fixture::new().send(request.clone())["error"]["name"],
             "NotSupportedError"
         );
-        request["storage"] = json!("synced");
-        let reply = reply_for_broker_with(request.to_string().as_bytes(), |operation| {
-            assert!(
-                matches!(operation, crate::broker::Operation::Create { transaction: seen, storage: crate::model::PasskeyProvenance::Synced, .. } if seen == transaction)
+        for storage in ["synced", "device-bound"] {
+            request["storage"] = json!(storage);
+            assert_eq!(
+                reply_for_broker_with(request.to_string().as_bytes(), |_| {
+                    panic!("browser storage selection reached IPC")
+                })["ok"],
+                false
             );
-            Err(crate::security::sep::ProviderError::UnsupportedPolicy.into())
-        });
-        // Capability/write policy belongs to the broker; it cannot become an
-        // implicit device-bound registration when the user selected iCloud.
-        assert_eq!(reply["error"]["name"], "NotSupportedError");
-        request["storage"] = json!("device-bound");
+        }
+        if let Some(object) = request.as_object_mut() {
+            object.remove("storage");
+        }
         request["transaction"] = json!(uuid::Uuid::nil());
         assert!(
             !reply_for_broker_with(request.to_string().as_bytes(), |_| panic!(

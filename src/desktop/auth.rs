@@ -1,9 +1,11 @@
 //! GPUI presentation agent. Root-only socket requests; no SEP access or success grant.
 use super::*;
 use crate::prompt::{
-    AgentEvent, DisplayEvent, Presentation, read_frame, read_presentation, write_frame,
+    AgentEvent, DisplayEvent, Presentation, PromptStorage, read_frame, read_initial_presentation,
+    write_frame,
 };
 use gpui_kit::assets::{AllAssets, IconName};
+use gpui_kit::base::Disableable;
 use gpui_kit::component::{
     Icon, Theme,
     button::{Button, ButtonVariants},
@@ -22,7 +24,8 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 enum Event {
-    Begin(Presentation, UnixStream),
+    Begin(Presentation, Option<Vec<PromptStorage>>, UnixStream),
+    Bind(Presentation),
     Status(Uuid, String),
     End(Uuid),
 }
@@ -45,16 +48,42 @@ fn listen(listener: UnixListener, output: mpsc::SyncSender<Event>) -> io::Result
             let _ = input.set_write_timeout(Some(Duration::from_secs(1)));
             let mut active_id = None;
             let _result = (|| -> io::Result<()> {
-                let request = read_presentation(&mut input)?;
+                let (request, choices) = read_initial_presentation(&mut input)?;
+                let initial = request.clone();
+                let mut choosing = choices.clone();
                 let id = request.id;
                 active_id = Some(id);
                 output
-                    .send(Event::Begin(request, input.try_clone()?))
+                    .send(Event::Begin(request, choices, input.try_clone()?))
                     .map_err(io::Error::other)?;
                 // All real operations have an upper bound, including forgotten UI.
                 input.set_read_timeout(Some(Duration::from_secs(125)))?;
                 loop {
                     match read_frame(&mut input)? {
+                        DisplayEvent::Present {
+                            version: crate::prompt::VERSION,
+                            request,
+                        } if choosing.is_some() => {
+                            request.validate()?;
+                            let offered = choosing
+                                .take()
+                                .ok_or_else(|| io::Error::other("creation already bound"))?;
+                            if request.id != initial.id
+                                || request.operation != initial.operation
+                                || request.account != initial.account
+                                || request.target != initial.target
+                                || !request
+                                    .storage
+                                    .is_some_and(|storage| offered.contains(&storage))
+                            {
+                                return Err(io::Error::other(
+                                    "creation binding changed request scope",
+                                ));
+                            }
+                            output
+                                .send(Event::Bind(request))
+                                .map_err(io::Error::other)?;
+                        }
                         DisplayEvent::Status {
                             id: received,
                             message,
@@ -97,12 +126,19 @@ impl Drop for Channel {
         self.cancel();
     }
 }
+struct CreationSelection {
+    choices: Vec<PromptStorage>,
+    other_options: bool,
+    submitted: bool,
+}
+
 struct AuthPrompt {
     request: Presentation,
     status: String,
     channel: Rc<RefCell<Channel>>,
     focus: FocusHandle,
     details: bool,
+    selection: Option<CreationSelection>,
     first_frame: bool,
     presented: bool,
     _activation: Subscription,
@@ -126,6 +162,298 @@ impl AuthPrompt {
     }
 }
 impl AuthPrompt {
+    fn render_creation(&self, palette: Palette, cx: &mut Context<Self>) -> Div {
+        use crate::prompt::{PromptOperation, PromptTarget};
+        let rp = match &self.request.target {
+            Some(PromptTarget::WebAuthn { rp_id, .. }) => rp_id.as_str(),
+            _ => "",
+        };
+        let destination = match self.request.storage {
+            Some(PromptStorage::ICloudSynced) => {
+                "Save in iCloud Keychain, available for sign-in on your other devices."
+            }
+            Some(PromptStorage::DeviceOnly) => {
+                "Save on this device only. This passkey will not sync to iCloud."
+            }
+            _ => "",
+        };
+        let selecting = self.selection.is_some();
+        let submitted = self
+            .selection
+            .as_ref()
+            .is_some_and(|selection| selection.submitted);
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .rounded(px(16.))
+            .overflow_hidden()
+            .bg(rgb(palette.surface))
+            .text_color(rgb(palette.text))
+            .font_family("sans-serif")
+            .text_size(px(13.))
+            .line_height(px(18.))
+            .track_focus(&self.focus)
+            .on_key_down(|event, window, _| {
+                if event.keystroke.key == "escape" {
+                    window.remove_window();
+                }
+            })
+            .child(
+                div()
+                    .mx_4()
+                    .h(px(46.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(rgb(palette.line))
+                    .child(
+                        div()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Save a passkey"),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                Button::new("details")
+                                    .ghost()
+                                    .h(px(24.))
+                                    .px_2()
+                                    .text_size(px(12.))
+                                    .label(if self.details { "Back" } else { "Details" })
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        view.details = !view.details;
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                Button::new("cancel")
+                                    .label("Cancel")
+                                    .ghost()
+                                    .h(px(24.))
+                                    .px_2()
+                                    .text_size(px(12.))
+                                    .rounded(px(6.))
+                                    .bg(rgb(palette.tile))
+                                    .on_click(|_, window, _| window.remove_window()),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .id("prompt-content")
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .px_8()
+                    .py_3()
+                    .child(div().flex_1().min_h_0())
+                    .when(!self.details, |body| {
+                        body.child(
+                            div()
+                                .size(px(48.))
+                                .flex_shrink_0()
+                                .rounded(px(12.))
+                                .bg(rgb(palette.muted))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .child(
+                                    Icon::default()
+                                        .data(include_bytes!("../../assets/passkey.svg"))
+                                        .size(px(34.))
+                                        .text_color(rgb(0xffffff)),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .mt_3()
+                                .text_size(px(15.))
+                                .line_height(px(21.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_center()
+                                .child(display_text(&format!("Save a passkey for {rp}?"))),
+                        )
+                    })
+                    .when(self.details, |body| {
+                        body.child(self.target_details(palette))
+                    })
+                    .child(
+                        div()
+                            .mt_2()
+                            .text_center()
+                            .child(display_text(&self.request.account)),
+                    )
+                    .child(
+                        div()
+                            .mt_2()
+                            .text_center()
+                            .text_size(px(12.))
+                            .line_height(px(17.))
+                            .text_color(rgb(palette.muted))
+                            .child(destination),
+                    )
+                    .when_some(self.selection.as_ref(), |body, selection| {
+                        body.when(selection.choices.len() > 1 && !submitted, |body| {
+                            body.child(
+                                Button::new("other-options")
+                                    .ghost()
+                                    .mt_2()
+                                    .h(px(26.))
+                                    .text_color(rgb(BLUE))
+                                    .label(if selection.other_options {
+                                        "Hide Options"
+                                    } else {
+                                        "Other Options"
+                                    })
+                                    .on_click(cx.listener(|view, _, _, cx| {
+                                        if let Some(selection) =
+                                            view.selection.as_mut().filter(|s| !s.submitted)
+                                        {
+                                            selection.other_options = !selection.other_options;
+                                            cx.notify();
+                                        }
+                                    })),
+                            )
+                            .when(selection.other_options, |body| {
+                                let mut options = div().mt_2().w_full().flex().flex_col().gap_2();
+                                for (index, storage) in
+                                    selection.choices.iter().copied().enumerate()
+                                {
+                                    let selected = self.request.storage == Some(storage);
+                                    let label = match storage {
+                                        PromptStorage::ICloudSynced => "iCloud Keychain",
+                                        _ => "This device",
+                                    };
+                                    options = options.child(
+                                        Button::new(("storage", index))
+                                            .label(label)
+                                            .w_full()
+                                            .h(px(30.))
+                                            .ghost()
+                                            .bg(rgb(if selected {
+                                                palette.tile
+                                            } else {
+                                                palette.surface
+                                            }))
+                                            .on_click(cx.listener(move |view, _, _, cx| {
+                                                if let Some(selection) =
+                                                    view.selection.as_mut().filter(|s| !s.submitted)
+                                                    && selection.choices.contains(&storage)
+                                                {
+                                                    view.request.storage = Some(storage);
+                                                    selection.other_options = false;
+                                                    cx.notify();
+                                                }
+                                            })),
+                                    );
+                                }
+                                body.child(options)
+                            })
+                        })
+                    })
+                    .child(div().flex_1().min_h_0()),
+            )
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap_2()
+                    .px_8()
+                    .pb_4()
+                    .when(selecting, |footer| {
+                        footer
+                            .child(
+                                Button::new("continue")
+                                    .primary()
+                                    .label(if submitted {
+                                        "Preparing…"
+                                    } else {
+                                        "Continue"
+                                    })
+                                    .min_w(px(140.))
+                                    .h(px(30.))
+                                    .disabled(submitted || !self.presented)
+                                    .on_click(cx.listener(|view, _, window, cx| {
+                                        let Some(selection) = view
+                                            .selection
+                                            .as_mut()
+                                            .filter(|selection| !selection.submitted)
+                                        else {
+                                            return;
+                                        };
+                                        let Some(storage) = view
+                                            .request
+                                            .storage
+                                            .filter(|storage| selection.choices.contains(storage))
+                                        else {
+                                            return;
+                                        };
+                                        if !view.presented
+                                            || view.request.operation
+                                                != PromptOperation::CreatePasskey
+                                        {
+                                            return;
+                                        }
+                                        selection.submitted = true;
+                                        selection.other_options = false;
+                                        if write_frame(
+                                            &mut view.channel.borrow_mut().stream,
+                                            &AgentEvent::Selected {
+                                                id: view.request.id,
+                                                storage,
+                                            },
+                                        )
+                                        .is_err()
+                                        {
+                                            view.channel.borrow_mut().cancel();
+                                            window.remove_window();
+                                            return;
+                                        }
+                                        cx.notify();
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(rgb(palette.muted))
+                                    .child(if submitted {
+                                        "Preparing your selected destination…"
+                                    } else {
+                                        "Your fingerprint will be requested next."
+                                    }),
+                            )
+                    })
+                    .when(!selecting, |footer| {
+                        footer
+                            .child(
+                                Icon::default()
+                                    .data(include_bytes!("../../assets/fingerprint.svg"))
+                                    .text_color(rgb(palette.fingerprint))
+                                    .size(px(52.)),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .line_height(px(17.))
+                                    .text_center()
+                                    .text_color(rgb(palette.muted))
+                                    .child(self.status.clone()),
+                            )
+                    }),
+            )
+    }
+
     fn target_details(&self, palette: Palette) -> impl IntoElement {
         use crate::prompt::PromptTarget;
         let (label, value) = match self.request.target.as_ref() {
@@ -164,6 +492,9 @@ impl AuthPrompt {
 impl Render for AuthPrompt {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::current(cx);
+        if self.request.operation == crate::prompt::PromptOperation::CreatePasskey {
+            return self.render_creation(palette, cx).into_any_element();
+        }
         div()
             .size_full()
             .flex()
@@ -315,12 +646,29 @@ impl Render for AuthPrompt {
                             .child(self.status.clone()),
                     ),
             )
+            .into_any_element()
     }
+}
+
+fn acknowledge_next_frame(view: WeakEntity<AuthPrompt>, window: &mut Window) {
+    // Each newly bound summary must be drawn and focused before capture can start.
+    window.on_next_frame(move |window, _| {
+        window.on_next_frame(move |window, cx| {
+            let _ = view.update(cx, |view, cx| {
+                view.first_frame = true;
+                view.acknowledge_display(window);
+                cx.notify();
+            });
+        });
+        window.refresh();
+    });
+    window.refresh();
 }
 
 fn open_prompt(
     request: Presentation,
     stream: UnixStream,
+    choices: Option<Vec<PromptStorage>>,
     cx: &mut App,
 ) -> gpui_kit::Result<Active> {
     let id = request.id;
@@ -328,7 +676,19 @@ fn open_prompt(
     let close = channel.clone();
     let (window, view) = gpui_kit::open_window(
         WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(420.), px(290.)), cx)),
+            window_bounds: Some(WindowBounds::centered(
+                size(
+                    px(420.),
+                    px(
+                        if request.operation == crate::prompt::PromptOperation::CreatePasskey {
+                            400.
+                        } else {
+                            290.
+                        },
+                    ),
+                ),
+                cx,
+            )),
             titlebar: None,
             kind: WindowKind::Dialog,
             is_resizable: false,
@@ -348,17 +708,20 @@ fn open_prompt(
                 let focus = cx.focus_handle();
                 window.focus(&focus, cx);
                 let activation =
-                    cx.observe_window_activation(window, |view: &mut AuthPrompt, window, _| {
+                    cx.observe_window_activation(window, |view: &mut AuthPrompt, window, cx| {
                         if window.is_window_active() {
                             view.acknowledge_display(window);
-                        } else if view.presented {
+                            cx.notify();
+                        } else if view.presented && view.selection.is_none() {
                             eprintln!(
                                 "keychain-auth-agent: prompt canceled after focus loss (activation)"
                             );
                             // Mapping can briefly change focus before the first frame,
                             // particularly while the browser chooser is closing. No
                             // capture is permitted until presentation is acknowledged.
-                            // After that, switching away always ends the operation.
+                            // Selection grants no authorization and may remain open across focus
+                            // changes. After the bound summary is acknowledged, switching away
+                            // always ends the authorization lifetime.
                             view.channel.borrow_mut().cancel();
                             window.remove_window();
                         }
@@ -375,23 +738,18 @@ fn open_prompt(
                     focus,
                     status: initial_status.into(),
                     details: false,
+                    selection: choices.map(|choices| CreationSelection {
+                        choices,
+                        other_options: false,
+                        submitted: false,
+                    }),
                     first_frame: false,
                     presented: false,
                     _activation: activation,
                     _appearance: appearance,
                 }
             });
-            // Wait for a drawn frame AND focus before acknowledging presentation.
-            let visible = view.downgrade();
-            window.on_next_frame(move |window, _| {
-                window.on_next_frame(move |window, cx| {
-                    let _ = visible.update(cx, |view, _| {
-                        view.first_frame = true;
-                        view.acknowledge_display(window);
-                    });
-                });
-                window.refresh();
-            });
+            acknowledge_next_frame(view.downgrade(), window);
             view
         },
     )?;
@@ -488,16 +846,36 @@ pub fn run() -> io::Result<()> {
                         while let Ok(event) = receiver.try_recv() {
                             last_activity = Instant::now();
                             match event {
-                                Event::Begin(request, stream) => {
+                                Event::Begin(request, choices, stream) => {
                                     if active.is_some() {
                                         let _ = stream.shutdown(Shutdown::Both);
                                         continue;
                                     }
-                                    match open_prompt(request, stream, cx) {
+                                    match open_prompt(request, stream, choices, cx) {
                                         Ok(prompt) => active = Some(prompt),
                                         Err(error) => eprintln!(
                                             "keychain-auth-agent: cannot display prompt: {error}"
                                         ),
+                                    }
+                                }
+                                Event::Bind(request) => {
+                                    if let Some(current) = active.as_ref().filter(|a| a.id == request.id) {
+                                        let _ = current.window.update(cx, |_, window, cx| {
+                                            current.view.update(cx, |view, cx| {
+                                                if !view.selection.as_ref().is_some_and(|selection| selection.submitted)
+                                                    || view.request != request {
+                                                    view.channel.borrow_mut().cancel();
+                                                    window.remove_window();
+                                                    return;
+                                                }
+                                                view.selection = None;
+                                                view.presented = false;
+                                                view.first_frame = false;
+                                                view.status = "Preparing fingerprint reader…".into();
+                                                cx.notify();
+                                            });
+                                            acknowledge_next_frame(current.view.downgrade(), window);
+                                        });
                                     }
                                 }
                                 Event::Status(id, text) => {
@@ -524,7 +902,7 @@ pub fn run() -> io::Result<()> {
                         if let Some(current) = active.as_ref() {
                             let _ = current.window.update(cx, |_, window, cx| {
                                 current.view.update(cx, |view, _| {
-                                    if view.presented && !window.is_window_active() {
+                                    if view.presented && view.selection.is_none() && !window.is_window_active() {
                                         eprintln!("keychain-auth-agent: prompt canceled after focus loss (poll)");
                                         view.channel.borrow_mut().cancel();
                                         window.remove_window();

@@ -58,8 +58,7 @@ impl Broker {
         &self,
         transaction: Uuid,
         details: String,
-        canceled: Arc<AtomicBool>,
-        session: ActiveSession,
+        authorization: Arc<super::native::NativeAuthorization>,
     ) -> Result<Registration> {
         if !self.allow_synced_creation || !self.allow_item_decrypt {
             return Err(ProviderError::UnsupportedPolicy.into());
@@ -79,47 +78,29 @@ impl Broker {
             request_sha256: context.binding().into(),
             zone: account.scope().zone.clone(),
         };
-        let preflight_deadline = Instant::now() + Duration::from_secs(60);
-        let preflight = || {
-            if canceled.load(Ordering::Acquire)
-                || !session.valid()
-                || canceled.load(Ordering::Acquire)
-            {
-                return Err(ProviderError::Canceled.into());
-            }
-            if Instant::now() >= preflight_deadline {
-                return Err(ProviderError::Expired.into());
-            }
-            Ok(())
-        };
-        let connection_check = || {
-            if canceled.load(Ordering::Acquire) {
-                Err(ProviderError::Canceled.into())
-            } else {
-                Ok(())
-            }
-        };
+        let check = || authorization.check();
         let client = super::network::connect_worker(
             account.worker(),
             binding.clone(),
-            preflight_deadline,
+            authorization.deadline,
             Instant::now() + Duration::from_secs(120),
-            &connection_check,
-            &preflight,
+            &check,
+            &check,
         )?;
         let mut io = self
             .registry
-            .account_upload_io(self.owner, client, &preflight)?;
-        preflight()?;
-        self.create_synced_in_session(
+            .account_upload_io(self.owner, client, &check)?;
+        let snapshot = io.fetch_zone(&binding.zone, &check)?;
+        check()?;
+        self.finish_synced_authorized(
             SyncedCreationRequest {
                 binding,
                 request_details_json: details,
                 recovery: UploadRecovery::Reconcile,
             },
             &mut io,
-            canceled.clone(),
-            session,
+            snapshot,
+            authorization.clone(),
         )
     }
 
@@ -153,11 +134,6 @@ impl Broker {
         };
         let snapshot = io.fetch_zone(&request.binding.zone, &preflight)?;
         preflight()?;
-        let excluded = self
-            .registry
-            .browser_credentials(self.owner)?
-            .into_iter()
-            .find(|credential| context.excludes(credential));
         let authorization = self.native_authorization(
             Presentation::passkey(
                 Uuid::new_v4(),
@@ -171,6 +147,23 @@ impl Broker {
             session,
             false,
         )?;
+        self.finish_synced_authorized(request, io, snapshot, authorization)
+    }
+
+    fn finish_synced_authorized(
+        &self,
+        request: SyncedCreationRequest,
+        io: &mut dyn UploadIo,
+        snapshot: Snapshot,
+        authorization: Arc<super::native::NativeAuthorization>,
+    ) -> Result<Registration> {
+        authorization.check()?;
+        let context = CreationContext::parse(&request.request_details_json)?;
+        let excluded = self
+            .registry
+            .browser_credentials(self.owner)?
+            .into_iter()
+            .find(|credential| context.excludes(credential));
         if let Some(excluded) = excluded {
             self.reject_registration_exclusion(&excluded, &context, &authorization)?;
         }

@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 
 const event = () => ({ listeners: [], addListener(fn) { this.listeners.push(fn); } });
-function fixture({ biometric = true, count = 1, holdAssertion = false, holdCreation = false, available = true, storageChoices = ["device-bound"], createError = null } = {}) {
+function fixture({ biometric = true, count = 1, holdAssertion = false, holdCreation = false, available = true, createError = null } = {}) {
   const stored = {};
   const ports = [];
   const windows = [];
@@ -38,8 +38,6 @@ function fixture({ biometric = true, count = 1, holdAssertion = false, holdCreat
               ? { kind: "capabilities", userVerificationAvailable: available }
               : message.action === "inspect"
               ? { kind: "inspection", biometric, candidates, rpId: "example.com", origin: "https://example.com" }
-              : message.action === "inspectCreation"
-              ? { kind: "creationInspection", storageChoices, rpId: "example.com", origin: "https://example.com" }
               : message.action === "create"
               ? { kind: "registration", responseJson: "{\"type\":\"public-key\"}" }
               : { kind: "assertion", responseJson: "{}" };
@@ -94,64 +92,39 @@ test("multiple biometric accounts require selection, and selection is consumed",
   assert.equal(f.completed.length, 1);
 });
 
-test("registration requires explicit storage selection and consumes it before biometrics", async () => {
+test("creation goes directly to native UI without browser storage selection", async () => {
   const f = fixture();
-  await vm.runInContext('handleCreate({requestId:6,requestDetailsJson:"frozen-create"})', f.context);
-  assert.equal(f.windows.length, 1);
-  assert.deepEqual(f.operations.map((op) => op.action), ["inspectCreation"]);
-  const transaction = f.stored["pending:6"].transaction;
-  assert.match(transaction, /^[a-f0-9-]{36}$/);
-  await vm.runInContext('createRequest(6,"synced")', f.context);
-  assert.equal(f.operations.length, 1); // no cloud-to-local fallback
-  await vm.runInContext('createRequest(6,"device-bound")', f.context);
-  assert.deepEqual(f.operations.map((op) => op.action), ["inspectCreation", "create"]);
-  assert.equal(f.operations[1].transaction, transaction);
-  assert.equal(f.operations[1].requestDetailsJson, "frozen-create");
-  assert.equal(f.stored["pending:6"], undefined);
-  assert.deepEqual(f.closed, [1]); // application window closes before OS prompt
+  await vm.runInContext('handleCreate({requestId:6,requestDetailsJson:"frozen-create",storage:"device-bound"})', f.context);
+  assert.equal(f.windows.length, 0);
+  assert.deepEqual(f.operations.map((op) => op.action), ["create"]);
+  assert.match(f.operations[0].transaction, /^[a-f0-9-]{36}$/);
+  assert.equal(f.operations[0].requestDetailsJson, "frozen-create");
+  assert.equal(Object.hasOwn(f.operations[0], "storage"), false);
   assert.equal(f.created.length, 1);
-  assert.equal(f.created[0].responseJson, '{"type":"public-key"}');
   assert.equal(f.completed.length, 0);
-  await vm.runInContext('createRequest(6,"device-bound")', f.context);
-  assert.equal(f.operations.length, 2);
-  assert.equal(f.created.length, 1);
+  await vm.runInContext('handleCreate({requestId:6,requestDetailsJson:"frozen-create"})', f.context);
+  assert.equal(f.operations.length, 1);
 });
 
-test("website abort disconnects native registration and returns no creation response", async () => {
+test("website abort disconnects native selection/capture and delivers no registration", async () => {
   const f = fixture({ holdCreation: true });
-  await vm.runInContext('handleCreate({requestId:7,requestDetailsJson:"frozen"})', f.context);
-  const task = vm.runInContext('createRequest(7,"device-bound")', f.context);
-  for (let i = 0; i < 20 && f.operations.length < 2; i++) await tick();
-  assert.equal(f.operations[1].action, "create");
+  const task = vm.runInContext('handleCreate({requestId:7,requestDetailsJson:"frozen"})', f.context);
+  for (let i = 0; i < 20 && f.operations.length < 1; i++) await tick();
+  assert.equal(f.operations[0].action, "create");
   f.chrome.webAuthenticationProxy.onRequestCanceled.listeners[0](7);
   await task;
-  assert.equal(f.ports[1].disconnected, true);
+  assert.equal(f.ports[0].disconnected, true);
   assert.equal(f.created.length, 0);
-  assert.equal(f.completed.length, 0);
+  assert.equal(f.windows.length, 0);
 });
 
-test("closing the storage selection cancels creation without generating a key", async () => {
-  const f = fixture();
+test("native chooser cancellation is returned once without another attempt", async () => {
+  const f = fixture({ createError: { name: "NotAllowedError", message: "Canceled" } });
   await vm.runInContext('handleCreate({requestId:8,requestDetailsJson:"frozen"})', f.context);
-  f.chrome.windows.onRemoved.listeners[0](1);
-  await tick();
   assert.equal(f.operations.length, 1);
-  assert.equal(f.created.length, 1);
   assert.equal(f.created[0].error.name, "NotAllowedError");
-  assert.equal(f.completed.length, 0);
-  assert.equal(f.stored["pending:8"], undefined);
-});
-
-test("closing a restored chooser still completes creation after worker memory is lost", async () => {
-  const f = fixture();
-  await vm.runInContext('handleCreate({requestId:9,requestDetailsJson:"frozen"})', f.context);
-  assert.equal(f.stored["pending:9"].windowId, 1);
-  vm.runInContext('selectionWindows.clear(); requestKinds.clear()', f.context);
-  await vm.runInContext('cancelClosedSelection(1)', f.context);
-  assert.equal(f.created.length, 1);
-  assert.equal(f.created[0].error.name, "NotAllowedError");
-  assert.equal(f.completed.length, 0);
-  assert.equal(f.operations.length, 1);
+  assert.equal(f.created[0].responseJson, undefined);
+  assert.equal(f.windows.length, 0);
 });
 
 test("software credentials retain explicit presence approval", async () => {
@@ -184,28 +157,12 @@ test("authenticator availability uses the native backend result without opening 
 });
 
 
-test("iCloud selection is frozen and a failed upload never retries on this device", async () => {
-  const f = fixture({ storageChoices: ["device-bound", "synced"], createError: { name: "NotAllowedError", message: "Fresh Apple sign-in required" } });
+test("native creation errors never fall back to another destination", async () => {
+  const f = fixture({ createError: { name: "NotAllowedError", message: "Fresh Apple sign-in required" } });
   await vm.runInContext('handleCreate({requestId:80,requestDetailsJson:"frozen-icloud"})', f.context);
-  const transaction = f.stored["pending:80"].transaction;
-  await vm.runInContext('createRequest(80,"synced")', f.context);
-  assert.deepEqual(f.operations.map(op => op.action), ["inspectCreation", "create"]);
-  assert.equal(f.operations[1].storage, "synced");
-  assert.equal(f.operations[1].transaction, transaction);
-  assert.equal(f.operations[1].requestDetailsJson, "frozen-icloud");
+  assert.deepEqual(f.operations.map(op => op.action), ["create"]);
+  assert.equal(f.operations[0].requestDetailsJson, "frozen-icloud");
+  assert.equal(Object.hasOwn(f.operations[0], "storage"), false);
   assert.equal(f.created[0].error.name, "NotAllowedError");
   assert.equal(f.created[0].responseJson, undefined);
-  assert.deepEqual(f.closed, [1]);
-  await vm.runInContext('createRequest(80,"device-bound")', f.context);
-  assert.equal(f.operations.length, 2);
-});
-
-test("unknown or duplicate storage choices are refused before creation", async () => {
-  for (const storageChoices of [["remote"], ["synced", "synced"]]) {
-    const f = fixture({ storageChoices });
-    await vm.runInContext('handleCreate({requestId:81,requestDetailsJson:"frozen"})', f.context);
-    assert.equal(f.windows.length, 0);
-    assert.equal(f.created.length, 1);
-    assert.equal(f.created[0].responseJson, undefined);
-  }
 });

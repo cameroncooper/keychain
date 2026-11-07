@@ -4,7 +4,7 @@ hl.window_rule({
   match = { class = "^cameroncooper[.]keychain[.]Authentication$" },
   float = true,
   center = true,
-  size = { 420, 290 },
+  -- The agent supplies the size for each operation's content.
   rounding = 16,
   border_size = 1,
   opacity = "1 override 1 override",
