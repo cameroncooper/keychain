@@ -1,5 +1,30 @@
 # Disposable iCloud creation acceptance test
 
+## Authentication failure after resume — 2026-11-07
+
+Local America/Chicago timestamps from the application and kernel journals:
+
+- 07:47:12: suspend exit; SEP hwrng read returned ETIMEDOUT.
+- 07:47:40–07:47:55: the native authentication popup was presented, then three
+  attempts logged focus-loss cancellation. These were deliberate fail-closed
+  desktop-agent cancellations, not evidence of an incorrect credential.
+- 07:47:54: `sks: LOAD_KEYBAG got no reply after 8191 ms`.
+- 07:48:00: a browser/native request disconnected or canceled.
+- 07:48:01: the next popup was presented without a recorded focus cancellation;
+  the broker reported uncertain SEP completion with errno 5 (EIO).
+- From 07:48:10: repeated `enable_irq` warnings in the hwrng thread, including
+  `SepData::get_entropy_word`, `hwrng_read_trampoline` and `sep_hwrng_read`.
+
+The entropy timeout preceded application authentication and followed resume.
+This points to driver resume/transport failure; the logs do not establish the
+specific firmware fault or a recovery procedure. It is distinct from the earlier
+sensor sequence-counter failure. Driver-side recovery/investigation is needed
+before further real biometric checks. The focus cancellations remain a separate
+UI behavior to investigate once SEP communication is restored.
+
+Investigation read journals only: no new SEP request, authentication retry,
+service restart, module reload, key regeneration or secure-state reset was run.
+
 ## Native creation chooser rollout
 
 The storage chooser now lives in the unprivileged GPUI agent. Chromium forwards
