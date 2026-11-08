@@ -55,8 +55,19 @@ page's current form. Selecting a password or code starts native fingerprint
 authorization. Username-only forms fill public account metadata without a scan.
 No flow submits the form automatically.
 
-Matching is deliberately exact: `example.com` means `https://example.com` on the
-default port. Sibling/subdomains, HTTP and alternate ports do not inherit access.
+Password/code matching uses the registrable domain, so an `apple.com` item is
+also offered on `account.apple.com` and `developer.apple.com`. The root broker
+uses the embedded [Public Suffix List](https://publicsuffix.org/list/), including
+private entries: `alice.github.io` and `bob.github.io` remain separate, as do
+`example.co.uk` and `other.co.uk`. The `psl` dependency version and its list
+snapshot are pinned in `Cargo.lock`; list updates ship with dependency updates.
+
+HTTPS is required and ports must match (bare names imply the default HTTPS port).
+IP addresses, localhost and names with unknown suffixes stay host-exact. This
+changes password/code account matching only; the live document origin and native
+prompt still identify the actual requesting site. WebAuthn RP rules are unchanged.
+No cross-domain organization aliases (such as `apple.com` to `icloud.com`) are
+inferred.
 Only the requested password or current code is returned. Notes and TOTP seeds
 have no browser operation. The native prompt shows the validated HTTPS origin
 and account. Passwords intentionally filled into a website can be read by it.

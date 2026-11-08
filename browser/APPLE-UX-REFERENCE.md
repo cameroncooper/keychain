@@ -109,8 +109,8 @@ reveal operations. A CLI's ability to reveal an arbitrary record is not authorit
 to send it to a website.
 
 The broker must match the selected record against the browser-authenticated
-hostname/destination before unsealing. Start with an explicit, conservative match
-policy; do not infer that every sibling/subdomain may receive the same password.
+hostname/destination before unsealing. Use an explicit registrable-domain policy
+with Public Suffix List boundaries, including private hosting suffixes.
 Inspect with metadata only. Release only selected fields to the original live
 document/form after native authorization; never store passwords/TOTP seeds in
 extension session/local storage. Generate current TOTP codes natively and keep
@@ -150,6 +150,8 @@ for automated tests; reserve real SEP/iCloud acceptance for deliberate user runs
 - Shared compact account picker and toolbar are implemented, including direct
   selection, keyboard controls, light/dark styling, actual readiness, enable
   switch, and fixed native-app handoff when installed.
+- Password/code matching includes subdomains within the same registrable domain,
+  with private Public Suffix List entries isolating unrelated hosting tenants.
 - Broker-scoped password/current-code filling is implemented for top-level HTTPS
   forms. Username-first filling uses public metadata only. Destination and field
   checks run before biometric/device access; original form/input checks run again

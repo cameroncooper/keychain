@@ -42,8 +42,9 @@ impl FillContext {
         }
         Ok(())
     }
-    /// Exact HTTPS origin. Bare website hostnames mean HTTPS on its default port;
-    /// no sibling/subdomain, HTTP upgrade or non-default-port inference.
+    /// HTTPS sites match by registrable domain, including PSL private suffixes.
+    /// Bare website names mean HTTPS on its default port. IPs, local names and
+    /// unknown suffixes stay host-exact; ports must always match.
     pub fn matches(&self, metadata: &LoginMetadata) -> Result<bool> {
         self.validate()?;
         if metadata.domain.trim() != metadata.domain {
@@ -57,10 +58,12 @@ impl FillContext {
         let Ok(url) = url::Url::parse(&text) else {
             return Ok(false);
         };
+        let destination = url::Url::parse(&self.origin)?;
         Ok(url.scheme() == "https"
             && url.username().is_empty()
             && url.password().is_none()
-            && url.origin().ascii_serialization() == self.origin)
+            && url.port_or_known_default() == destination.port_or_known_default()
+            && matching_login_hosts(&url, &destination))
     }
     pub(crate) fn authorize(&self, metadata: &LoginMetadata, field: RevealField) -> Result<()> {
         if !matches!(field, RevealField::Password | RevealField::Totp) || !self.matches(metadata)? {
@@ -76,6 +79,45 @@ impl FillContext {
             ));
         }
         Ok(())
+    }
+}
+
+// URL parsing canonicalizes case and IDNA before this check. Do not use a
+// string suffix or last-two-label comparison: co.uk and private hosting suffixes
+// (for example github.io) contain unrelated credential destinations.
+fn matching_login_hosts(saved: &url::Url, destination: &url::Url) -> bool {
+    match (saved.host(), destination.host()) {
+        (Some(url::Host::Domain(saved)), Some(url::Host::Domain(destination))) => {
+            let saved = saved.strip_suffix('.').unwrap_or(saved);
+            let destination = destination.strip_suffix('.').unwrap_or(destination);
+            if saved == destination {
+                return true;
+            }
+            fn registrable(host: &str) -> Option<&[u8]> {
+                if host.len() > 253
+                    || host.split('.').any(|label| {
+                        label.is_empty()
+                            || label.len() > 63
+                            || label.starts_with('-')
+                            || label.ends_with('-')
+                            || !label
+                                .bytes()
+                                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                    })
+                {
+                    return None;
+                }
+                psl::domain(host.as_bytes())
+                    .filter(|domain| domain.suffix().is_known())
+                    .map(|domain| domain.as_bytes())
+            }
+            match (registrable(saved), registrable(destination)) {
+                (Some(saved), Some(destination)) => saved == destination,
+                _ => false,
+            }
+        }
+        (Some(saved), Some(destination)) => saved == destination,
+        _ => false,
     }
 }
 
@@ -290,7 +332,7 @@ mod tests {
         }
     }
     #[test]
-    fn destination_policy_is_exact_and_disallows_other_reveal_purposes() {
+    fn destination_policy_groups_sites_and_disallows_other_reveal_purposes() {
         let scope = context();
         assert!(scope.matches(&metadata("example.com")).unwrap_or(false));
         assert!(
@@ -300,7 +342,6 @@ mod tests {
         );
         for other in [
             "other.com",
-            "login.example.com",
             "example.com:8443",
             "http://example.com",
             "https://user@example.com",
@@ -326,6 +367,75 @@ mod tests {
         bad.document = Uuid::nil();
         assert!(bad.validate().is_err());
     }
+    #[test]
+    fn site_matching_uses_public_and_private_suffix_boundaries() {
+        let cases = [
+            ("apple.com", "https://account.apple.com", true),
+            (
+                "https://account.apple.com/login",
+                "https://developer.apple.com",
+                true,
+            ),
+            ("https://account.apple.com", "https://apple.com", true),
+            ("apple.com", "https://apple.com.attacker.com", false),
+            ("apple.com", "https://notapple.com", false),
+            ("apple.com", "https://icloud.com", false),
+            ("login.example.co.uk", "https://account.example.co.uk", true),
+            ("example.co.uk", "https://other.co.uk", false),
+            ("co.uk", "https://example.co.uk", false),
+            ("alice.github.io", "https://login.alice.github.io", true),
+            ("alice.github.io", "https://bob.github.io", false),
+            ("github.io", "https://alice.github.io", false),
+            ("alice.blogspot.com", "https://bob.blogspot.com", false),
+            ("a.b.ck", "https://c.b.ck", false), // PSL wildcard
+            ("www.ck", "https://login.www.ck", true), // PSL exception
+            ("bücher.de", "https://login.xn--bcher-kva.de", true),
+            ("APPLE.COM", "https://account.apple.com", true),
+            ("apple.com.", "https://account.apple.com", true),
+            ("*.apple.com", "https://account.apple.com", false),
+            ("apple..com", "https://account.apple.com", false),
+            ("apple.com", "https://account.apple.com:8443", false),
+            (
+                "https://apple.com:8443",
+                "https://account.apple.com:8443",
+                true,
+            ),
+            ("http://apple.com", "https://account.apple.com", false),
+            ("https://user@apple.com", "https://account.apple.com", false),
+            ("127.0.0.1", "https://127.0.0.1", true),
+            ("127.0.0.1", "https://127.0.0.2", false),
+            ("[::1]", "https://[::1]", true),
+            ("[::1]", "https://[::2]", false),
+            ("localhost", "https://localhost", true),
+            ("localhost", "https://login.localhost", false),
+            ("vault.corp", "https://vault.corp", true),
+            ("vault.corp", "https://other.vault.corp", false),
+        ];
+        for (saved, origin, expected) in cases {
+            let scope = FillContext {
+                origin: origin.into(),
+                ..context()
+            };
+            assert_eq!(
+                scope.matches(&metadata(saved)).unwrap_or(false),
+                expected,
+                "{saved} -> {origin}"
+            );
+            assert_eq!(
+                scope
+                    .authorize(&metadata(saved), RevealField::Password)
+                    .is_ok(),
+                expected,
+                "private check: {saved} -> {origin}"
+            );
+            assert_eq!(
+                scope.authorize(&metadata(saved), RevealField::Totp).is_ok(),
+                expected,
+                "code check: {saved} -> {origin}"
+            );
+        }
+    }
+
     #[test]
     fn browser_cannot_request_notes_or_all_fields_even_before_connection() {
         for field in ["notes", "all"] {

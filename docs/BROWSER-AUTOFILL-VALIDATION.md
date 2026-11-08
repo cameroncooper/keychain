@@ -23,7 +23,7 @@
   explicitly skipped the slow deadline case already exercised in the light run.
   Screenshots of inline/picker/toolbar surfaces were retained and inspected.
 
-Installed root broker SHA-256:
+Initial autofill rollout broker SHA-256:
 `471a4aa4118878e7761fbca8a6895ffe82ed0b5cd560f3aa89911cb153d9ce4a`.
 The previous binary is retained at
 `/var/lib/keychain-service-backups/browser-autofill.he4wmz0t/keychain-broker`.
@@ -37,3 +37,21 @@ user acceptance check after reloading the built extension. Automated success doe
 not establish real sensor, Apple upload or every site's form compatibility.
 Save/update, generation, QR enrollment and browser-autofill settings integration
 remain pending; no controls claim those capabilities.
+
+## Registrable-domain matching update
+
+The root broker now matches password/code items by registrable domain using the
+embedded `psl` 2.1.248 list, including its private suffixes. Domain matching and
+private authorization tests cover Apple root/sibling/subdomains, `co.uk`,
+`github.io`/`blogspot.com` tenant separation, PSL wildcard/exception rules, IDNA,
+lookalikes, malformed names, HTTPS/port restrictions, IPs and local/unknown names.
+Library tests passed: 240, with 27 ignored. Clippy with warnings denied and the
+release host/broker builds passed. No browser JavaScript or WebAuthn RP policy
+changed, so the existing browser harness was not rerun for this native-only change.
+
+The broker was replaced atomically while inactive. The installed binary matches
+release SHA-256 `5039b115e4c70f1887414bf98a824e0875f03c6c5d3b93dd07f56b2adca17d05`;
+backup: `/var/lib/keychain-service-backups/domain-matching.5vi5xezy/keychain-broker`.
+Read-only native inspection succeeded for `apple.com`, `account.apple.com` and
+`developer.apple.com`, returning identical sets of offered item IDs. No private
+fields were requested and no biometric operation or Apple write ran.

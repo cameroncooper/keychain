@@ -156,8 +156,8 @@ RP ID to the extension. A one-shot native host first returns only matching accou
 software path opens a local presence-approval window before a second one-shot host revalidates
 the request and signs it. In broker mode, one matching account goes directly to the OS fingerprint
 prompt; multiple accounts first get a compact account picker. Password/code filling uses
-isolated form content scripts and a separate broker operation with exact HTTPS-origin
-matching. Only verified, enabled broker-protected logins are offered. Choosing an account
+isolated form content scripts and a separate broker operation with HTTPS registrable-domain
+matching, including subdomains and private-suffix tenant isolation. Only verified, enabled broker-protected logins are offered. Choosing an account
 requests fresh native authorization; the browser receives only its selected password or
 current code, never notes or TOTP seeds. Form/navigation checks run again before filling,
 and forms are never submitted automatically. Username-first forms use public metadata.
