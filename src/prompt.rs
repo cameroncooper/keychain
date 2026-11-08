@@ -348,6 +348,7 @@ fn connect_agent(path: &Path, owner: u32) -> io::Result<UnixStream> {
 
 pub struct PromptSession {
     stream: UnixStream,
+    last_status: Option<String>,
     id: Uuid,
     canceled: Arc<AtomicBool>,
     reader: Option<std::thread::JoinHandle<()>>,
@@ -494,6 +495,7 @@ impl PromptSession {
         });
         Ok(Self {
             stream,
+            last_status: None,
             id,
             canceled,
             reader: Some(reader),
@@ -506,13 +508,20 @@ impl PromptSession {
         if message.len() > 512 || message.chars().any(char::is_control) {
             return Err(io::Error::other("invalid status"));
         }
+        // The blocking key API exposes no live sensor guidance. Its control
+        // loop rechecks revocation frequently; unchanged text needs no IPC.
+        if self.last_status.as_deref() == Some(message) {
+            return Ok(());
+        }
         write_frame(
             &mut self.stream,
             &DisplayEvent::Status {
                 id: self.id,
                 message: message.into(),
             },
-        )
+        )?;
+        self.last_status = Some(message.into());
+        Ok(())
     }
 }
 impl Drop for PromptSession {

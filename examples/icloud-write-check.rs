@@ -36,7 +36,7 @@ struct Args {
     /// For an explicitly approved retry, confirm the original uncertain attempt.
     #[arg(long)]
     confirm_attempt: Option<Uuid>,
-    #[arg(long, default_value = "/dev/sep-bio")]
+    #[arg(long, default_value = "/dev/sep-keys")]
     device: PathBuf,
 }
 #[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]

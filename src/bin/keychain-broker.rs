@@ -44,7 +44,7 @@ enum Command {
     Serve {
         #[arg(long)]
         socket: Option<PathBuf>,
-        #[arg(long, default_value = "/dev/sep-bio")]
+        #[arg(long, default_value = "/dev/sep-keys")]
         device: PathBuf,
         #[arg(long)]
         allow_diagnostics: bool,
@@ -60,7 +60,7 @@ enum Command {
     },
     /// Create the broker's item recipient using the compatible decrypt driver.
     PrepareItemKey {
-        #[arg(long, default_value = "/dev/sep-bio")]
+        #[arg(long, default_value = "/dev/sep-keys")]
         device: PathBuf,
     },
     /// Explicitly enroll a disposable key in the diagnostic-only registry.

@@ -18,15 +18,11 @@ use zeroize::Zeroize;
 pub mod memory;
 pub mod peer;
 
-pub const MAX_BLOB: usize = 4096;
-pub const MAX_SIGNATURE: usize = 72;
-const GET_INFO: libc::c_ulong = 0x8020_b101;
-const CANCEL: libc::c_ulong = 0xb107;
-const CREATE: libc::c_ulong = 0xc058_b10b;
-const SIGN_START: libc::c_ulong = 0x4038_b10c;
-const SIGN_POLL: libc::c_ulong = 0x8058_b10d;
-const DECRYPT_START: libc::c_ulong = 0x4020_b10e;
-const DECRYPT_POLL: libc::c_ulong = 0xc018_b10f;
+// Generated directly from include/linux/apple-sep.h at build time. The same
+// probe emits compile-time assertions for every pointer-bearing record layout.
+include!(concat!(env!("OUT_DIR"), "/abi.rs"));
+pub const MAX_BLOB: usize = BLOB_CAPACITY as usize;
+pub const MAX_SIGNATURE: usize = SIGNATURE_CAPACITY as usize;
 
 #[derive(Debug)]
 pub enum Error {
@@ -60,83 +56,79 @@ type Result<T> = std::result::Result<T, Error>;
 #[derive(Default)]
 pub struct Info {
     pub version: u32,
-    pub sensor_present: u32,
-    pub enrolled: u32,
-    pub capacity: u32,
-    pub enroll_stages: u32,
-    pub reserved: [u32; 3],
+    pub capabilities: u32,
+    pub reserved: [u32; 2],
 }
-
+impl Info {
+    pub fn signing(&self) -> bool {
+        self.capabilities & CAP_SIGN as u32 != 0
+    }
+    pub fn decryption(&self) -> bool {
+        self.capabilities & CAP_DECRYPT as u32 != 0
+    }
+    fn validate(&self) -> Result<()> {
+        if self.version != IFACE_VERSION as u32 || self.reserved != [0; 2] {
+            return Err(Error::Unsupported);
+        }
+        Ok(())
+    }
+}
 #[repr(C)]
 struct Create {
     flags: u32,
     blob_len: u32,
     blob_ptr: u64,
-    public: [u8; 65],
+    public_key: [u8; 65],
     reserved: [u8; 7],
 }
 #[repr(C)]
-struct SignStart {
+struct Sign {
+    request_id: u64,
     flags: u32,
     timeout_ms: u32,
     blob_len: u32,
-    reserved: u32,
+    sig_len: u32,
     blob_ptr: u64,
     digest: [u8; 32],
+    signature: [u8; MAX_SIGNATURE],
 }
 #[repr(C)]
-struct SignPoll {
-    state: u32,
-    status: i32,
-    guidance: u32,
-    sig_len: u32,
-    signature: [u8; 72],
-}
-#[repr(C)]
-struct DecryptStart {
+struct Decrypt {
+    request_id: u64,
     flags: u32,
     timeout_ms: u32,
     blob_len: u32,
     sealed_len: u32,
     blob_ptr: u64,
     sealed_ptr: u64,
-}
-#[repr(C)]
-struct DecryptPoll {
-    state: u32,
-    status: i32,
-    guidance: u32,
     plain_len: u32,
+    reserved: u32,
     plain_ptr: u64,
 }
-
-const _: () = {
-    assert!(size_of::<Info>() == 32);
-    assert!(size_of::<Create>() == 88);
-    assert!(size_of::<SignStart>() == 56);
-    assert!(size_of::<SignPoll>() == 88);
-    assert!(size_of::<DecryptStart>() == 32);
-    assert!(size_of::<DecryptPoll>() == 24);
-};
+#[repr(C)]
+struct Cancel {
+    request_id: u64,
+}
 
 pub struct CreatedKey {
     pub wrapped_blob: Vec<u8>,
     pub public: [u8; 65],
 }
 
+/// Application status only: the blocking ABI exposes no sensor guidance.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Guidance {
     WaitingForDevice,
     Preparing,
     PlaceFinger,
-    LiftAndMove,
-    HoldStill,
 }
 
-/// Owns the exclusive device open. Dropping an active operation cancels delivery.
+/// One logical operation per owned file. The scoped caller and control thread
+/// share this exact File; cancellation never opens a second device descriptor.
 pub struct Device {
     file: File,
     info: Info,
+    next_id: Option<u64>,
 }
 
 impl Device {
@@ -157,141 +149,156 @@ impl Device {
         }
         let mut info = Info::default();
         ioctl(&file, GET_INFO, &mut info).map_err(Error::Io)?;
-        if info.version != 4 || info.reserved[0] & 2 == 0 {
-            return Err(Error::Unsupported);
-        }
-        Ok(Self { file, info })
+        info.validate()?;
+        Ok(Self {
+            file,
+            info,
+            next_id: Some(1),
+        })
     }
-
     pub fn info(&self) -> &Info {
         &self.info
     }
-
+    fn require(&self, capabilities: u64) -> Result<()> {
+        if self.info.capabilities & capabilities as u32 != capabilities as u32 {
+            return Err(Error::Unsupported);
+        }
+        Ok(())
+    }
+    fn request_id(&mut self) -> Result<u64> {
+        allocate_id(&mut self.next_id)
+    }
     pub fn create(&mut self, decrypt: bool) -> Result<CreatedKey> {
+        self.require(if decrypt {
+            CAP_SIGN | CAP_DECRYPT
+        } else {
+            CAP_SIGN
+        })?;
         let mut blob = vec![0; MAX_BLOB];
         let mut request = Create {
-            flags: u32::from(decrypt),
+            flags: if decrypt { CREATE_DECRYPT as u32 } else { 0 },
             blob_len: MAX_BLOB as u32,
             blob_ptr: blob.as_mut_ptr() as u64,
-            public: [0; 65],
+            public_key: [0; 65],
             reserved: [0; 7],
         };
-        ioctl(&self.file, CREATE, &mut request).map_err(Error::Io)?;
-        if request.blob_len == 0 || request.blob_len as usize > MAX_BLOB || request.public[0] != 4 {
+        // CREATE has no private request ID or scan, and is never retried.
+        ioctl(&self.file, CREATE, &mut request).map_err(private_error)?;
+        if request.blob_len == 0
+            || request.blob_len as usize > MAX_BLOB
+            || request.public_key[0] != 4
+            || request.reserved != [0; 7]
+        {
             return Err(Error::InvalidResponse);
         }
         blob.truncate(request.blob_len as usize);
         Ok(CreatedKey {
             wrapped_blob: blob,
-            public: request.public,
+            public: request.public_key,
         })
     }
 
-    /// Callback observes guidance and returns false to cancel. The driver consumes
-    /// the digest unchanged; callers hashing messages must do so exactly once.
+    /// A dedicated thread makes exactly one blocking SIGN. The calling/control
+    /// thread checks application authorization independently of driver progress
+    /// and can issue CANCEL on this file while SIGN is asleep. The digest is
+    /// already SHA-256; it is never hashed again here.
     pub fn sign_digest(
         &mut self,
         blob: &[u8],
         digest: &[u8; 32],
         timeout: Duration,
-        mut progress: impl FnMut(Guidance) -> bool,
+        mut authorized: impl FnMut(Guidance) -> bool,
     ) -> Result<Vec<u8>> {
+        self.require(CAP_SIGN)?;
         let timeout_ms = validate(blob, timeout)?;
-        let deadline = Instant::now() + timeout;
-        let mut request = SignStart {
+        let id = self.request_id()?;
+        let mut request = Sign {
+            request_id: id,
             flags: 0,
             timeout_ms,
             blob_len: blob.len() as u32,
-            reserved: 0,
+            sig_len: 0,
             blob_ptr: blob.as_ptr() as u64,
             digest: *digest,
+            signature: [0; MAX_SIGNATURE],
         };
-        let mut operation = Operation::new(&self.file);
-        ioctl(&self.file, SIGN_START, &mut request).map_err(start_error)?;
-        loop {
-            operation.check(deadline)?;
-            let mut response = SignPoll {
-                state: 0,
-                status: 0,
-                guidance: 0,
-                sig_len: 0,
-                signature: [0; 72],
-            };
-            ioctl(&self.file, SIGN_POLL, &mut response).map_err(Error::Ambiguous)?;
-            if terminal(response.state, response.status)? {
-                operation.check(deadline)?;
-                if !(1..=MAX_SIGNATURE).contains(&(response.sig_len as usize)) {
-                    return Err(Error::InvalidResponse);
-                }
-                operation.finished = true;
-                return Ok(response.signature[..response.sig_len as usize].to_vec());
+        let result = controlled(
+            &self.file,
+            id,
+            Instant::now() + timeout,
+            &mut authorized,
+            || ioctl(&self.file, SIGN, &mut request).map_err(private_error),
+            cancel,
+        );
+        let result = result.and_then(|()| {
+            if !(1..=MAX_SIGNATURE).contains(&(request.sig_len as usize)) {
+                return Err(Error::InvalidResponse);
             }
-            if !progress(guidance(response.guidance)?) {
-                return Err(Error::Canceled);
-            }
-            operation.wait(deadline)?;
-        }
+            Ok(request.signature[..request.sig_len as usize].to_vec())
+        });
+        request.signature.zeroize();
+        result
     }
 
-    /// Plaintext is written only to the caller-owned fixed buffer; errors erase it.
-    /// Caller MUST erase successful output after its authorized use.
+    /// The ioctl writes directly into the caller's fixed, protected mapping.
+    /// Errors (including descriptor-copy faults and raced success after revoke)
+    /// wipe the WHOLE destination. The caller must wipe successful output.
     pub fn decrypt_into(
         &mut self,
         blob: &[u8],
         sealed: &[u8],
         output: &mut [u8; MAX_BLOB],
         timeout: Duration,
-        mut progress: impl FnMut(Guidance) -> bool,
+        mut authorized: impl FnMut(Guidance) -> bool,
     ) -> Result<usize> {
-        output.zeroize();
+        let mut output = OutputGuard::new(output);
         let result = (|| {
+            self.require(CAP_DECRYPT)?;
             let timeout_ms = validate(blob, timeout)?;
             if !(81..=MAX_BLOB).contains(&sealed.len()) || sealed[0] != 4 {
                 return Err(Error::InvalidInput);
             }
-            let deadline = Instant::now() + timeout;
-            let mut request = DecryptStart {
+            let id = self.request_id()?;
+            let mut request = Decrypt {
+                request_id: id,
                 flags: 0,
                 timeout_ms,
                 blob_len: blob.len() as u32,
                 sealed_len: sealed.len() as u32,
                 blob_ptr: blob.as_ptr() as u64,
                 sealed_ptr: sealed.as_ptr() as u64,
+                plain_len: MAX_BLOB as u32,
+                reserved: 0,
+                plain_ptr: output.buffer.as_mut_ptr() as u64,
             };
-            let mut operation = Operation::new(&self.file);
-            ioctl(&self.file, DECRYPT_START, &mut request).map_err(start_error)?;
-            loop {
-                operation.check(deadline)?;
-                // Rebuild capacity on every poll: pending responses may set it to zero.
-                let mut response = DecryptPoll {
-                    state: 0,
-                    status: 0,
-                    guidance: 0,
-                    plain_len: MAX_BLOB as u32,
-                    plain_ptr: output.as_mut_ptr() as u64,
-                };
-                ioctl(&self.file, DECRYPT_POLL, &mut response).map_err(Error::Ambiguous)?;
-                if terminal(response.state, response.status)? {
-                    operation.check(deadline)?;
-                    if response.plain_len as usize > MAX_BLOB {
-                        return Err(Error::InvalidResponse);
-                    }
-                    operation.finished = true;
-                    return Ok(response.plain_len as usize);
-                }
-                if !progress(guidance(response.guidance)?) {
-                    return Err(Error::Canceled);
-                }
-                operation.wait(deadline)?;
+            controlled(
+                &self.file,
+                id,
+                Instant::now() + timeout,
+                &mut authorized,
+                || ioctl(&self.file, DECRYPT, &mut request).map_err(private_error),
+                cancel,
+            )?;
+            if request.plain_len as usize > MAX_BLOB || request.reserved != 0 {
+                return Err(Error::InvalidResponse);
             }
+            Ok(request.plain_len as usize)
         })();
-        if result.is_err() {
-            output.zeroize();
+        if result.is_ok() {
+            output.success = true;
         }
         result
     }
 }
 
+fn allocate_id(next: &mut Option<u64>) -> Result<u64> {
+    let id = next
+        .take()
+        .filter(|id| *id != 0)
+        .ok_or(Error::InvalidInput)?;
+    *next = id.checked_add(1);
+    Ok(id)
+}
 fn validate(blob: &[u8], timeout: Duration) -> Result<u32> {
     if blob.is_empty()
         || blob.len() > MAX_BLOB
@@ -302,147 +309,425 @@ fn validate(blob: &[u8], timeout: Duration) -> Result<u32> {
     }
     Ok(timeout.as_millis() as u32)
 }
-fn guidance(value: u32) -> Result<Guidance> {
-    match value {
-        0 => Ok(Guidance::Preparing),
-        1 => Ok(Guidance::PlaceFinger),
-        2 => Ok(Guidance::LiftAndMove),
-        3 => Ok(Guidance::HoldStill),
-        _ => Err(Error::InvalidResponse),
-    }
-}
-fn terminal(state: u32, status: i32) -> Result<bool> {
-    match (state, status) {
-        (3, 0) => Ok(true),
-        (1 | 2, 0) => Ok(false),
-        (4, code) if (-4095..0).contains(&code) => {
-            Err(Error::Io(io::Error::from_raw_os_error(-code)))
-        }
-        _ => Err(Error::InvalidResponse),
-    }
-}
-fn start_error(error: io::Error) -> Error {
-    if matches!(error.raw_os_error(), Some(libc::EINTR | libc::EIO)) {
+fn private_error(error: io::Error) -> Error {
+    if matches!(
+        error.raw_os_error(),
+        Some(libc::EINTR | libc::EIO | libc::EFAULT | libc::ENOSPC)
+    ) {
         Error::Ambiguous(error)
     } else {
         Error::Io(error)
     }
 }
 
-// Private: called only with the initialized repr(C) records above. They contain
-// no implicit padding, and all embedded pointer targets outlive this synchronous
-// call. The driver copies START inputs before returning, as specified by the ABI.
-fn ioctl<T>(file: &File, request: libc::c_ulong, value: &mut T) -> io::Result<()> {
-    // SAFETY: callers supply the exact record for this ioctl, with valid bounded
-    // pointer targets. The mutable borrow prevents concurrent record access.
-    let result = unsafe { libc::ioctl(file.as_raw_fd(), request, value as *mut T) };
+// No EINTR loop: every private operation is submitted exactly once. Pointer
+// targets and file lifetime are held through the scoped caller's join.
+fn ioctl<T>(file: &File, request: u64, value: &mut T) -> io::Result<()> {
+    // SAFETY: each private caller supplies the matching repr(C) ABI record;
+    // pointed-to bounded buffers outlive the call and are not accessed during it.
+    let result =
+        unsafe { libc::ioctl(file.as_raw_fd(), request as libc::c_ulong, value as *mut T) };
     if result < 0 {
         Err(io::Error::last_os_error())
     } else {
         Ok(())
     }
 }
+fn cancel(file: &File, id: u64) -> io::Result<()> {
+    ioctl(file, CANCEL, &mut Cancel { request_id: id })
+}
 
-struct Operation<'a> {
-    file: &'a File,
-    finished: bool,
+struct OutputGuard<'a> {
+    buffer: &'a mut [u8; MAX_BLOB],
+    success: bool,
 }
-impl<'a> Operation<'a> {
-    fn new(file: &'a File) -> Self {
+impl<'a> OutputGuard<'a> {
+    fn new(buffer: &'a mut [u8; MAX_BLOB]) -> Self {
+        buffer.zeroize();
         Self {
-            file,
-            finished: false,
+            buffer,
+            success: false,
         }
-    }
-    fn check(&self, deadline: Instant) -> Result<()> {
-        if Instant::now() >= deadline {
-            Err(Error::Expired)
-        } else {
-            Ok(())
-        }
-    }
-    fn wait(&self, deadline: Instant) -> Result<()> {
-        self.check(deadline)?;
-        let millis = deadline
-            .saturating_duration_since(Instant::now())
-            .as_millis()
-            .clamp(1, 100) as i32;
-        let mut poll = libc::pollfd {
-            fd: self.file.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
-        // SAFETY: one live initialized pollfd, accessible for the duration of poll.
-        let result = unsafe { libc::poll(&mut poll, 1, millis) };
-        if result < 0 {
-            return Err(Error::Ambiguous(io::Error::last_os_error()));
-        }
-        if poll.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
-            return Err(Error::Ambiguous(io::Error::from_raw_os_error(libc::ENODEV)));
-        }
-        Ok(())
     }
 }
-impl Drop for Operation<'_> {
+impl Drop for OutputGuard<'_> {
     fn drop(&mut self) {
-        if !self.finished {
-            // SAFETY: CANCEL takes no pointer and the descriptor remains live.
-            let _ = unsafe { libc::ioctl(self.file.as_raw_fd(), CANCEL) };
+        if !self.success {
+            self.buffer.zeroize();
         }
     }
+}
+
+struct CancelOnDrop<'a, C: Fn(&File, u64) -> io::Result<()>> {
+    file: &'a File,
+    id: u64,
+    cancel: &'a C,
+    armed: bool,
+    started: Instant,
+}
+impl<C: Fn(&File, u64) -> io::Result<()>> CancelOnDrop<'_, C> {
+    fn revoke(&mut self) {
+        // Application delivery is revoked BEFORE the cancellation syscall.
+        self.armed = false;
+        eprintln!(
+            "SEP request {} cancel entry elapsed_us={}",
+            self.id,
+            self.started.elapsed().as_micros()
+        );
+        let result = (self.cancel)(self.file, self.id);
+        eprintln!(
+            "SEP request {} cancel exit errno={} elapsed_us={}",
+            self.id,
+            result.err().and_then(|e| e.raw_os_error()).unwrap_or(0),
+            self.started.elapsed().as_micros()
+        );
+    }
+}
+impl<C: Fn(&File, u64) -> io::Result<()>> Drop for CancelOnDrop<'_, C> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.revoke();
+        }
+    }
+}
+
+/// Testable lifetime/control mechanism. No driver progress/result-retention
+/// ioctls: the authorization callback runs on the control thread even while
+/// execute blocks. Scoped joining also holds on callback panic. No automatic
+/// busy/interrupted retry. A terminal driver failure retains its original errno.
+fn controlled<R: Send>(
+    file: &File,
+    id: u64,
+    deadline: Instant,
+    authorized: &mut impl FnMut(Guidance) -> bool,
+    execute: impl FnOnce() -> Result<R> + Send,
+    cancel: impl Fn(&File, u64) -> io::Result<()>,
+) -> Result<R> {
+    let started = Instant::now();
+    let mut guard = CancelOnDrop {
+        file,
+        id,
+        cancel: &cancel,
+        armed: true,
+        started,
+    };
+    // ID is already allocated. Early revoke retires it before dispatch.
+    if !authorized(Guidance::PlaceFinger) {
+        guard.revoke();
+        return Err(Error::Canceled);
+    }
+    if Instant::now() >= deadline {
+        guard.revoke();
+        return Err(Error::Expired);
+    }
+    std::thread::scope(|scope| {
+        let caller = std::thread::Builder::new()
+            .name("sep-key-call".into())
+            .spawn_scoped(scope, || {
+                eprintln!(
+                    "SEP request {id} ioctl entry elapsed_us={}",
+                    started.elapsed().as_micros()
+                );
+                let result = execute();
+                let errno = match &result {
+                    Err(Error::Io(e) | Error::Ambiguous(e)) => e.raw_os_error().unwrap_or(0),
+                    _ => 0,
+                };
+                eprintln!(
+                    "SEP request {id} ioctl exit errno={errno} elapsed_us={}",
+                    started.elapsed().as_micros()
+                );
+                result
+            })
+            .map_err(Error::Io)?;
+        // This guard must unwind BEFORE the scope joins its worker, so a
+        // panicking callback cannot leave a blocked ioctl awaiting a finger.
+        let mut guard = guard;
+        let mut revoked = None;
+        while !caller.is_finished() {
+            if !authorized(Guidance::PlaceFinger) {
+                revoked = Some(Error::Canceled);
+            } else if Instant::now() >= deadline {
+                revoked = Some(Error::Expired);
+            }
+            if revoked.is_some() {
+                guard.revoke();
+                break;
+            }
+            std::thread::park_timeout(Duration::from_millis(25));
+        }
+        let result = caller.join().unwrap_or(Err(Error::InvalidResponse));
+        // A result claimed just before CANCEL, ENOENT or EALREADY still cannot
+        // be delivered after broker/UI revocation. Recheck even a fast success.
+        if revoked.is_none() {
+            if !authorized(Guidance::PlaceFinger) {
+                revoked = Some(Error::Canceled);
+            } else if Instant::now() >= deadline {
+                revoked = Some(Error::Expired);
+            }
+            if revoked.is_some() {
+                guard.revoke();
+            }
+        }
+        guard.armed = false;
+        eprintln!(
+            "SEP request {id} caller joined revoked={} elapsed_us={}",
+            revoked.is_some(),
+            started.elapsed().as_micros()
+        );
+        match result {
+            Err(error) => Err(error), // preserve EIO/EINTR even when UI canceled
+            Ok(_) if revoked.is_some() => Err(revoked.unwrap_or(Error::Canceled)),
+            Ok(value) => Ok(value),
+        }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
+    };
+
+    fn file() -> File {
+        File::open("/dev/null").unwrap_or_else(|e| panic!("file: {e}"))
+    }
+    fn deadline() -> Instant {
+        Instant::now() + Duration::from_secs(2)
+    }
 
     #[test]
-    fn invalid_states_and_bounds_fail_closed() {
-        assert!(terminal(3, -5).is_err());
-        assert!(terminal(4, 0).is_err());
-        assert!(terminal(0, 0).is_err());
-        assert!(terminal(4, i32::MIN).is_err());
-        assert!(terminal(1, 0).is_ok());
+    fn capability_version_and_request_ids_fail_closed() {
+        assert!(
+            Info {
+                version: 1,
+                capabilities: 0,
+                reserved: [0; 2]
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            Info {
+                version: 4,
+                ..Info::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            Info {
+                version: 1,
+                reserved: [1, 0],
+                ..Info::default()
+            }
+            .validate()
+            .is_err()
+        );
+        let mut next = Some(1);
+        assert_eq!(allocate_id(&mut next).unwrap_or(0), 1);
+        assert_eq!(allocate_id(&mut next).unwrap_or(0), 2);
+        next = Some(u64::MAX);
+        assert_eq!(allocate_id(&mut next).unwrap_or(0), u64::MAX);
+        assert!(allocate_id(&mut next).is_err());
+        next = Some(0);
+        assert!(allocate_id(&mut next).is_err());
         assert!(validate(&[], Duration::from_secs(1)).is_err());
         assert!(validate(&[1], Duration::ZERO).is_err());
         assert!(validate(&[1], Duration::from_secs(121)).is_err());
     }
 
     #[test]
-    fn layouts_and_ioctl_numbers_match_the_supplied_c_header() {
-        let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("tempdir: {e}"));
-        let binary = dir.path().join("abi");
-        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let compile = std::process::Command::new("cc")
-            .arg(root.join("tests/abi.c"))
-            .arg("-o")
-            .arg(&binary)
-            .status()
-            .unwrap_or_else(|e| panic!("C compiler: {e}"));
-        assert!(compile.success());
-        let output = std::process::Command::new(binary)
-            .output()
-            .unwrap_or_else(|e| panic!("ABI probe: {e}"));
-        assert!(output.status.success());
-        let expected = format!(
-            "{} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}\n",
-            size_of::<Info>(),
-            size_of::<Create>(),
-            size_of::<SignStart>(),
-            size_of::<SignPoll>(),
-            size_of::<DecryptStart>(),
-            size_of::<DecryptPoll>(),
-            GET_INFO,
-            CREATE,
-            SIGN_START,
-            SIGN_POLL,
-            CANCEL,
-            DECRYPT_START,
-            DECRYPT_POLL,
-            std::mem::offset_of!(Create, public),
-            std::mem::offset_of!(SignStart, digest),
-            std::mem::offset_of!(DecryptPoll, plain_ptr)
+    fn cancellation_runs_on_same_file_while_execute_is_blocked_and_joins() {
+        let file = file();
+        let entered = AtomicBool::new(false);
+        let joined = AtomicBool::new(false);
+        let calls = AtomicUsize::new(0);
+        let (release, wait) = mpsc::channel();
+        let wait = std::sync::Mutex::new(wait);
+        let result = controlled(
+            &file,
+            9,
+            deadline(),
+            &mut |_| !entered.load(Ordering::Acquire),
+            || {
+                calls.fetch_add(1, Ordering::Relaxed);
+                entered.store(true, Ordering::Release);
+                wait.lock()
+                    .unwrap_or_else(|e| panic!("wait: {e}"))
+                    .recv_timeout(Duration::from_secs(1))
+                    .unwrap_or_else(|e| panic!("cancel was not concurrent: {e}"));
+                joined.store(true, Ordering::Release);
+                // Simulate a result claimed just before cancellation.
+                Ok(vec![1, 2, 3])
+            },
+            |same_file, id| {
+                assert_eq!(same_file.as_raw_fd(), file.as_raw_fd());
+                assert_eq!(id, 9);
+                release.send(()).unwrap_or_else(|e| panic!("release: {e}"));
+                Err(io::Error::from_raw_os_error(libc::EALREADY))
+            },
         );
-        assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+        assert!(matches!(result, Err(Error::Canceled)));
+        assert!(joined.load(Ordering::Acquire));
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn driver_errors_win_cancel_races_and_are_never_replayed() {
+        for errno in [
+            libc::EINTR,
+            libc::EIO,
+            libc::EFAULT,
+            libc::ENOSPC,
+            libc::EBUSY,
+            libc::EACCES,
+            libc::EOPNOTSUPP,
+        ] {
+            let entered = AtomicBool::new(false);
+            let calls = AtomicUsize::new(0);
+            let (release, wait) = mpsc::channel();
+            let wait = std::sync::Mutex::new(wait);
+            let result: Result<()> = controlled(
+                &file(),
+                1,
+                deadline(),
+                &mut |_| !entered.load(Ordering::Acquire),
+                || {
+                    calls.fetch_add(1, Ordering::Relaxed);
+                    entered.store(true, Ordering::Release);
+                    wait.lock()
+                        .unwrap_or_else(|e| panic!("wait: {e}"))
+                        .recv_timeout(Duration::from_secs(1))
+                        .unwrap_or_else(|e| panic!("cancel: {e}"));
+                    Err(private_error(io::Error::from_raw_os_error(errno)))
+                },
+                |_, _| {
+                    release.send(()).unwrap_or_else(|e| panic!("release: {e}"));
+                    Ok(())
+                },
+            );
+            assert!(
+                matches!(result, Err(Error::Io(e) | Error::Ambiguous(e)) if e.raw_os_error() == Some(errno))
+            );
+            assert_eq!(calls.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[test]
+    fn predispatch_revoke_retires_id_without_submitting() {
+        let retired = AtomicUsize::new(0);
+        let result: Result<()> = controlled(
+            &file(),
+            7,
+            deadline(),
+            &mut |_| false,
+            || panic!("revoked operation submitted"),
+            |_, id| {
+                retired.store(id as usize, Ordering::Relaxed);
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(Error::Canceled)));
+        assert_eq!(retired.load(Ordering::Relaxed), 7);
+    }
+
+    #[test]
+    fn deadline_cancels_sleeping_caller_and_discards_raced_plaintext() {
+        let (release, wait) = mpsc::channel();
+        let wait = std::sync::Mutex::new(wait);
+        let result = controlled(
+            &file(),
+            1,
+            Instant::now() + Duration::from_millis(40),
+            &mut |_| true,
+            || {
+                wait.lock()
+                    .unwrap_or_else(|e| panic!("wait: {e}"))
+                    .recv_timeout(Duration::from_secs(1))
+                    .unwrap_or_else(|e| panic!("cancel: {e}"));
+                Ok(())
+            },
+            |_, _| {
+                release.send(()).unwrap_or_else(|e| panic!("release: {e}"));
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(Error::Expired)));
+    }
+
+    #[test]
+    fn final_authorization_check_revokes_fast_success() {
+        let finished = AtomicBool::new(false);
+        let result = controlled(
+            &file(),
+            1,
+            deadline(),
+            &mut |_| !finished.load(Ordering::Acquire),
+            || {
+                finished.store(true, Ordering::Release);
+                Ok(())
+            },
+            |_, _| Err(io::Error::from_raw_os_error(libc::ENOENT)),
+        );
+        assert!(matches!(result, Err(Error::Canceled)));
+    }
+
+    #[test]
+    fn callback_panic_cancels_before_join_and_wipes_partial_output() {
+        let mut output = [0; MAX_BLOB];
+        let entered = AtomicBool::new(false);
+        let exited = AtomicBool::new(false);
+        let (release, wait) = mpsc::channel();
+        let wait = std::sync::Mutex::new(wait);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let guard = OutputGuard::new(&mut output);
+            let _: Result<()> = controlled(
+                &file(),
+                1,
+                deadline(),
+                &mut |_| {
+                    assert!(!entered.load(Ordering::Acquire), "synthetic control panic");
+                    true
+                },
+                || {
+                    guard.buffer.fill(0x55); // partial copy before descriptor error
+                    entered.store(true, Ordering::Release);
+                    wait.lock()
+                        .unwrap_or_else(|e| panic!("wait: {e}"))
+                        .recv_timeout(Duration::from_secs(1))
+                        .unwrap_or_else(|e| panic!("cancel: {e}"));
+                    exited.store(true, Ordering::Release);
+                    Ok(())
+                },
+                |_, _| {
+                    release.send(()).unwrap_or_else(|e| panic!("release: {e}"));
+                    Ok(())
+                },
+            );
+        }));
+        assert!(result.is_err());
+        assert!(exited.load(Ordering::Acquire));
+        assert!(output.iter().all(|byte| *byte == 0));
+    }
+
+    #[test]
+    fn failure_wipes_entire_output_but_success_is_caller_owned() {
+        let mut buffer = [0x44; MAX_BLOB];
+        {
+            let guard = OutputGuard::new(&mut buffer);
+            assert!(guard.buffer.iter().all(|byte| *byte == 0));
+            guard.buffer[..20].fill(0x33);
+        }
+        assert!(buffer.iter().all(|byte| *byte == 0));
+        {
+            let mut guard = OutputGuard::new(&mut buffer);
+            guard.buffer[..20].fill(0x33);
+            guard.success = true;
+        }
+        assert_eq!(&buffer[..20], &[0x33; 20]);
+        buffer.zeroize();
     }
 }

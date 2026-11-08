@@ -1,6 +1,13 @@
 # SEP integration: design and completion plan
 
-Status: implementation and acceptance in progress, updated 2026-11-07.
+Status: implementation and acceptance in progress, updated 2026-11-08.
+
+
+Transport update: application keys now use the blocking `/dev/sep-keys` version 1
+API. See [the migration handoff](docs/SEP-BLOCKING-MIGRATION.md) and
+[application migration evidence](docs/SEP-BLOCKING-VALIDATION.md). Historical
+START/POLL observations below do not describe the current transport. Existing
+wrapped keys, item envelopes and record identities remain unchanged.
 
 The native signing/decryption provider, protected software signing, migration,
 selected login/TOTP reveal, native credential creation and iCloud upload path are
@@ -17,16 +24,18 @@ tolerates focus changes; the bound authorization state cancels on focus loss.
 The user confirmed the native preview/transition; the new native-choice browser
 registration/login gate remains open. See [native prompt design](docs/NATIVE-CREATION-PROMPT.md).
 
-On kernel `7.2.11-15-1-ARCH`, existing saved-key signing and synthetic decryption
-passed, along with a read-only 18-record Apple preflight. The Escape check returned
-uncertain EIO while sensor initialization timed out. Its attribution is unresolved:
-UI cancellation is recorded, but CANCEL syscall/cleanup timing is not. See
+The version-1 key-node migration has passed existing-key synthetic decryption,
+trusted-context validation, a clean Escape -> concurrent CANCEL -> ECANCELED check
+and a separately authorized same-key signing check afterward, without a reset.
+The migrated broker and key-node-only service allowlist are installed. See
+[the migration acceptance record](docs/SEP-BLOCKING-VALIDATION.md). Earlier EIO
+attribution remains unresolved historical evidence in
 [the investigation handoff](docs/SEP-CANCELLATION-HANDOFF.md) and
-[current acceptance record](docs/OS-UPDATE-VALIDATION-20261107.md).
+[the prior OS acceptance record](docs/OS-UPDATE-VALIDATION-20261107.md).
 
 The protected computation source review and constrained 1-MiB/no-capabilities
 synthetic service check passed; broader memory-erasure claims remain excluded.
-The complete objective is not achieved. Clean cancellation/post-cancel reuse,
+The complete objective is not achieved. Prompt-disconnect validation,
 remaining live lock/expiry/resume and migrated persistence checks, native-choice
 browser acceptance and use of a Linux-created credential on another Apple device
 still need evidence. Production creation stays disabled, and all existing
@@ -124,10 +133,10 @@ CLI / browser extension and native host
 privileged broker <----> user-session prompt agent
         |               storage choice / display / guidance / cancel
         v
-safe Rust driver client -> isolated ioctl bindings -> /dev/sep-bio -> SEP
+safe Rust driver client -> isolated ioctl bindings -> /dev/sep-keys -> SEP
 ```
 
-Use a small dedicated bindings crate for ioctl/poll and memory-protection unsafe
+Use a small dedicated bindings crate for blocking ioctls and memory-protection unsafe
 code; retain `unsafe_code = "deny"` in the main package. Use the supplied header,
 not raw firmware packets or Python subprocesses. Check structure sizes/alignment,
 pointer offsets, reserved fields and ioctl numbers against the header.

@@ -1,5 +1,8 @@
 # Rust SEP application integration evidence
 
+Current transport evidence is in [blocking API validation](SEP-BLOCKING-VALIDATION.md).
+The following is historical acceptance of the old BIO/polling API.
+
 Date: 2026-11-05. These are application-side runs against the loaded local driver,
 separate from the maintainer's [driver validation](sep-driver/VALIDATION.md).
 The sections below record successive stages. Earlier temporary-service limits are

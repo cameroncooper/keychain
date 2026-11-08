@@ -31,7 +31,7 @@ pub struct StoredSepKey {
 }
 
 impl StoredSepKey {
-    /// Wait only for an exclusive open. Once CREATE starts, never retry it on
+    /// Wait only for a refused open. Once CREATE starts, never retry it on
     /// an ambiguous result. No public credential identity has been delivered yet.
     pub fn create_selected(
         path: &Path,
@@ -103,8 +103,8 @@ impl StoredSepKey {
         Ok(())
     }
 
-    /// Opens the device before starting a single decrypt operation. Only a busy
-    /// open is retried; a command with uncertain completion is never replayed.
+    /// Opens the key node before one blocking decrypt operation. Only a busy
+    /// open is retried; a submitted command is never replayed.
     pub(crate) fn decrypt_selected(
         &self,
         path: &Path,
@@ -269,7 +269,7 @@ impl SepProvider for NativeSepProvider {
                 (self.progress)(guidance)
             })
             .map_err(map_driver)?;
-        // DONE means biometric-policy operation and credential disposal succeeded.
+        // Successful blocking completion includes biometric policy and credential disposal.
         // sign_native independently verifies the signature before exposing outcome.
         Ok(SignResponse {
             id: request.id,
@@ -292,7 +292,7 @@ fn acquire_device<T>(
             Ok(device) => return Ok(device),
             Err(error) if matches!(&error, DriverError::Io(io) if io.raw_os_error() == Some(libc::EBUSY)) =>
             {
-                // Retry ONLY an exclusive open which started no operation.
+                // Retry ONLY a refused open which started no operation.
                 if !progress(Guidance::WaitingForDevice) {
                     return Err(ProviderError::Canceled);
                 }

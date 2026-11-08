@@ -14,7 +14,7 @@ mod login;
 #[derive(Parser)]
 #[command(about = "Diagnose real SEP biometric signing using disposable application keys")]
 struct Cli {
-    #[arg(long, default_value = "/dev/sep-bio")]
+    #[arg(long, default_value = "/dev/sep-keys")]
     device: PathBuf,
     #[command(subcommand)]
     command: Command,
@@ -297,10 +297,10 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             let device = Device::open(&cli.device)?;
             let info = device.info();
             println!(
-                "ABI: {}; biometric signing: available; sensor: {}; enrolled: {}",
+                "key API version: {}; signing: {}; decryption: {} (not a sensor health check)",
                 info.version,
-                info.sensor_present != 0,
-                info.enrolled
+                info.signing(),
+                info.decryption()
             );
         }
         Command::Create { key_file, decrypt } => {
@@ -363,8 +363,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                             Guidance::WaitingForDevice => "Waiting for the fingerprint reader…",
                             Guidance::Preparing => "Preparing fingerprint reader…",
                             Guidance::PlaceFinger => "Touch the fingerprint reader",
-                            Guidance::LiftAndMove => "Lift and reposition your finger",
-                            Guidance::HoldStill => "Hold your finger still",
                         })
                         .is_ok()
                 },
@@ -426,8 +424,6 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         Guidance::WaitingForDevice => "Waiting for the fingerprint reader…",
                         Guidance::Preparing => "Preparing fingerprint reader…",
                         Guidance::PlaceFinger => "Touch the fingerprint reader",
-                        Guidance::LiftAndMove => "Lift and reposition your finger",
-                        Guidance::HoldStill => "Hold your finger still",
                     };
                     if session.status(text).is_err() {
                         return false;

@@ -618,7 +618,7 @@ impl Broker {
         authorization.check()?;
         if cancellation_test {
             return Err(Error::Refused(
-                "cancellation test completed with a fingerprint; no signature delivered".into(),
+                "driver returned a successful signature during the cancellation test; no signature delivered".into(),
             ));
         }
         Ok(result)
@@ -628,7 +628,8 @@ impl Broker {
 impl Broker {
     fn device_status(&self) -> &'static str {
         match keychain_sep_driver::Device::open(&self.device) {
-            Ok(_) => "available",
+            Ok(device) if device.info().signing() => "available",
+            Ok(_) => "unsupported",
             Err(keychain_sep_driver::Error::Unsupported) => "unsupported",
             Err(keychain_sep_driver::Error::Io(error)) => match error.raw_os_error() {
                 Some(libc::EBUSY) => "busy",
@@ -649,7 +650,9 @@ impl Broker {
         let Ok(device) = keychain_sep_driver::Device::open(&self.device) else {
             return Ok(false);
         };
-        Ok(device.info().sensor_present != 0 && device.info().enrolled > 0)
+        // The key API deliberately exposes no enrollment/sensor details.
+        // Capability advertisement is not proof of operational sensor health.
+        Ok(device.info().signing())
     }
     fn native_ui_available(&self) -> Result<bool> {
         use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};

@@ -1,3 +1,5 @@
+> **Transport superseded:** The installed driver now uses blocking `/dev/sep-keys`. See [SEP-BLOCKING-MIGRATION.md](../SEP-BLOCKING-MIGRATION.md) and its exact reference sources. The START/POLL interface and client described below are historical.
+
 # Biometric P-256 keys
 
 `sep-key.py` is a small reference client for the key ioctls in

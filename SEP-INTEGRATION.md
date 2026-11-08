@@ -1,6 +1,18 @@
 # SEP integration for keychain developers
 
-## Current handoff: signing and biometric item decryption — 2026-11-05
+## Current transport — 2026-11-08
+
+Use [the blocking key API migration handoff](docs/SEP-BLOCKING-MIGRATION.md).
+Application keys use `/dev/sep-keys` version 1, a separate node from fingerprint
+enrollment. The Rust adapter vendors the matching canonical header at
+`crates/sep-driver/include/linux/apple-sep.h`; ioctl constants and Rust layout
+assertions are generated from it. Existing blobs/envelopes remain compatible.
+
+The sections below retain historical API/design evidence. Their START/POLL,
+exclusive-open and BIO capability descriptions have been superseded; they are
+not instructions for new application-key operations.
+
+## Historical handoff: signing and biometric item decryption — 2026-11-05
 
 Start with [the concrete decrypt API and working example](docs/sep-driver/DECRYPTION.md),
 [the header](docs/sep-driver/sep-bio.h),

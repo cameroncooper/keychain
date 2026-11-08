@@ -110,8 +110,6 @@ impl NativeAuthorization {
         self.remaining()?;
         let reason = if self.canceled.load(Ordering::Acquire) {
             Some("request disconnected")
-        } else if !self.session.valid() {
-            Some("desktop session invalid")
         } else if self
             .prompt
             .lock()
@@ -119,6 +117,8 @@ impl NativeAuthorization {
             .canceled()
         {
             Some("desktop prompt canceled or disconnected")
+        } else if !self.session.valid() {
+            Some("desktop session invalid")
         } else {
             None
         };
@@ -127,8 +127,16 @@ impl NativeAuthorization {
             return Err(ProviderError::Canceled.into());
         }
         // Cancellation can arrive during the bounded login1 query above.
-        if self.canceled.load(Ordering::Acquire) {
-            eprintln!("keychain-broker: biometric authorization canceled: request disconnected");
+        if self.canceled.load(Ordering::Acquire)
+            || self
+                .prompt
+                .lock()
+                .map_err(|_| Error::Refused("prompt failed".into()))?
+                .canceled()
+        {
+            eprintln!(
+                "keychain-broker: biometric authorization canceled: request or prompt disconnected"
+            );
             return Err(ProviderError::Canceled.into());
         }
         self.remaining()?;
@@ -148,6 +156,8 @@ impl NativeAuthorization {
             .status(message)
             .map_err(|e| Error::io("desktop prompt status", e))
     }
+    // Called by the provider's control thread while its separate caller blocks
+    // in SIGN/DECRYPT. These are application checks, not driver progress events.
     pub(super) fn progress(&self, guidance: keychain_sep_driver::Guidance) -> bool {
         if self.check().is_err() {
             return false;
@@ -164,8 +174,6 @@ impl NativeAuthorization {
                     Guidance::WaitingForDevice => "Waiting for the fingerprint reader…",
                     Guidance::Preparing => "Preparing fingerprint reader…",
                     Guidance::PlaceFinger => "Touch the fingerprint reader",
-                    Guidance::LiftAndMove => "Lift and reposition your finger",
-                    Guidance::HoldStill => "Hold your finger still",
                 }
             })
             .is_ok()

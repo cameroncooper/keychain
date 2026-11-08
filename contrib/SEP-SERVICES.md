@@ -101,15 +101,22 @@ temporary disposable-key tests; it cannot sign with non-diagnostic records.
 The privileged `provision-diagnostic` command is likewise a test operation, not
 credential registration or Apple synchronization.
 
-Device access is exclusive. An EBUSY on open produces a waiting state; only this
-pre-operation open is retried within the original deadline. No signing command
-or ambiguous completion is retried. Cancellation/session policy remain active
-while waiting. No fallback backend or forced restart of fprintd is used. A real
-fprintd Claim held the SEP device busy while an installed-broker request remained
-pending. After this client's Release, the biometric operation completed and a
-fresh device probe succeeded. No verification/enrollment was started by fprintd
-and no other client's claim was released. The diagnostic uses the standard
-[Claim/Release API](https://fprint.freedesktop.org/fprintd-dev/Device.html).
+Application keys use `/dev/sep-keys` version 1. The broker template grants only
+that node; it does not need fingerprint enrollment access through `/dev/sep-bio`.
+Opening the key node does not acquire the sensor, and idle BIO opens can coexist.
+The driver reports active hardware contention as `EBUSY` before submission. The
+provider returns this as Busy without automatically resubmitting. An open that
+itself returns Busy may be waited for within the existing deadline; no submitted
+private operation, interrupted call or ambiguous completion is replayed. No
+fallback backend, forced fprintd restart or change to keybag policy is used.
+
+A dedicated scoped caller blocks in SIGN/DECRYPT while its control thread checks
+request, prompt, session and deadline revocation and sends CANCEL on the same
+file with the allocated request ID. It joins the caller before releasing buffers,
+discards success after revocation and preserves a driver error that wins the race.
+See [current migration evidence](../docs/SEP-BLOCKING-VALIDATION.md). The older
+fprintd exclusive-open observations remain historical evidence in the prior
+[application validation record](../docs/SEP-APPLICATION-VALIDATION.md).
 
 Installed hardened services have now completed a synthetic migration and a
 fresh release native-host assertion with independent ES256/identity/flag checks.
