@@ -30,24 +30,13 @@
     async completeIsUvpaaRequest({ requestId, isUvpaa }) { finish(requestId, { available: isUvpaa === true }); },
   };
   globalThis.keychainApi = { runtime: browser.runtime, storage: browser.storage,
-    windows: browser.windows, action: browser.browserAction };
+    windows: browser.windows, tabs: browser.tabs, webNavigation: browser.webNavigation, action: browser.browserAction };
   globalThis.keychainTransport = transport;
 
-  function caller(sender) {
-    if (sender?.id !== browser.runtime.id || !Number.isInteger(sender.tab?.id) || sender.frameId !== 0) {
-      throw new Error("Only top-level extension content scripts may request passkeys");
-    }
-    const url = new URL(sender.url);
-    if (url.protocol !== "https:" || url.origin === "null" ||
-        (sender.origin !== undefined && sender.origin !== url.origin)) {
-      throw new Error("Passkeys require a non-opaque HTTPS document origin");
-    }
-    return url;
-  }
   browser.runtime.onConnect.addListener((port) => {
-    if (port.name !== "keychain-webauthn") { port.disconnect(); return; }
+    if (port.name !== "keychain-webauthn") return;
     let url;
-    try { url = caller(port.sender); }
+    try { url = KeychainSender.caller(port.sender, browser.runtime.id); }
     catch (error) { fail(port, error.message); return; }
     if (pending.size >= 64 || [...pending.values()].filter(request => request.tab === port.sender.tab.id).length >= 4 || !Number.isSafeInteger(nextId)) {
       fail(port, "Too many passkey requests", "NotAllowedError"); return;

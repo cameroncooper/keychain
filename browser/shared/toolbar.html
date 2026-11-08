@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Keychain</title><link rel="stylesheet" href="approval.css"></head>
+<body class="toolbar"><main>
+<header class="menu-heading"><span class="key-mark" aria-hidden="true"></span><span>Keychain</span></header>
+<div class="status" role="status"><h1 id="site">Keychain</h1><p id="status">Connecting…</p></div>
+<div id="accounts" class="account-list" aria-label="Saved accounts"></div>
+<div class="menu-actions">
+<button id="open-manager" class="menu-action" disabled>Open Keychain…</button>
+<label class="toggle-row"><input type="checkbox" id="enabled">Use Keychain in this browser</label>
+<p class="notice">Choose a passkey on a website to sign in. Sensitive actions require authorization in the desktop prompt.</p>
+</div>
+<p id="error" class="error" role="alert"></p>
+</main><script src="toolbar.js"></script></body></html>

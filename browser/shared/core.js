@@ -48,18 +48,19 @@ async function attach() {
     await transport.attach();
     await api.action.setBadgeText({ text: "ON" });
     await api.action.setBadgeBackgroundColor({ color: "#1769e0" });
-    await api.action.setTitle({ title: "Keychain Passkeys: enabled (click to disable)" });
+    await api.action.setTitle({ title: "Keychain: enabled" });
     return true;
   } catch (error) {
     console.error("Could not attach WebAuthentication proxy", error);
     await api.action.setBadgeText({ text: "ERR" });
     await api.action.setBadgeBackgroundColor({ color: "#b42318" });
-    await api.action.setTitle({ title: "Keychain Passkeys: could not attach" });
+    await api.action.setTitle({ title: "Keychain: passkey interception unavailable" });
     return false;
   }
 }
 
 async function detach() {
+  globalThis.keychainForms?.cancelAll();
   for (const id of requestTimers.keys()) clearRequestTimer(id);
   for (const [requestId, port] of activeNative) {
     canceledRequests.add(requestId);
@@ -70,7 +71,7 @@ async function detach() {
   await api.storage.session.clear();
   await api.action.setBadgeText({ text: "OFF" });
   await api.action.setBadgeBackgroundColor({ color: "#666666" });
-  await api.action.setTitle({ title: "Keychain Passkeys: disabled (click to enable)" });
+  await api.action.setTitle({ title: "Keychain: disabled" });
 }
 
 async function ensureProxyState() {
@@ -114,7 +115,7 @@ async function completeRequest(requestId, kind, result) {
 async function openSelection(requestId) {
   const window = await api.windows.create({
     url: `${APPROVAL_PAGE}?requestId=${encodeURIComponent(requestId)}`,
-    type: "popup", width: 440, height: 560, focused: true,
+    type: "popup", width: 360, height: 340, focused: true,
   });
   if (canceledRequests.has(requestId) || completedRequests.has(requestId)) {
     await api.storage.session.remove(pendingKey(requestId));
@@ -435,15 +436,59 @@ api.runtime.onInstalled.addListener(() => {
 api.runtime.onStartup.addListener(() => {
   void ensureProxyState();
 });
-api.action.onClicked.addListener(() => {
-  void (async () => {
-    const { proxyEnabled = true } = await api.storage.local.get("proxyEnabled");
-    if (proxyEnabled) {
-      await detach();
-      await api.storage.local.set({ proxyEnabled: false });
-    } else if (await attach()) {
-      await api.storage.local.set({ proxyEnabled: true });
-    }
-  })();
-});
 void ensureProxyState();
+
+
+// Only our private extension popup may request these non-page control actions.
+api.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (sender.id !== api.runtime.id) return false;
+  let source;
+  try { source = new URL(sender.url); } catch { return false; }
+  if (source.href !== api.runtime.getURL("toolbar.html")) return false;
+  if (!["getToolbarState", "setEnabled", "openManager", "fillSelectedLogin"].includes(message?.type)) return false;
+  void (async () => {
+    if (message.type === "setEnabled") {
+      if (typeof message.enabled !== "boolean") throw new Error("Invalid browser setting");
+      if (message.enabled) { if (!await attach()) throw new Error("Could not enable Keychain"); }
+      else await detach();
+      await api.storage.local.set({ proxyEnabled: message.enabled });
+      return { ok: true };
+    }
+    if (message.type === "fillSelectedLogin") {
+      const [tab] = await api.tabs.query({active:true,currentWindow:true});
+      await globalThis.keychainForms.choose(tab.id, message.handle, message.id);
+      return {ok:true};
+    }
+    if (message.type === "openManager") {
+      const reply = await controlNative({ version: 1, action: "openManager" });
+      return reply.ok ? { ok: true } : { ok: false, message: reply.error?.message };
+    }
+    const { proxyEnabled = true } = await api.storage.local.get("proxyEnabled");
+    const [capabilities, manager] = await Promise.allSettled([
+      proxyEnabled ? controlNative({ version: 1, action: "capabilities" }) : Promise.resolve(null),
+      controlNative({ version: 1, action: "managerStatus" }),
+    ]);
+    let site = "", loginForm = null;
+    try {
+      const [tab] = await api.tabs.query({active:true,currentWindow:true}); const url = new URL(tab.url);
+      if (url.protocol === "https:") { site=url.hostname; if(proxyEnabled)loginForm=await globalThis.keychainForms?.prepare(tab.id); }
+    } catch {}
+    const cap = capabilities.status === "fulfilled" ? capabilities.value : null;
+    const app = manager.status === "fulfilled" ? manager.value : null;
+    return { ok: true, enabled: proxyEnabled, connected: typeof cap?.ok === "boolean",
+      ready: cap?.ok === true && cap.result?.userVerificationAvailable === true,
+      managerAvailable: app?.ok === true && app.result?.available === true, site, loginForm };
+  })().then(sendResponse, error => sendResponse({ ok: false, message: error.message }));
+  return true;
+});
+function controlNative(message) {
+  return new Promise((resolve, reject) => {
+    const port = api.runtime.connectNative(NATIVE_HOST);
+    let done = false;
+    const finish = (callback, value) => { if (done) return; done = true; clearTimeout(timer); port.disconnect(); callback(value); };
+    const timer = setTimeout(() => finish(reject, new Error("Keychain did not respond")), 5000);
+    port.onMessage.addListener(reply => finish(resolve, reply));
+    port.onDisconnect.addListener(() => finish(reject, new Error(api.runtime.lastError?.message || "Keychain disconnected")));
+    try { port.postMessage(message); } catch (error) { finish(reject, error); }
+  });
+}

@@ -1,8 +1,10 @@
 # Browser adapters
 
-The extension provides passkey creation and authentication. Password/TOTP form
-filling is not implemented. Both adapters use the same Rust native host, broker,
-account picker and native GPUI storage/fingerprint prompts.
+The extension provides passkey creation/authentication and password/current-code
+form filling. Chrome and Firefox/LibreWolf share the compact account menus,
+toolbar, form controller, Rust native host and broker. Storage selection and
+fingerprint authorization remain native GPUI dialogs. Our own code and assets
+adapt the interaction patterns documented in [the Apple reference](APPLE-UX-REFERENCE.md).
 
 ## Build and load
 
@@ -31,14 +33,60 @@ may require additional native-messaging integration and are not validated here.
 The native host uses the normal Keychain configuration; broker mode must point
 to the migrated broker, which must also contain the Firefox caller parser.
 
-The toolbar badge toggles interception. In Firefox, OFF delegates *new* calls to
+Open the toolbar popup to see connection status, matching accounts, the native-app
+handoff and the explicit **Use Keychain in this browser** switch. In Firefox, OFF delegates *new* calls to
 the browser's captured original methods; disabling during a request cancels it.
 There is no automatic fallback after a native operation fails or is canceled.
 Other passkey extensions may intercept the same methods: avoid enabling multiple
 passkey providers while evaluating this adapter.
 
+## Password and verification-code filling
+
+Only verified, enabled **broker-protected logins** are offered. A cached software
+login does not implicitly become browser-accessible. To protect a selected
+existing login, use `keychain protect ID` with the paired SEP broker; this is an
+explicit biometric operation that retains the encrypted recovery copy. See
+[login protection](../docs/SEP-LOGIN-REVEAL.md).
+
+On a top-level HTTPS page, focus a username/password or one-time-code input and
+choose an account. Arrow Down enters the menu; arrows move between accounts,
+Enter selects, and Escape closes it. The toolbar also offers accounts for the
+page's current form. Selecting a password or code starts native fingerprint
+authorization. Username-only forms fill public account metadata without a scan.
+No flow submits the form automatically.
+
+Matching is deliberately exact: `example.com` means `https://example.com` on the
+default port. Sibling/subdomains, HTTP and alternate ports do not inherit access.
+Only the requested password or current code is returned. Notes and TOTP seeds
+have no browser operation. The native prompt shows the validated HTTPS origin
+and account. Passwords intentionally filled into a website can be read by it.
+
+The background freezes the browser-reported top-level origin and one-use item
+selection; the broker repeats destination/field/revision checks before device
+access. The content controller retains the original inputs, form membership,
+action, method, target and page URL. It rechecks them before delivery and after
+username input handlers. Hidden/replaced/reassigned inputs and changed forms
+receive no password. Navigation, disconnect, disabling and expiry revoke work.
+Passwords/codes are not persisted to extension storage; JavaScript/browser form
+memory is outside the native locked-memory guarantee.
+
+Shared CSS follows `prefers-color-scheme`. LibreWolf privacy settings can report
+a light theme to web pages while extension windows use dark mode; the inline menu
+respects that reported setting. Browser privacy/window-size constraints can also
+change account-picker window dimensions; the content remains compact.
+
+Save/update prompts, password generation, QR enrollment and browser-autofill
+settings integration are not implemented. In particular, the existing passkey
+CloudKit create path is not a password update API: password writes need a reviewed
+Apple item encoder, change-tag conflict checks, and authenticated fetch/decrypt
+verification before the UI can report an iCloud save.
+
 ## Shared code and browser trust boundaries
 
+`shared/sender.js` validates browser-reported form/Firefox caller identity;
+`shared/forms-background.js` binds account inspection and selected fill to that
+connection. `shared/forms.js` owns the guarded field/controller and closed-shadow
+menu. The closed shadow root is presentation isolation, not authorization.
 `shared/core.js` owns native messaging, one-use selection, cancellation, bounded
 request deadlines, availability and response dispatch. `shared/approval.*` owns
 only account selection; storage/fingerprint decisions stay native.
@@ -95,6 +143,8 @@ The same lifecycle/account-picker scenarios run against both browser API shapes,
 including native cancellation, immutable requests, single completion, selection,
 expiry and no fallback after creation failure. Firefox-specific tests cover
 sender spoofing, opaque origins, frames, navigations and pre-dispatch disconnect.
+Form-service tests cover metadata-only inspection, exact item selection, forged
+callers, stale toolbar handles, cancellation, navigation and username-only filling.
 Codec tests cover BufferSource offsets, response methods and fresh public copies.
 Rust tests check both caller envelopes and reject ambiguity/foreign RPs before IPC.
 
@@ -108,15 +158,22 @@ node browser/tests/browser-harness.mjs both
 
 The selector can also be `chromium` or `firefox`. For a targeted UI rerun after a
 full deadline check, `KEYCHAIN_HARNESS_SKIP_DEADLINE=1` skips the slow deadline
-scenario and explicitly labels that omission in console/results. `CHROMEDRIVER` and
+scenario and explicitly labels that omission in console/results. `KEYCHAIN_HARNESS_THEME=light|dark` selects the isolated UI test theme. `CHROMEDRIVER` and
 `CHROMIUM_BINARY` override Chromium discovery. The harness needs Node, Python 3
 (for ZIP packaging), OpenSSL and the selected browser/driver. It creates a private
 `/tmp/keychain-browser-harness-*` directory, isolated HOME/profiles, local HTTPS
 RP and a **synthetic native provider**, then loads the actual packaged extensions.
 It verifies registration/accessors, the real shared account picker, signed assertion
-origin/challenge, foreign-RP refusal, abort, timeout and a fresh request after cancellation. Evidence is retained
+origin/challenge, foreign-RP refusal, abort, timeout and a fresh request after cancellation.
+It also verifies password/code/username-first filling, input events without form
+submission, changed form destinations, replaced/hidden/reassigned inputs, and
+light/dark extension styling. Screenshots and JSON results are retained. Evidence is retained
 in that directory; child sessions are closed on completion. Chrome's proxy can
 omit or expand timeout, so its negative deadline check may take two minutes.
+
+GeckoDriver uses `--allow-system-access` only for the isolated browser process so
+the harness can inspect its own extension pages. It does not modify your browser
+preferences or disable signature checks in your profile.
 
 The synthetic provider never accesses SEP, the real broker, Apple or the user's
 profiles. A green browser run proves adapter/browser interoperability, not a real

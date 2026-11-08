@@ -1,8 +1,8 @@
 # Apple browser-extension UX reference and adaptation plan
 
 Reviewed 2026-11-08 against Apple's iCloud Passwords **3.4.0** packages for Chrome
-and Firefox. This is an inspection/design record; the proposed password autofill,
-TOTP and save/update features below have not been implemented by this review.
+and Firefox. This records the original inspection and adaptation plan. Implementation status
+is tracked below and in [the adapter guide](README.md).
 
 ## Evidence
 
@@ -144,3 +144,20 @@ password changes, current-code filling, expired requests, navigation, hidden or
 replaced fields, foreign destinations, unavailable services and save rejection.
 Verify keyboard-only operation and both color schemes. Use synthetic credentials
 for automated tests; reserve real SEP/iCloud acceptance for deliberate user runs.
+
+## Implementation status (2026-11-08)
+
+- Shared compact account picker and toolbar are implemented, including direct
+  selection, keyboard controls, light/dark styling, actual readiness, enable
+  switch, and fixed native-app handoff when installed.
+- Broker-scoped password/current-code filling is implemented for top-level HTTPS
+  forms. Username-first filling uses public metadata only. Destination and field
+  checks run before biometric/device access; original form/input checks run again
+  before filling. Unprotected software entries are not offered implicitly.
+- The shared unit and real Chromium/LibreWolf harnesses cover these read flows
+  with synthetic credentials. Native hardware acceptance of the new browser fill
+  operation remains a separate deliberate user check.
+- Save/update, generation, QR enrollment and browser-autofill integration controls
+  remain pending. No cosmetic save controls or local-success-as-iCloud-success
+  states are shipped. The password write API needs independent CKKS encoding,
+  update-conflict and fetched-record verification work before those flows can run.

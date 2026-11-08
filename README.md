@@ -126,7 +126,7 @@ default-no approval, and emits a WebAuthn assertion JSON object. It binds the or
 RP ID and deliberately does not claim user verification. This is a diagnostic/integration surface,
 not the normal browser path.
 
-## Browser passkeys
+## Browser integration
 
 Chromium and Firefox/LibreWolf adapters share one extension core. See
 [browser installation, security boundaries and tests](browser/README.md).
@@ -135,26 +135,33 @@ For Chromium, build
 the release binaries and install the native-messaging manifest:
 
 ```sh
-cargo build --release
+cargo build --release -j 1
+node browser/build.mjs
 ./browser/chromium/install-host.sh
 ```
 
 For Firefox/LibreWolf, run `./browser/firefox/install-host.sh` and load the built
 `browser/dist/firefox/manifest.json` through `about:debugging` as a temporary add-on.
-Its initial integration supports explicit passkey operations in top-level HTTPS pages.
+Both adapters support explicit passkey operations and protected password/current-code
+filling in top-level HTTPS pages.
 
 Then open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select the
 absolute `browser/dist/chromium` directory from this checkout. The manifest contains a fixed public key,
 so its extension ID is stable: `lcadeibeloholafalbgoehpbhnplmojh`. Verify that this matches the ID
 shown by Chromium. The toolbar badge reads `ON` while passkey proxying is enabled; clicking the
-extension icon toggles it.
+extension icon opens connection status, matching accounts and an explicit enable switch.
 
 For each `navigator.credentials.get()` request, Chromium supplies its validated caller origin and
 RP ID to the extension. A one-shot native host first returns only matching account labels. The
 software path opens a local presence-approval window before a second one-shot host revalidates
 the request and signs it. In broker mode, one matching account goes directly to the OS fingerprint
-prompt; multiple accounts first get an account picker. The extension has no content script,
-network permission, password access, or long-running native process.
+prompt; multiple accounts first get a compact account picker. Password/code filling uses
+isolated form content scripts and a separate broker operation with exact HTTPS-origin
+matching. Only verified, enabled broker-protected logins are offered. Choosing an account
+requests fresh native authorization; the browser receives only its selected password or
+current code, never notes or TOTP seeds. Form/navigation checks run again before filling,
+and forms are never submitted automatically. Username-first forms use public metadata.
+See the [browser guide](browser/README.md#password-and-verification-code-filling).
 
 There are deliberate initial limits:
 
@@ -223,10 +230,12 @@ need persistent P-384 signing, public-key export, ECDH and imported recovered-ke
 ## Current scope
 
 - Included: Apple Passwords login records, password-manager sidecars and TOTP metadata, plus
-  synced ES256 passkeys, explicit WebAuthn assertion signing, an opt-in Chromium adapter, and
+  synced ES256 passkeys, explicit WebAuthn assertion signing, shared Chromium/Firefox adapters,
+  protected password/current-code browser filling, and
   development SEP broker/desktop-agent, device-only creation and selected-passkey migration paths.
-- Excluded: writes to Apple records, iCloud-syncable passkey creation, password/TOTP browser autofill, payment
-  cards, Hide My Email, background sync and other browser transports.
+- Pending: browser password save/update and generation, QR/TOTP enrollment, payment
+  cards, Hide My Email and background sync. iCloud passkey creation has a separate
+  opt-in broker write gate; it is not a password update API.
 - Network TLS verification is always enabled; there is no insecure switch.
 
 See [DESIGN.md](DESIGN.md) for the architecture, protocol boundary, and SEP integration plan.

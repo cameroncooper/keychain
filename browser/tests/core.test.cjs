@@ -36,6 +36,8 @@ function makeFixture({ target, biometric = true, count = 1, holdAssertion = fals
             }
             const result = message.action === "capabilities"
               ? { kind: "capabilities", userVerificationAvailable: available }
+              : message.action === "managerStatus" || message.action === "openManager"
+              ? { kind:"manager",available:true }
               : message.action === "inspect"
               ? { kind: "inspection", biometric, candidates, rpId: "example.com", origin: "https://example.com" }
               : message.action === "create"
@@ -54,6 +56,7 @@ function makeFixture({ target, biometric = true, count = 1, holdAssertion = fals
       session: { get: async (key) => key === null ? { ...stored } : ({ [key]: stored[key] }), set: async (value) => Object.assign(stored, value),
         remove: async (key) => { delete stored[key]; }, clear: async () => {} },
     },
+    tabs: { query:async()=>[{id:4,url:"https://example.com/login"}] },
     windows: { onRemoved: event(), create: async (value) => { windows.push(value); return { id: windows.length }; },
       remove: async (id) => { closed.push(id); chrome.windows.onRemoved.listeners.forEach((fn) => fn(id)); } },
     webAuthenticationProxy: {
@@ -66,7 +69,7 @@ function makeFixture({ target, biometric = true, count = 1, holdAssertion = fals
   };
   const context = vm.createContext({ chrome, console, URL, setTimeout: (...args) => setTimeout(...args).unref(), clearTimeout, crypto: require("node:crypto").webcrypto });
   if (target === "firefox") {
-    context.browser = { runtime: chrome.runtime, storage: chrome.storage, windows: chrome.windows, browserAction: chrome.action };
+    context.browser = { runtime: chrome.runtime, storage: chrome.storage, windows: chrome.windows, tabs:chrome.tabs, browserAction: chrome.action };
     vm.runInContext("globalThis.keychainApi = { ...browser, action: browser.browserAction }; globalThis.keychainTransport = chrome.webAuthenticationProxy", context);
   } else {
     context.importScripts = () => {};
@@ -80,6 +83,26 @@ const tick = () => new Promise((resolve) => setImmediate(resolve));
 for (const target of ["chromium", "firefox"]) {
 const fixture = options => makeFixture({ ...options, target });
 const test = (name, fn) => require("node:test").test(`${target}: ${name}`, fn);
+test("toolbar control messages reject content scripts and lookalike extension pages",()=>{
+  const f=fixture();const listener=f.chrome.runtime.onMessage.listeners[1];
+  for(const sender of [
+    {id:"test-extension",url:"https://example.com/toolbar.html"},
+    {id:"other",url:"chrome-extension://test/toolbar.html"},
+    {id:"test-extension",url:"chrome-extension://test/toolbar.html.evil"},
+    {id:"test-extension",url:"chrome-extension://test/toolbar.html?source=page"},
+  ]) assert.equal(listener({type:"openManager"},sender,()=>{throw new Error("untrusted reply");}),false);
+  assert.equal(f.operations.length,0);
+});
+test("toolbar reports native readiness and never forwards arbitrary manager arguments",async()=>{
+  const f=fixture({available:false});const listener=f.chrome.runtime.onMessage.listeners[1];
+  const send=message=>new Promise(resolve=>{assert.equal(listener(message,{id:"test-extension",url:"chrome-extension://test/toolbar.html"},resolve),true);});
+  const state=await send({type:"getToolbarState"});
+  assert.equal(state.ok,true);assert.equal(state.ready,false);assert.equal(state.connected,true);
+  assert.equal(state.managerAvailable,true);assert.equal(state.site,"example.com");
+  assert.equal((await send({type:"openManager",executable:"/bin/false",args:["ignored"]})).ok,true);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.operations.at(-1))),{version:1,action:"openManager"});
+});
+
 test("one biometric account starts signing without an approval window", async () => {
   const f = fixture();
   await vm.runInContext('handleGet({requestId:1,requestDetailsJson:"frozen"})', f.context);

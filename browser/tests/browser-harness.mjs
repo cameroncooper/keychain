@@ -13,6 +13,8 @@ import { spawn, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
 const selection = process.argv[2] ?? "both";
+const theme = process.env.KEYCHAIN_HARNESS_THEME ?? "light";
+if (!["light","dark"].includes(theme)) throw new Error("Choose light or dark theme");
 const skipDeadline = process.env.KEYCHAIN_HARNESS_SKIP_DEADLINE === "1";
 if (!["chromium", "firefox", "both"].includes(selection)) throw new Error("Choose chromium, firefox or both");
 execFileSync(process.execPath, [path.join(root, "browser/build.mjs")]);
@@ -58,9 +60,16 @@ window.runKeychainChecks = async () => {
 await fs.writeFile(path.join(workspace, "page.js"), clientScript);
 execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", path.join(workspace,"tls.key"),
   "-out", path.join(workspace,"tls.crt"), "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost"], {stdio:"ignore"});
+const formsHTML = query => `<!doctype html><meta charset="utf-8"><title>Keychain form fixture</title>
+<style>body{font:14px system-ui;margin:24px}label,input{display:block}input{width:280px;height:32px;margin:6px 0 18px}form{margin:0 0 24px}</style>
+<form id="login" action="/submit" method="post"><label>Username<input id="username" name="username" autocomplete="username"></label>
+${query.includes("usernameOnly") ? "" : '<label>Password<input id="password" type="password" name="password" autocomplete="current-password"></label>'}
+<button type="submit">Sign in</button></form>
+<form id="otp" action="/verify" method="post"><label>Verification code<input id="code" name="otp" autocomplete="one-time-code" maxlength="6"></label></form>
+<script>window.submissions=0;window.inputEvents=[];for(const form of document.forms)form.addEventListener('submit',event=>{event.preventDefault();window.submissions++});document.addEventListener('input',event=>window.inputEvents.push(event.target.id));</script>`;
 const server = https.createServer({key:await fs.readFile(path.join(workspace,"tls.key")),cert:await fs.readFile(path.join(workspace,"tls.crt"))}, (req,res)=>{
   res.setHeader("Content-Type", req.url === "/page.js" ? "application/javascript" : "text/html");
-  res.end(req.url === "/page.js" ? clientScript : '<!doctype html><title>Keychain isolated test</title><script src="/page.js"></script>');
+  res.end(req.url.startsWith("/forms") ? formsHTML(req.url) : req.url === "/page.js" ? clientScript : '<!doctype html><title>Keychain isolated test</title><script src="/page.js"></script>');
 });
 await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
 const origin = `https://localhost:${server.address().port}`;
@@ -81,7 +90,7 @@ for (const target of selection === "both" ? ["chromium","firefox"] : [selection]
   const servicePort=await port();
   const driverPath=target==="chromium"?(process.env.CHROMEDRIVER??"chromedriver"):(process.env.GECKODRIVER??path.join(root,".sep-check-extension-harness-tools/geckodriver"));
   const log=await fs.open(path.join(dir,"driver.log"),"w");
-  const driver=spawn(driverPath,[`--port=${servicePort}`],{env:{...process.env,HOME:home,XDG_CONFIG_HOME:path.join(home,".config"),XDG_CACHE_HOME:path.join(home,".cache")},stdio:["ignore",log.fd,log.fd]});
+  const driver=spawn(driverPath,[`--port=${servicePort}`,...(target === "firefox" ? ["--allow-system-access"] : [])],{env:{...process.env,HOME:home,XDG_CONFIG_HOME:path.join(home,".config"),XDG_CACHE_HOME:path.join(home,".cache")},stdio:["ignore",log.fd,log.fd]});
   let session;
   async function wd(method,route,body){
     const response=await fetch(`http://127.0.0.1:${servicePort}${route}`,{method,headers:{"content-type":"application/json"},body:body===undefined?undefined:JSON.stringify(body),signal:AbortSignal.timeout(160000)});
@@ -90,8 +99,8 @@ for (const target of selection === "both" ? ["chromium","firefox"] : [selection]
   try {
     for(let attempt=0;;attempt++){try{await wd("GET","/status");break;}catch(error){if(attempt===50)throw error;await sleep(100);}}
     const capabilities={acceptInsecureCerts:true};
-    if(target==="chromium")capabilities["goog:chromeOptions"]={enableExtensionTargets:true,binary:process.env.CHROMIUM_BINARY??"/usr/local/bin/chromium",args:["--headless=new","--no-first-run","--no-default-browser-check",`--user-data-dir=${profile}`,`--load-extension=${path.join(root,"browser/dist/chromium")}`]};
-    else capabilities["moz:firefoxOptions"]={binary:process.env.FIREFOX_BINARY??path.join(os.homedir(),".local/opt/librewolf/librewolf"),args:["-headless","-profile",profile],prefs:{"extensions.autoDisableScopes":0,"extensions.enabledScopes":15}};
+    if(target==="chromium")capabilities["goog:chromeOptions"]={enableExtensionTargets:true,binary:process.env.CHROMIUM_BINARY??"/usr/local/bin/chromium",args:["--headless=new","--no-first-run","--no-default-browser-check",...(theme === "dark" ? ["--force-dark-mode"] : []),`--user-data-dir=${profile}`,`--load-extension=${path.join(root,"browser/dist/chromium")}`]};
+    else capabilities["moz:firefoxOptions"]={binary:process.env.FIREFOX_BINARY??path.join(os.homedir(),".local/opt/librewolf/librewolf"),args:["-headless","-profile",profile],prefs:{"extensions.autoDisableScopes":0,"extensions.enabledScopes":15,"layout.css.prefers-color-scheme.content-override":theme === "dark" ? 0 : 1}};
     const started=await wd("POST","/session",{capabilities:{alwaysMatch:capabilities}});session=started.sessionId;
     if(target==="firefox"){
       const xpi=path.join(dir,"keychain.xpi");
@@ -126,14 +135,14 @@ for (const target of selection === "both" ? ["chromium","firefox"] : [selection]
     await wd("POST",`/session/${session}/window`,{handle:picker});
     let choice;
     for(let attempt=0;attempt<50;attempt++){
-      const elements=await wd("POST",`/session/${session}/elements`,{using:"css selector",value:'input[value="fixture-2"]'});
+      const elements=await wd("POST",`/session/${session}/elements`,{using:"css selector",value:'button[data-credential="fixture-2"]'});
       choice=elements[0]?.["element-6066-11e4-a52e-4f735466cecf"];
       if(choice)break;await sleep(100);
     }
     assert.ok(choice,"Account choices were not rendered");
+    const pickerURL=await wd("GET",`/session/${session}/url`);
+    await fs.writeFile(path.join(dir,`picker-${theme}.png`),Buffer.from(await wd("GET",`/session/${session}/screenshot`),"base64"));
     await wd("POST",`/session/${session}/element/${choice}/click`,{});
-    const button=await wd("POST",`/session/${session}/element`,{using:"css selector",value:"#approve"});
-    await wd("POST",`/session/${session}/element/${button["element-6066-11e4-a52e-4f735466cecf"]}/click`,{});
     await wd("POST",`/session/${session}/window`,{handle:mainHandle});
     let multi;
     for(let attempt=0;attempt<50;attempt++){
@@ -141,9 +150,54 @@ for (const target of selection === "both" ? ["chromium","firefox"] : [selection]
       if(!multi.pending)break;await sleep(100);
     }
     assert.equal(multi.id,state.id2,JSON.stringify(multi));
+    const script=code=>wd("POST",`/session/${session}/execute/sync`,{script:code,args:[]});
+    async function until(code, message) {
+      for(let attempt=0;attempt<60;attempt++){const value=await script(code);if(value)return value;await sleep(75);}
+      const diagnostic=await script("return {active:document.activeElement?.id,menu:document.querySelector('[data-keychain-menu]')?.dataset.keychainState,inputs:[...document.querySelectorAll('input')].map(field=>({id:field.id,type:field.type,autocomplete:field.autocomplete,maxLength:field.maxLength,visible:getComputedStyle(field).visibility,rect:field.getBoundingClientRect().toJSON()}))}").catch(()=>null);
+      throw new Error(`${target}: ${message}: ${JSON.stringify(diagnostic)}`);
+    }
+    let capturedInline = false;
+    async function chooseLogin(selector) {
+      const element=await wd("POST",`/session/${session}/element`,{using:"css selector",value:selector});
+      await wd("POST",`/session/${session}/element/${element["element-6066-11e4-a52e-4f735466cecf"]}/click`,{});
+      await until("return document.querySelector('[data-keychain-menu]')?.dataset.keychainState==='ready'","inline account menu was not ready");
+      if(!capturedInline) { capturedInline=true;await fs.writeFile(path.join(dir,`inline-${theme}.png`),Buffer.from(await wd("GET",`/session/${session}/screenshot`),"base64")); }
+      await wd("POST",`/session/${session}/actions`,{actions:[{type:"key",id:"keyboard",actions:[{type:"keyDown",value:"\ue015"},{type:"keyUp",value:"\ue015"},{type:"keyDown",value:"\ue007"},{type:"keyUp",value:"\ue007"}]}]});
+    }
+    await wd("POST",`/session/${session}/url`,{url:origin+"/forms"});
+    await chooseLogin("#username");
+    await until("return document.querySelector('#password').value==='published-browser-password'","password was not filled");
+    assert.equal(await script("return document.querySelector('#username').value"),"test-user");
+    assert.equal(await script("return window.submissions"),0);
+    assert.equal(await script("return window.inputEvents.includes('username') && window.inputEvents.includes('password')"),true);
+    await chooseLogin("#code");
+    await until("return document.querySelector('#code').value==='123456'","verification code was not filled");
+    // A changed destination or replacement field during authorization must not
+    // receive the delayed synthetic private result.
+    for(const mutate of ["document.querySelector('#login').action='https://foreign.invalid/submit'", "document.querySelector('#password').replaceWith(document.querySelector('#password').cloneNode())",
+      "document.querySelector('#password').style.visibility='hidden'",
+      "document.querySelector('#password').setAttribute('form','otp')"]) {
+      await wd("POST",`/session/${session}/url`,{url:origin+"/forms"});
+      const before=(await fs.readFile(state.log,"utf8")).split("fillLogin").length;
+      await chooseLogin("#username");
+      for(let attempt=0;attempt<50;attempt++) { if((await fs.readFile(state.log,"utf8")).split("fillLogin").length>before)break;await sleep(10); }
+      await script(mutate);await sleep(600);
+      assert.equal(await script("return document.querySelector('#password').value"),"");
+    }
+    await wd("POST",`/session/${session}/url`,{url:origin+"/forms?usernameOnly"});
+    const privateBefore=(await fs.readFile(state.log,"utf8")).split("fillLogin").length;
+    await chooseLogin("#username");
+    await until("return document.querySelector('#username').value==='test-user'","username-first form was not filled");
+    assert.equal((await fs.readFile(state.log,"utf8")).split("fillLogin").length,privateBefore);
+    await wd("POST",`/session/${session}/url`,{url:new URL("toolbar.html",pickerURL).href});
+    await sleep(500);
+    await fs.writeFile(path.join(dir,`toolbar-${theme}.png`),Buffer.from(await wd("GET",`/session/${session}/screenshot`),"base64"));
+    const html=await wd("POST",`/session/${session}/element`,{using:"css selector",value:"html"});
+    const color=await wd("GET",`/session/${session}/element/${html["element-6066-11e4-a52e-4f735466cecf"]}/css/color`);
+    assert.equal(color.replaceAll(" ","").includes(theme === "dark" ? "240,240,243" : "36,36,38"),true,`Wrong ${theme} theme: ${color}`);
     const operations=await fs.readFile(state.log,"utf8"); assert.match(operations,/create/);assert.match(operations,/assert/);
-    await fs.writeFile(path.join(dir,"result.json"),JSON.stringify({passed:true,browser:started.capabilities.browserVersion,checks:["availability","registration","credential prototypes/accessors","shared account picker","assertion signature/origin/challenge","abort",...(skipDeadline ? [] : ["timeout"]),"fresh request after cancellation","foreign RP rejection"]},null,2));
-    console.log(`${target}: passed registration, assertion verification, origin/RP, accessors, picker, abort${skipDeadline ? " (deadline skipped)" : " and timeout"} (${started.capabilities.browserVersion})`);
+    await fs.writeFile(path.join(dir,"result.json"),JSON.stringify({passed:true,browser:started.capabilities.browserVersion,theme,checks:["availability","registration","credential prototypes/accessors","shared account picker","password/code filling","toolbar state/theme","changed form/field rejection","username-first metadata filling","assertion signature/origin/challenge","abort",...(skipDeadline ? [] : ["timeout"]),"fresh request after cancellation","foreign RP rejection"]},null,2));
+    console.log(`${target}: passed registration, assertion verification, origin/RP, accessors, picker, password/code forms, abort${skipDeadline ? " (deadline skipped)" : " and timeout"} (${started.capabilities.browserVersion})`);
   } finally {if(session)await wd("DELETE",`/session/${session}`).catch(()=>{});driver.kill();await log.close();}
 }
 } finally {await new Promise(resolve=>server.close(resolve));console.log(`Isolated test evidence: ${workspace}`);}

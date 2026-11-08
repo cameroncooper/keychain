@@ -1,35 +1,19 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Use a passkey?</title>
-    <link rel="stylesheet" href="approval.css">
-  </head>
-  <body>
-    <main>
-      <header class="dialog-header">
-        <h1>Use a passkey?</h1>
-        <button type="button" class="secondary" id="cancel">Cancel</button>
-      </header>
-      <p class="site" id="site">Loading request…</p>
-      <p class="origin" id="origin"></p>
-
-      <form id="approval-form" hidden>
-        <fieldset id="choices">
-          <legend>Choose an account</legend>
-          <div id="accounts"></div>
-        </fieldset>
-        <p class="notice" id="notice">
-          This confirms your presence, but the current software backend cannot claim device user
-          verification. Requests that require verification are refused.
-        </p>
-        <p class="error" id="error" role="alert"></p>
-        <div class="actions">
-          <button type="submit" class="primary" id="approve">Continue</button>
-        </div>
-      </form>
-    </main>
-    <script src="approval.js"></script>
-  </body>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Keychain — Choose an account</title>
+  <link rel="stylesheet" href="approval.css">
+</head>
+<body class="account-picker">
+  <main>
+    <header class="menu-heading"><span class="key-mark" aria-hidden="true"></span><span>Keychain</span><button id="cancel" class="quiet" type="button" aria-label="Cancel">Cancel</button></header>
+    <div class="site-heading"><h1 id="site">Loading accounts…</h1><p id="origin" class="secondary"></p></div>
+    <div id="accounts" class="account-list" aria-label="Choose an account"></div>
+    <p id="notice" class="notice">Choose an account to continue.</p>
+    <p id="error" class="error" role="alert"></p>
+  </main>
+  <script src="approval.js"></script>
+</body>
 </html>

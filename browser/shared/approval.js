@@ -1,111 +1,68 @@
 const extensionApi = globalThis.browser ?? globalThis.chrome;
-const params = new URLSearchParams(location.search);
-const requestId = Number(params.get("requestId"));
-const form = document.querySelector("#approval-form");
-const site = document.querySelector("#site");
-const origin = document.querySelector("#origin");
+const requestId = Number(new URLSearchParams(location.search).get("requestId"));
 const accounts = document.querySelector("#accounts");
 const errorText = document.querySelector("#error");
-const approveButton = document.querySelector("#approve");
 const cancelButton = document.querySelector("#cancel");
-
-function showError(message) {
-  errorText.textContent = message;
+const buttons = [];
+let busy = false;
+let active = true;
+function showError(message) { errorText.textContent = message; }
+function setBusy(value) {
+  busy = value;
+  for (const button of buttons) button.disabled = value;
 }
-
-function setBusy(busy) {
-  approveButton.disabled = busy;
-  cancelButton.disabled = busy;
+async function choose(id) {
+  if (busy || !active) return;
+  setBusy(true); showError("");
+  try {
+    const reply = await extensionApi.runtime.sendMessage({ type: "approve", requestId, passkeyId: id });
+    if (reply?.ok) { active = false; window.close(); return; }
+    showError(reply?.message || "The request could not be completed.");
+  } catch { showError("Keychain is unavailable."); }
+  if (active) setBusy(false);
 }
-
-function accountChoice(candidate, checked) {
-  const label = document.createElement("label");
-  label.className = "account";
-  const radio = document.createElement("input");
-  radio.type = "radio";
-  radio.name = "passkey";
-  radio.value = candidate.id;
-  radio.checked = checked;
-  const text = document.createElement("span");
-  const name = document.createElement("span");
-  name.className = "account-name";
-  name.textContent = candidate.displayName || candidate.username || "Passkey";
-  const detail = document.createElement("span");
-  detail.className = "account-detail";
-  detail.textContent = candidate.username || "Synced passkey";
-  text.append(name, detail);
-  label.append(radio, text);
-  return label;
+function accountChoice(candidate, website) {
+  const row = document.createElement("button");
+  row.type = "button"; row.className = "account"; row.dataset.credential = candidate.id;
+  const icon = document.createElement("span"); icon.className = "account-icon"; icon.setAttribute("aria-hidden", "true");
+  const text = document.createElement("span"); text.className = "account-text";
+  const name = document.createElement("span"); name.className = "account-name"; name.textContent = candidate.username || candidate.displayName || "Account";
+  const detail = document.createElement("span"); detail.className = "account-detail"; detail.textContent = website;
+  const type = document.createElement("span"); type.className = "account-type"; type.textContent = "Passkey";
+  text.append(name, detail); row.append(icon, text, type);
+  row.addEventListener("click", () => { void choose(candidate.id); });
+  row.addEventListener("keydown", event => {
+    const index = buttons.indexOf(row);
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault(); buttons[(index + (event.key === "ArrowDown" ? 1 : -1) + buttons.length) % buttons.length].focus();
+    }
+  });
+  buttons.push(row); return row;
 }
-
 async function load() {
-  if (!Number.isSafeInteger(requestId)) {
-    site.textContent = "Invalid passkey request";
-    return;
-  }
+  if (!Number.isSafeInteger(requestId)) throw new Error("Invalid account request");
   const reply = await extensionApi.runtime.sendMessage({ type: "getPending", requestId });
-  if (!reply?.ok || !reply.pending) {
-    site.textContent = "This passkey request is no longer active";
-    return;
-  }
+  if (!reply?.ok || !reply.pending || reply.pending.kind !== "get") throw new Error("This account request is no longer active");
   const inspection = reply.pending.inspection;
-  if (reply.pending.kind !== "get") throw new Error("Unsupported account selection");
-  if (inspection.biometric === true) {
-    document.querySelector("h1").textContent = "Choose an account";
-    document.querySelector("#notice").textContent = "Your desktop will ask for a fingerprint after you choose an account.";
-    approveButton.textContent = "Use passkey";
-  }
-  site.textContent = inspection.rpId;
-  origin.textContent = inspection.origin;
-  inspection.candidates.forEach((candidate, index) => {
-    accounts.append(accountChoice(candidate, index === 0));
-  });
-  form.hidden = false;
+  document.querySelector("#site").textContent = inspection.rpId;
+  document.querySelector("#origin").textContent = inspection.origin;
+  document.querySelector("#notice").textContent = inspection.biometric
+    ? "Choose an account, then use your fingerprint to sign in."
+    : "Choose an account to approve this sign-in. Device user verification is unavailable.";
+  for (const candidate of inspection.candidates) accounts.append(accountChoice(candidate, inspection.rpId));
+  buttons[0]?.focus();
 }
-
-form.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  showError("");
-  const selected = new FormData(form).get("passkey");
-  if (typeof selected !== "string") {
-    showError("Choose an account first.");
-    return;
-  }
-  setBusy(true);
-  const reply = await extensionApi.runtime.sendMessage({
-    type: "approve",
-    requestId,
-    passkeyId: selected,
-  });
-  if (reply?.ok) {
-    window.close();
-    return;
-  }
-  showError(reply?.message || "The passkey request failed.");
-  setBusy(false);
-});
-
 cancelButton.addEventListener("click", async () => {
-  setBusy(true);
-  await extensionApi.runtime.sendMessage({ type: "deny", requestId });
-  window.close();
+  if (!active) return;
+  active = false; setBusy(true);
+  try { await extensionApi.runtime.sendMessage({ type: "deny", requestId }); } finally { window.close(); }
 });
-
-document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && !cancelButton.disabled) {
-    event.preventDefault();
-    cancelButton.click();
-  }
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape") { event.preventDefault(); cancelButton.click(); }
 });
-
-extensionApi.runtime.onMessage.addListener((message) => {
+extensionApi.runtime.onMessage.addListener(message => {
   if (message?.type === "requestCanceled" && message.requestId === requestId) {
-    site.textContent = "The website canceled this request";
-    form.hidden = true;
+    active = false; setBusy(true); document.querySelector("#notice").textContent = "This request was canceled.";
   }
 });
-
-void load().catch((error) => {
-  site.textContent = "Could not load the passkey request";
-  showError(error instanceof Error ? error.message : String(error));
-});
+void load().catch(error => { active = false; document.querySelector("#site").textContent = "No active request"; showError(error.message); });

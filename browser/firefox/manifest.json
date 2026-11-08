@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
-  "name": "Keychain Passkeys",
+  "name": "Keychain",
   "version": "0.1.0",
-  "description": "Use Keychain passkeys through the local biometric broker.",
+  "description": "Fill passwords and verification codes and use passkeys through the local Keychain biometric broker.",
   "browser_specific_settings": {
     "gecko": {
       "id": "keychain@cameroncooper",
@@ -18,7 +18,9 @@
   ],
   "background": {
     "scripts": [
+      "sender.js",
       "background.js",
+      "forms-background.js",
       "core.js"
     ],
     "persistent": true
@@ -30,13 +32,16 @@
       ],
       "js": [
         "webauthn.js",
-        "content.js"
+        "content.js",
+        "menu-style.js",
+        "forms.js"
       ],
       "run_at": "document_start",
       "all_frames": false
     }
   ],
   "browser_action": {
-    "default_title": "Keychain Passkeys"
+    "default_title": "Keychain",
+    "default_popup": "toolbar.html"
   }
 }

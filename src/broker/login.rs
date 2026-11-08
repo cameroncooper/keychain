@@ -306,6 +306,39 @@ pub fn reveal(
     )?;
     validate_reply(reply, selection, field)
 }
+pub fn fill(
+    socket: &Path,
+    context: &crate::browser::login::FillContext,
+    selection: &LoginSelection,
+    field: RevealField,
+    canceled: Arc<AtomicBool>,
+) -> Result<RevealedLogin> {
+    keychain_sep_driver::memory::make_process_nondumpable()
+        .map_err(|e| Error::io("browser login memory protection", e))?;
+    context.validate()?;
+    if !matches!(field, RevealField::Password | RevealField::Totp) {
+        return Err(Error::Refused("invalid browser reveal field".into()));
+    }
+    let reply = super::call_typed_cancelable(
+        socket,
+        Operation::FillBrowserLogin {
+            context: context.clone(),
+            selection: selection.clone(),
+            field,
+        },
+        canceled,
+    )
+    .map_err(|error| match error {
+        // Private response decoding failures must never be reflected into logs
+        // or page errors; serde's diagnostic may contain the offending value.
+        Error::Io { .. } | Error::Json(_) => {
+            Error::Security("browser login channel failed; completion may be unknown".into())
+        }
+        other => other,
+    })?;
+    validate_reply(reply, selection, field)
+}
+
 fn validate_reply(
     reply: RevealedLogin,
     selection: &LoginSelection,
@@ -333,6 +366,32 @@ impl Broker {
         session: ActiveSession,
     ) -> Result<serde_json::Value> {
         match operation {
+            Operation::InspectBrowserLogins { context } => {
+                context.validate()?;
+                if !self.allow_item_decrypt {
+                    return Err(ProviderError::UnsupportedPolicy.into());
+                }
+                let mut candidates = Vec::new();
+                for item in self.registry.login_metadata(self.owner)? {
+                    if context.matches(&item.metadata)? {
+                        if candidates.len() >= 64 {
+                            return Err(Error::Refused("too many matching logins".into()));
+                        }
+                        candidates.push(crate::browser::login::LoginCandidate {
+                            selection: LoginSelection {
+                                id: item.metadata.id,
+                                revision: item.revision,
+                                content_binding: item.content_binding,
+                            },
+                            username: item.metadata.username,
+                            title: item.metadata.title,
+                            has_password: item.metadata.has_password,
+                            has_totp: item.metadata.has_totp,
+                        });
+                    }
+                }
+                Ok(serde_json::to_value(candidates)?)
+            }
             Operation::ListLogins => Ok(serde_json::to_value(
                 self.registry.login_metadata(self.owner)?,
             )?),
@@ -445,6 +504,7 @@ impl Broker {
         id: Uuid,
         selection: &LoginSelection,
         field: RevealField,
+        context: Option<&crate::browser::login::FillContext>,
         canceled: Arc<AtomicBool>,
         deliver: impl FnOnce(&RevealOutput<'_>, &dyn Fn() -> Result<()>) -> Result<()>,
     ) -> Result<()> {
@@ -458,6 +518,9 @@ impl Broker {
             .map_err(|_| Error::Refused("another key operation is active".into()))?;
         let selected = self.registry.select_login(self.owner, selection)?;
         let record = selected.record();
+        if let Some(context) = context {
+            context.authorize(&record.metadata, field)?;
+        }
         if field == RevealField::Totp && !record.metadata.has_totp {
             return Err(Error::Refused("login has no TOTP configured".into()));
         }
@@ -471,7 +534,9 @@ impl Broker {
             Presentation::login(
                 id,
                 operation,
-                &record.metadata.domain,
+                context
+                    .map(|scope| scope.origin.as_str())
+                    .unwrap_or(&record.metadata.domain),
                 &record.metadata.username,
             ),
             canceled,
@@ -497,12 +562,18 @@ impl Broker {
         id: Uuid,
         selection: &LoginSelection,
         field: RevealField,
+        context: Option<&crate::browser::login::FillContext>,
         canceled: Arc<AtomicBool>,
     ) -> Result<()> {
         let mut delivery_started = false;
-        let result = self.reveal_login(id, selection, field, canceled.clone(), |output, check| {
-            write_reveal_response(stream, id, output, check, &mut delivery_started)
-        });
+        let result = self.reveal_login(
+            id,
+            selection,
+            field,
+            context,
+            canceled.clone(),
+            |output, check| write_reveal_response(stream, id, output, check, &mut delivery_started),
+        );
         match result {
             Ok(()) => Ok(()),
             Err(error) if delivery_started || canceled.load(Ordering::Acquire) => Err(error), // Never append an error to a partial secret frame.
@@ -600,6 +671,69 @@ pub(crate) mod tests {
     use super::*;
     use base64::{Engine, engine::general_purpose::STANDARD};
     use p256::elliptic_curve::sec1::ToEncodedPoint;
+
+    #[test]
+    #[ignore = "requires root and an active paired local desktop session; synthetic records only"]
+    fn root_browser_destination_check_precedes_biometric_or_device_access() -> Result<()> {
+        assert_eq!(keychain_sep_driver::peer::effective_uid(), 0);
+        let directory = tempfile::tempdir().map_err(|e| Error::io("test", e))?;
+        let registry = crate::broker::registry::test_support::registry(directory.path())?;
+        let source = item();
+        let recipient = registry.item_recipient()?;
+        registry.import_login(1001, LoginImport::seal(1001, &recipient, 0, &source)?)?;
+        let record = registry.login_verification_record(&source.id, 1001)?;
+        // Explicit fixture authorization; this test exercises destination policy,
+        // not a scan or a real user's protected data.
+        registry.commit_verified_login(&record)?;
+        let selection = LoginSelection {
+            id: source.id.clone(),
+            revision: record.revision,
+            content_binding: record.content_binding,
+        };
+        let mut broker = Broker::new(
+            registry,
+            1001,
+            PathBuf::from("/nonexistent-keychain-test-device"),
+            false,
+        );
+        broker.allow_item_decrypt = true;
+        let mut context = crate::browser::login::FillContext {
+            origin: "https://example.com".into(),
+            document: Uuid::new_v4(),
+            target: Uuid::new_v4(),
+            nonce: Uuid::new_v4(),
+        };
+        let inspect = broker.execute_login(
+            Uuid::new_v4(),
+            Operation::InspectBrowserLogins {
+                context: context.clone(),
+            },
+            Arc::new(AtomicBool::new(false)),
+            ActiveSession::for_owner(1001)?,
+        )?;
+        assert_eq!(inspect.as_array().map(Vec::len), Some(1));
+        context.origin = "https://foreign.invalid".into();
+        let result = broker.reveal_login(
+            Uuid::new_v4(),
+            &selection,
+            RevealField::Password,
+            Some(&context),
+            Arc::new(AtomicBool::new(false)),
+            |_, _| panic!("foreign destination delivered"),
+        );
+        assert!(matches!(result, Err(Error::Security(_))));
+        context.origin = "https://example.com".into();
+        let result = broker.reveal_login(
+            Uuid::new_v4(),
+            &selection,
+            RevealField::Notes,
+            Some(&context),
+            Arc::new(AtomicBool::new(false)),
+            |_, _| panic!("browser notes delivered"),
+        );
+        assert!(matches!(result, Err(Error::Security(_))));
+        Ok(())
+    }
 
     pub(crate) fn item() -> Credential {
         Credential {

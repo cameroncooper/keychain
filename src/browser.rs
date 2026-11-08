@@ -19,6 +19,72 @@ use crate::security::SecurityBackend;
 use crate::store::StateStore;
 use crate::{Error, Result};
 
+/// Desktop actions are separate from page credential requests. Only the
+/// extension UI exposes them; no executable or arguments come
+/// from the browser message.
+pub fn manager_available() -> bool {
+    std::env::current_exe()
+        .map(|executable| executable.with_file_name("keychain-gui").is_file())
+        .unwrap_or(false)
+}
+
+pub fn desktop_reply(message: &[u8]) -> Option<serde_json::Value> {
+    #[derive(Deserialize)]
+    #[serde(tag = "action", deny_unknown_fields)]
+    enum DesktopAction {
+        #[serde(rename = "managerStatus")]
+        Status { version: u32 },
+        #[serde(rename = "openManager")]
+        Open { version: u32 },
+    }
+    #[derive(Deserialize)]
+    struct Header {
+        action: String,
+    }
+    let header: Header = serde_json::from_slice(message).ok()?;
+    if !matches!(
+        Some(header.action.as_str()),
+        Some("managerStatus" | "openManager")
+    ) {
+        return None;
+    }
+    let result = (|| -> Result<serde_json::Value> {
+        let action: DesktopAction = serde_json::from_slice(message)?;
+        let version = match action {
+            DesktopAction::Status { version } | DesktopAction::Open { version } => version,
+        };
+        if version != 1 {
+            return Err(Error::InvalidData(
+                "unsupported desktop host version".into(),
+            ));
+        }
+        let executable =
+            std::env::current_exe().map_err(|e| Error::io("native host executable", e))?;
+        let gui = executable.with_file_name("keychain-gui");
+        let available = gui.is_file();
+        if matches!(action, DesktopAction::Open { .. }) {
+            if !available {
+                return Err(Error::Config(
+                    "Keychain desktop app is not installed alongside the native host".into(),
+                ));
+            }
+            std::process::Command::new(&gui)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .map_err(|e| Error::io(&gui, e))?;
+        }
+        Ok(serde_json::json!({"kind":"manager","available":available}))
+    })();
+    Some(match result {
+        Ok(result) => serde_json::json!({"ok":true,"result":result}),
+        Err(error) => error_reply(&error),
+    })
+}
+
+pub mod login;
+
 pub const NATIVE_HOST_NAME: &str = "cameroncooper.keychain";
 pub const MAX_NATIVE_MESSAGE_BYTES: usize = 1024 * 1024;
 const MAX_REQUEST_DETAILS_BYTES: usize = 256 * 1024;
@@ -599,6 +665,24 @@ mod tests {
     use crate::model::VaultState;
     use crate::paths::AppPaths;
     use crate::security::{KeyUsage, SoftwareFileBackend};
+
+    #[test]
+    fn desktop_actions_reject_arbitrary_arguments_and_unsupported_versions() {
+        for message in [
+            br#"{"action":"openManager","version":1,"executable":"/bin/false"}"#.as_slice(),
+            br#"{"action":"openManager","version":1,"args":["ignored"]}"#.as_slice(),
+            br#"{"action":"openManager","version":2}"#.as_slice(),
+        ] {
+            let reply = desktop_reply(message).unwrap_or_else(|| panic!("not dispatched"));
+            assert_eq!(reply["ok"], false);
+        }
+        assert!(desktop_reply(br#"{"action":"fillLogin","version":1}"#).is_none());
+        assert_eq!(
+            desktop_reply(br#"{"action":"managerStatus","version":1}"#)
+                .unwrap_or_else(|| panic!("not dispatched"))["ok"],
+            true
+        );
+    }
 
     #[test]
     fn creation_is_broker_only_freezes_request_and_rejects_browser_storage() {

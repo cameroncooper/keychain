@@ -23,6 +23,9 @@ fn main() {
 
 fn run() -> Result<()> {
     let message = read_frame(&mut io::stdin())?;
+    if let Some(reply) = keychain::browser::desktop_reply(&message) {
+        return write_frame(&mut io::stdout(), &serde_json::to_vec(&reply)?);
+    }
     let paths = AppPaths::discover()?;
     let config = Config::load(&paths)?;
     let reply = if let Some(socket) = &config.credential_broker {
@@ -35,6 +38,14 @@ fn run() -> Result<()> {
             let _ = io::stdin().read(&mut byte);
             signal.store(true, std::sync::atomic::Ordering::Release);
         });
+        if let Some(result) = keychain::browser::login::dispatch(
+            &message,
+            socket,
+            canceled.clone(),
+            &mut io::stdout(),
+        ) {
+            return result;
+        }
         reply_for_broker_message_cancelable(&message, socket, canceled)
     } else {
         let backend = backend_for_config(&config, &paths)?;

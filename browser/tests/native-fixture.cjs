@@ -30,6 +30,20 @@ process.stdin.on("data", chunk => {
     const request = JSON.parse(input.subarray(4, input.readUInt32LE(0) + 4));
     fs.appendFileSync(state.log, request.action + "\n");
     if (request.action === "capabilities") { reply({ ok: true, result: { kind: "capabilities", userVerificationAvailable: true } }); return; }
+    if (request.action === "managerStatus") { reply({ok:true,result:{kind:"manager",available:true}}); return; }
+    if (request.action === "openManager") { reply({ok:true,result:{kind:"manager",available:true}}); return; }
+    if (["inspectLogins","fillLogin"].includes(request.action)) {
+      if (request.context?.origin !== state.origin) { reply({ok:false,error:{name:"SecurityError",message:"Wrong synthetic form destination"}}); return; }
+      const selection={id:"fixture-login",revision:1,content_binding:"a".repeat(64)};
+      if (request.action === "inspectLogins") {
+        reply({ok:true,result:{kind:"logins",managerAvailable:true,candidates:[{selection,username:"test-user",title:"Synthetic login",hasPassword:true,hasTotp:true}]}});return;
+      }
+      if (request.selection?.id !== selection.id || request.selection?.revision !== 1 || !["password","totp"].includes(request.field)) {
+        reply({ok:false,error:{name:"SecurityError",message:"Invalid synthetic selection"}});return;
+      }
+      setTimeout(()=>reply({ok:true,result:{kind:"login",id:selection.id,revision:1,...(request.field === "password" ? {password:"published-browser-password"} : {totp:{code:"123456",period:30,expires:Math.floor(Date.now()/1000)+30}})}}),400);
+      return;
+    }
     const options = JSON.parse(request.requestDetailsJson);
     fs.appendFileSync(state.log, `timeout=${String(options.timeout)} at=${Date.now()}\n`);
     const caller = options.extensions.remoteDesktopClientOverride ?? options.extensions.keychainFirefoxCaller;

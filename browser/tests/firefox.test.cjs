@@ -9,6 +9,7 @@ function fixture() {
   const browser = { runtime, tabs: { get: async id => ({ id, url: "https://example.com/login" }), onRemoved: event() },
     webNavigation: { onBeforeNavigate: event() } };
   const context = vm.createContext({ browser, URL, console });
+  vm.runInContext(fs.readFileSync(`${__dirname}/../shared/sender.js`, "utf8"), context);
   vm.runInContext(fs.readFileSync(`${__dirname}/../firefox/background.js`, "utf8"), context);
   const transport = context.keychainTransport;
   const received = [];

@@ -49,6 +49,14 @@ pub enum Operation {
         selection: registry::LocalRemoval,
     },
     ListLogins,
+    InspectBrowserLogins {
+        context: crate::browser::login::FillContext,
+    },
+    FillBrowserLogin {
+        context: crate::browser::login::FillContext,
+        selection: login::LoginSelection,
+        field: login::RevealField,
+    },
     LoginProtectionState {
         record: String,
     },
@@ -222,6 +230,7 @@ fn call_typed_cancelable<T: DeserializeOwned>(
                 | Operation::VerifyProtected { .. }
                 | Operation::VerifyLogin { .. }
                 | Operation::RevealLogin { .. }
+                | Operation::FillBrowserLogin { .. }
                 | Operation::DiagnosticSign { .. }
                 | Operation::DiagnosticCancelTest { .. }
         )
@@ -382,6 +391,21 @@ impl Broker {
                     request.id,
                     &selection,
                     field,
+                    None,
+                    watch.canceled.clone(),
+                );
+            }
+            Operation::FillBrowserLogin {
+                context,
+                selection,
+                field,
+            } => {
+                return self.handle_reveal(
+                    stream,
+                    request.id,
+                    &selection,
+                    field,
+                    Some(&context),
                     watch.canceled.clone(),
                 );
             }
@@ -431,6 +455,7 @@ impl Broker {
         }
         let operation = match operation {
             Operation::ListLogins
+            | Operation::InspectBrowserLogins { .. }
             | Operation::LoginProtectionState { .. }
             | Operation::ImportLogin { .. }
             | Operation::VerifyLogin { .. }
