@@ -292,6 +292,9 @@ for (const target of selection === "both" ? ["chromium","firefox"] : [selection]
       const expectedValue=fill === "password" ? "published-browser-password" : fill === "totp" ? "123456" : "test-user";
       await until("return document.getElementById("+JSON.stringify(target)+").value==="+JSON.stringify(expectedValue),"fixture did not fill: "+fixture.name);
       assert.equal(await script("return window.submissions"),0,fixture.name);
+      if(fill === "username") {
+        assert.equal(await script("return [...document.querySelectorAll('input[type=password]')].every(field=>field.value==='')"),true,fixture.name+": username selection must not fill passwords");
+      }
       if(fixture.usernameTarget !== undefined) {
         assert.equal(await script("return document.getElementById("+JSON.stringify(fixture.fields[fixture.usernameTarget].id)+").value"),"test-user");
         assert.equal(await script("return document.getElementById("+JSON.stringify(fixture.fields[0].id)+").value"),"");

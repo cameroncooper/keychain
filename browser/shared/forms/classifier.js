@@ -57,6 +57,13 @@
       return result("excluded", "strong", "non-login-form");
     if (nonTotp.test(text))
       return result("excluded", "strong", "non-totp-code");
+    // Shared registration/sign-in forms do not establish a password/code
+    // destination. Only an explicit account input may offer public usernames.
+    if (context.intent === "mixed")
+      return hints.includes("username") &&
+        ["text", "email", "tel"].includes(field.type)
+        ? result("username", "explicit", "mixed-account-username")
+        : result("excluded", "strong", "mixed-account-actions");
     if (
       hints.includes("one-time-code") ||
       code.test(text) ||
@@ -111,7 +118,9 @@
         text,
       )
     )
-      intent = "signup";
+      intent = /\b(?:sign in|signin|log in|login|authenticate)\b/.test(text)
+        ? "mixed"
+        : "signup";
     else if (/\b(?:reset|forgot|recover) (?:your )?password\b/.test(text))
       intent = "reset";
     else if (
@@ -159,7 +168,7 @@
               ]),
             )),
       ) &&
-      ["unknown", "login"].includes(intent)
+      ["unknown", "login", "mixed"].includes(intent)
     )
       context.intent = "signup";
     const roles = fields.map((field) => classify(field, context));

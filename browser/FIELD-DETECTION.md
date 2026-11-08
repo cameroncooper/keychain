@@ -46,9 +46,13 @@ values are never classification inputs; submit-button labels are public context.
 Negative signals precede positive guesses: search/newsletter/payment forms,
 credit-card/postal/discount inputs, new/confirm passwords, recognizable SMS or
 recovery codes, and unsupported or segmented inputs. Signup/reset forms do not
-receive existing-password suggestions. Explicit current-password inputs remain
-usable in change-password forms. A password is never inferred into an unmasked
-text input just because it claims `autocomplete="current-password"`.
+receive existing-password suggestions. A shared registration/sign-in form can
+offer public usernames only for an explicit `autocomplete="username"` input; it
+does not infer unknown fields or offer password/code filling. A new-password
+form remains registration even if it also mentions sign-in. Explicit
+current-password inputs remain usable in change-password forms. A password is
+never inferred into an unmasked text input just because it claims
+`autocomplete="current-password"`.
 
 Context can identify a sole unknown text input before a password, or a sole
 unknown input in a username-first sign-in form. Competing candidates are ranked

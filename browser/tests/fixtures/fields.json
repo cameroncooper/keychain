@@ -528,5 +528,89 @@
     "expected": ["username", "password"],
     "focus": 0,
     "fill": "password"
+  },
+  {
+    "name": "shared-passkey-register-authenticate",
+    "fields": [
+      {
+        "id": "input-email",
+        "placeholder": "example_username",
+        "autocomplete": "username webauthn"
+      }
+    ],
+    "buttons": "Register Authenticate",
+    "expected": [
+      "username"
+    ],
+    "focus": 0,
+    "fill": "username"
+  },
+  {
+    "name": "mixed-auth-password-not-filled",
+    "fields": [
+      {
+        "id": "account",
+        "autocomplete": "username"
+      },
+      {
+        "id": "secret",
+        "type": "password",
+        "autocomplete": "current-password"
+      }
+    ],
+    "buttons": "Register Sign in",
+    "expected": [
+      "username",
+      "excluded"
+    ],
+    "focus": 0,
+    "fill": "username"
+  },
+  {
+    "name": "mixed-auth-unknown-not-guessed",
+    "fields": [
+      {
+        "id": "f1"
+      }
+    ],
+    "buttons": "Register Authenticate",
+    "expected": [
+      "excluded"
+    ],
+    "focus": 0
+  },
+  {
+    "name": "mixed-auth-new-password-stays-registration",
+    "fields": [
+      {
+        "id": "account",
+        "autocomplete": "username"
+      },
+      {
+        "id": "secret",
+        "type": "password",
+        "autocomplete": "new-password"
+      }
+    ],
+    "buttons": "Register Sign in",
+    "expected": [
+      "excluded",
+      "new-password"
+    ],
+    "focus": 0
+  },
+  {
+    "name": "signup-username-token-not-login",
+    "fields": [
+      {
+        "id": "account",
+        "autocomplete": "username webauthn"
+      }
+    ],
+    "buttons": "Register Continue",
+    "expected": [
+      "excluded"
+    ],
+    "focus": 0
   }
 ]
