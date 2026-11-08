@@ -368,16 +368,17 @@ impl Broker {
         match operation {
             Operation::InspectBrowserLogins { context } => {
                 context.validate()?;
-                if !self.allow_item_decrypt {
-                    return Err(ProviderError::UnsupportedPolicy.into());
-                }
                 let mut candidates = Vec::new();
-                for item in self.registry.login_metadata(self.owner)? {
+                for item in if self.allow_item_decrypt {
+                    self.registry.login_metadata(self.owner)?
+                } else {
+                    Vec::new()
+                } {
                     if context.matches(&item.metadata)? {
                         if candidates.len() >= 64 {
                             return Err(Error::Refused("too many matching logins".into()));
                         }
-                        candidates.push(crate::browser::login::LoginCandidate {
+                        candidates.push(crate::browser::login::LoginCandidate::Login {
                             selection: LoginSelection {
                                 id: item.metadata.id,
                                 revision: item.revision,
@@ -387,6 +388,18 @@ impl Broker {
                             title: item.metadata.title,
                             has_password: item.metadata.has_password,
                             has_totp: item.metadata.has_totp,
+                        });
+                    }
+                }
+                for item in self.registry.browser_credentials(self.owner)? {
+                    if !item.username.is_empty() && context.matches_passkey(&item.rp_id)? {
+                        if candidates.len() >= 64 {
+                            return Err(Error::Refused("too many matching accounts".into()));
+                        }
+                        candidates.push(crate::browser::login::LoginCandidate::Passkey {
+                            id: item.id.clone(),
+                            username: item.username.clone(),
+                            title: item.display_name.clone(),
                         });
                     }
                 }

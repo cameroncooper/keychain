@@ -42,7 +42,8 @@ passkey providers while evaluating this adapter.
 
 ## Password and verification-code filling
 
-Only verified, enabled **broker-protected logins** are offered. A cached software
+Passwords/codes are offered only for verified, enabled **broker-protected logins**.
+Username fields also offer matching verified broker passkeys, labeled **Passkey**. A cached software
 login does not implicitly become browser-accessible. To protect a selected
 existing login, use `keychain protect ID` with the paired SEP broker; this is an
 explicit biometric operation that retains the encrypted recovery copy. See
@@ -53,6 +54,13 @@ choose an account. Arrow Down enters the menu; arrows move between accounts,
 Enter selects, and Escape closes it. The toolbar also offers accounts for the
 page's current form. Selecting a password or code starts native fingerprint
 authorization. Username-only forms fill public account metadata without a scan.
+Choosing a passkey account fills its public username only; then use the site's
+Authenticate/Sign In control to begin its ordinary passkey request. It does not
+start a signature or fill a password. Passkey accounts are excluded from password
+and verification-code inputs. Username suggestions respect each passkey's RP ID
+(the RP host or its subdomains), rather than the broader password domain policy.
+This is not conditional WebAuthn mediation: pending conditional requests and
+`autocomplete="webauthn"` integration remain unsupported.
 No flow submits the form automatically.
 
 Password/code matching uses the registrable domain, so an `apple.com` item is
@@ -155,7 +163,8 @@ including native cancellation, immutable requests, single completion, selection,
 expiry and no fallback after creation failure. Firefox-specific tests cover
 sender spoofing, opaque origins, frames, navigations and pre-dispatch disconnect.
 Form-service tests cover metadata-only inspection, exact item selection, forged
-callers, stale toolbar handles, cancellation, navigation and username-only filling.
+callers, stale toolbar handles, cancellation, navigation, username-only filling, passkey username suggestions and
+refusal to use a passkey suggestion for password/code reveal.
 Codec tests cover BufferSource offsets, response methods and fresh public copies.
 Rust tests check both caller envelopes and reject ambiguity/foreign RPs before IPC.
 

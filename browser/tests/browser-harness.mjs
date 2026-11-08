@@ -157,12 +157,12 @@ for (const target of selection === "both" ? ["chromium","firefox"] : [selection]
       throw new Error(`${target}: ${message}: ${JSON.stringify(diagnostic)}`);
     }
     let capturedInline = false;
-    async function chooseLogin(selector) {
+    async function chooseLogin(selector, row = 0) {
       const element=await wd("POST",`/session/${session}/element`,{using:"css selector",value:selector});
       await wd("POST",`/session/${session}/element/${element["element-6066-11e4-a52e-4f735466cecf"]}/click`,{});
       await until("return document.querySelector('[data-keychain-menu]')?.dataset.keychainState==='ready'","inline account menu was not ready");
       if(!capturedInline) { capturedInline=true;await fs.writeFile(path.join(dir,`inline-${theme}.png`),Buffer.from(await wd("GET",`/session/${session}/screenshot`),"base64")); }
-      await wd("POST",`/session/${session}/actions`,{actions:[{type:"key",id:"keyboard",actions:[{type:"keyDown",value:"\ue015"},{type:"keyUp",value:"\ue015"},{type:"keyDown",value:"\ue007"},{type:"keyUp",value:"\ue007"}]}]});
+      await wd("POST",`/session/${session}/actions`,{actions:[{type:"key",id:"keyboard",actions:[...Array.from({length:row+1},()=>[{type:"keyDown",value:"\ue015"},{type:"keyUp",value:"\ue015"}]).flat(),{type:"keyDown",value:"\ue007"},{type:"keyUp",value:"\ue007"}]}]});
     }
     await wd("POST",`/session/${session}/url`,{url:origin+"/forms"});
     await chooseLogin("#username");
@@ -189,6 +189,19 @@ for (const target of selection === "both" ? ["chromium","firefox"] : [selection]
     await chooseLogin("#username");
     await until("return document.querySelector('#username').value==='test-user'","username-first form was not filled");
     assert.equal((await fs.readFile(state.log,"utf8")).split("fillLogin").length,privateBefore);
+    // Passkey metadata can fill a username, even on a form that also has a
+    // password input. It must not request a password or submit/sign anything.
+    for (const page of ["/forms?usernameOnly", "/forms"]) {
+      await wd("POST",`/session/${session}/url`,{url:origin+page});
+      const before=(await fs.readFile(state.log,"utf8")).split("fillLogin").length;
+      const assertionsBefore=(await fs.readFile(state.log,"utf8")).split("assert").length;
+      await chooseLogin("#username",1);
+      await until("return document.querySelector('#username').value==='passkey-user'","passkey username was not filled");
+      assert.equal(await script("return document.querySelector('#password')?.value ?? ''"),"");
+      assert.equal(await script("return window.submissions"),0);
+      assert.equal((await fs.readFile(state.log,"utf8")).split("fillLogin").length,before);
+      assert.equal((await fs.readFile(state.log,"utf8")).split("assert").length,assertionsBefore);
+    }
     await wd("POST",`/session/${session}/url`,{url:new URL("toolbar.html",pickerURL).href});
     await sleep(500);
     await fs.writeFile(path.join(dir,`toolbar-${theme}.png`),Buffer.from(await wd("GET",`/session/${session}/screenshot`),"base64"));
@@ -196,7 +209,7 @@ for (const target of selection === "both" ? ["chromium","firefox"] : [selection]
     const color=await wd("GET",`/session/${session}/element/${html["element-6066-11e4-a52e-4f735466cecf"]}/css/color`);
     assert.equal(color.replaceAll(" ","").includes(theme === "dark" ? "240,240,243" : "36,36,38"),true,`Wrong ${theme} theme: ${color}`);
     const operations=await fs.readFile(state.log,"utf8"); assert.match(operations,/create/);assert.match(operations,/assert/);
-    await fs.writeFile(path.join(dir,"result.json"),JSON.stringify({passed:true,browser:started.capabilities.browserVersion,theme,checks:["availability","registration","credential prototypes/accessors","shared account picker","password/code filling","toolbar state/theme","changed form/field rejection","username-first metadata filling","assertion signature/origin/challenge","abort",...(skipDeadline ? [] : ["timeout"]),"fresh request after cancellation","foreign RP rejection"]},null,2));
+    await fs.writeFile(path.join(dir,"result.json"),JSON.stringify({passed:true,browser:started.capabilities.browserVersion,theme,checks:["availability","registration","credential prototypes/accessors","shared account picker","password/code filling","toolbar state/theme","changed form/field rejection","username-first metadata filling","passkey username suggestions without signing","assertion signature/origin/challenge","abort",...(skipDeadline ? [] : ["timeout"]),"fresh request after cancellation","foreign RP rejection"]},null,2));
     console.log(`${target}: passed registration, assertion verification, origin/RP, accessors, picker, password/code forms, abort${skipDeadline ? " (deadline skipped)" : " and timeout"} (${started.capabilities.browserVersion})`);
   } finally {if(session)await wd("DELETE",`/session/${session}`).catch(()=>{});driver.kill();await log.close();}
 }

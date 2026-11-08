@@ -52,8 +52,8 @@
     session.used = true;
     for (const button of session.rows ?? []) button.disabled = true;
     if(session.manager)session.manager.disabled=true;
-    session.notice.textContent = session.mode === "totp" || session.password ? "Continue in the desktop fingerprint prompt…" : "Filling username…";
-    session.port.postMessage({kind:"fill",id:candidate.id,field:session.mode === "totp" ? "totp" : session.password ? "password" : "username"});
+    session.notice.textContent = candidate.kind !== "passkey" && (session.mode === "totp" || session.password) ? "Continue in the desktop fingerprint prompt…" : "Filling username…";
+    session.port.postMessage({kind:"fill",id:candidate.id,field:candidate.kind === "passkey" ? "username" : session.mode === "totp" ? "totp" : session.password ? "password" : "username"});
   }
   function show(session, candidates, managerAvailable) {
     const root = session.root;
@@ -61,7 +61,7 @@
     const main = document.createElement("main");
     const heading = document.createElement("header"); heading.className = "menu-heading"; heading.textContent = "Keychain"; main.append(heading);
     const list = document.createElement("div"); list.className = "account-list"; main.append(list);
-    const choices = candidates.filter(candidate => session.mode === "totp" ? candidate.hasTotp : session.password ? candidate.hasPassword : true);
+    const choices = candidates.filter(candidate => candidate.kind === "passkey" ? session.mode === "username" : session.mode === "totp" ? candidate.hasTotp : session.password ? candidate.hasPassword : true);
     const rows = [];
     for (const candidate of choices) {
       const row = document.createElement("button"); row.type = "button"; row.className = "account";
@@ -69,7 +69,7 @@
       const text = document.createElement("span"); text.className = "account-text";
       const name = document.createElement("span"); name.className = "account-name"; name.textContent = candidate.username || candidate.title || "Account";
       const site = document.createElement("span"); site.className = "account-detail"; site.textContent = location.hostname;
-      const type = document.createElement("span"); type.className = "account-type"; type.textContent = session.mode === "totp" ? "Code" : session.password ? "Password" : "Username";
+      const type = document.createElement("span"); type.className = "account-type"; type.textContent = candidate.kind === "passkey" ? "Passkey" : session.mode === "totp" ? "Code" : session.password ? "Password" : "Username";
       text.append(name,site); row.append(icon,text,type);
       row.addEventListener("click", event => {
         if (!event.isTrusted || session.used) return;
@@ -150,7 +150,7 @@
       else if (reply.kind === "error") { session.terminal = true; if(session.notice)session.notice.textContent = reply.message; }
     });
     port.onDisconnect.addListener(() => { session.disconnected = true; if (!session.terminal) stop(session); });
-    port.postMessage({kind:"inspect",field:mode === "totp" ? "totp" : password ? "password" : "username"});
+    port.postMessage({kind:"inspect",field:mode,hasPasswordField:!!password});
   }
   document.addEventListener("focusin", event => {
     if (restoringFocus) return;

@@ -9,6 +9,15 @@
     if(reply?.error?.name === "SecurityError") return "This account could not be filled safely on this website.";
     return fallback;
   }
+  function eligible(request, candidate) {
+    if (candidate.kind === "passkey") return request.field === "username";
+    return request.field === "totp" ? candidate.hasTotp : request.fillField === "password" ? candidate.hasPassword : true;
+  }
+  function publicCandidate(candidate) {
+    return {id:candidate.uiId,kind:candidate.kind,username:candidate.username,title:candidate.title,
+      hasPassword:candidate.kind === "login" && candidate.hasPassword,
+      hasTotp:candidate.kind === "login" && candidate.hasTotp};
+  }
   function fail(request, message) {
     if (!request.live) return;
     try { request.port.postMessage({ kind: "error", message }); } finally { close(request); }
@@ -58,6 +67,7 @@
         if (message?.kind === "inspect" && !request.inspected) {
           if (!["username","password","totp"].includes(message.field)) throw new Error("Invalid form field");
           request.field = message.field;
+          request.fillField = message.field === "totp" ? "totp" : message.hasPasswordField === true || message.field === "password" ? "password" : "username";
           request.inspected = true;
           const reply = await native(request, { version:1,action:"inspectLogins",context:request.context });
           await current(request);
@@ -65,13 +75,15 @@
             throw new Error(nativeError(reply,"Keychain could not read accounts. Open Keychain to check your setup."));
           }
           for (const candidate of reply.result.candidates) {
-            if (typeof candidate.selection?.id !== "string" || typeof candidate.username !== "string") throw new Error("Invalid account metadata");
-            request.candidates.set(candidate.selection.id, candidate);
+            const id = candidate.kind === "login" ? candidate.selection?.id : candidate.kind === "passkey" ? candidate.id : null;
+            if (typeof id !== "string" || typeof candidate.username !== "string") throw new Error("Invalid account metadata");
+            candidate.uiId = `${candidate.kind}:${id}`;
+            if (eligible(request,candidate)) request.candidates.set(candidate.uiId,candidate);
           }
           request.managerAvailable = reply.result.managerAvailable === true;
           request.loaded = true; request.resolveReady();
           void api.runtime.sendMessage({type:"keychainAccountsChanged"}).catch(()=>{});
-          port.postMessage({ kind:"candidates", managerAvailable:request.managerAvailable, candidates:[...request.candidates.values()].map(candidate => ({ id:candidate.selection.id,username:candidate.username,title:candidate.title,hasPassword:candidate.hasPassword,hasTotp:candidate.hasTotp })) });
+          port.postMessage({ kind:"candidates", managerAvailable:request.managerAvailable, candidates:[...request.candidates.values()].map(publicCandidate) });
           return;
         }
         if (message?.kind === "manager" && request.managerAvailable && !request.used) {
@@ -83,6 +95,8 @@
         if (message?.kind !== "fill" || !request.inspected || request.used || !["username","password","totp"].includes(message.field)) throw new Error("Invalid or already consumed form selection");
         const selected = request.candidates.get(message.id);
         if (!selected) throw new Error("This account was not offered for this website");
+        if (selected.kind === "passkey" && message.field !== "username") throw new Error("A passkey can only suggest its username here");
+        if (message.field !== "username" && (message.field !== request.fillField || selected.kind !== "login")) throw new Error("The requested field was not offered");
         request.used = true; // Revoke reuse before any asynchronous private call.
         if (message.field === "username") {
           port.postMessage({kind:"fill",field:"username",username:selected.username});close(request);return;
@@ -127,8 +141,7 @@
       finally { clearTimeout(timer); }
       if (!request.live || !request.field) return null;
       return { handle:request.context.nonce, field:request.field, loading:!request.loaded,
-        candidates:[...request.candidates.values()].filter(candidate => request.field === "totp" ? candidate.hasTotp : request.field === "password" ? candidate.hasPassword : true)
-          .map(candidate => ({id:candidate.selection.id,username:candidate.username,title:candidate.title})) };
+        candidates:[...request.candidates.values()].map(candidate => ({...publicCandidate(candidate),field:candidate.kind === "passkey" ? "username" : request.fillField})) };
     },
     async choose(tab, handle, id) {
       const request = [...requests].find(item => item.tab === tab && item.context.nonce === handle && item.live);

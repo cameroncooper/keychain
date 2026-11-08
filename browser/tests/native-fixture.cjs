@@ -36,7 +36,7 @@ process.stdin.on("data", chunk => {
       if (request.context?.origin !== state.origin) { reply({ok:false,error:{name:"SecurityError",message:"Wrong synthetic form destination"}}); return; }
       const selection={id:"fixture-login",revision:1,content_binding:"a".repeat(64)};
       if (request.action === "inspectLogins") {
-        reply({ok:true,result:{kind:"logins",managerAvailable:true,candidates:[{selection,username:"test-user",title:"Synthetic login",hasPassword:true,hasTotp:true}]}});return;
+        reply({ok:true,result:{kind:"logins",managerAvailable:true,candidates:[{kind:"login",selection,username:"test-user",title:"Synthetic login",hasPassword:true,hasTotp:true},{kind:"passkey",id:"fixture-passkey",username:"passkey-user",title:"Synthetic passkey"}]}});return;
       }
       if (request.selection?.id !== selection.id || request.selection?.revision !== 1 || !["password","totp"].includes(request.field)) {
         reply({ok:false,error:{name:"SecurityError",message:"Invalid synthetic selection"}});return;

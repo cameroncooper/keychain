@@ -1,14 +1,14 @@
 const {test}=require("node:test");const assert=require("node:assert/strict");const fs=require("node:fs");const vm=require("node:vm");
 const event=()=>({listeners:[],addListener(fn){this.listeners.push(fn);},fire(...args){for(const fn of this.listeners)fn(...args);}});
 const tick=()=>new Promise(resolve=>setImmediate(resolve));
-function fixture(target,{hold=false,manager=false}={}){
+function fixture(target,{hold=false,manager=false,passkey=false}={}){
  const operations=[],nativePorts=[];let currentURL="https://example.com/login";
  const selected={id:"login",revision:7,content_binding:"a".repeat(64)};
  const runtime={id:"our-addon",onConnect:event(),sendMessage:async()=>{},connectNative(){
    const p={onMessage:event(),onDisconnect:event(),disconnected:false,
     disconnect(){if(this.disconnected)return;this.disconnected=true;this.onDisconnect.fire();},
     postMessage(message){operations.push(message);if(message.action==="fillLogin"&&hold)return;
-     const result=message.action==="inspectLogins"?{kind:"logins",managerAvailable:manager,candidates:[{selection:selected,username:"alice",title:"Test",hasPassword:true,hasTotp:true}]}:message.action==="openManager"?{kind:"manager",available:true}:{kind:"login",id:"login",revision:7,password:"published synthetic password"};
+     const result=message.action==="inspectLogins"?{kind:"logins",managerAvailable:manager,candidates:passkey?[{kind:"passkey",id:"passkey-record",username:"passkey-user",title:"Passkey"}]:[{kind:"login",selection:selected,username:"alice",title:"Test",hasPassword:true,hasTotp:true}]}:message.action==="openManager"?{kind:"manager",available:true}:{kind:"login",id:"login",revision:7,password:"published synthetic password"};
      queueMicrotask(()=>{if(!p.disconnected)p.onMessage.fire({ok:true,result});});}};
    nativePorts.push(p);return p;
  }};
@@ -27,7 +27,7 @@ for(const target of ["chromium","firefox"]){
  test(`${target}: form inspection freezes browser origin and selected revision`,async()=>{
   const f=fixture(target),p=f.port();p.send({kind:"inspect",field:"password"});await tick();
   assert.equal(p.replies[0].kind,"candidates");assert.equal(JSON.stringify(p.replies).includes("content_binding"),false);
-  p.send({kind:"fill",field:"password",id:"login"});await tick();await tick();
+  p.send({kind:"fill",field:"password",id:"login:login"});await tick();await tick();
   assert.equal(f.operations[1].context.origin,"https://example.com");assert.deepEqual(f.operations[1].selection,f.selected);
   assert.equal(p.replies.at(-1).result.password,"published synthetic password");
  });
@@ -37,28 +37,28 @@ for(const target of ["chromium","firefox"]){
   }
  });
  test(`${target}: unoffered selection and notes are refused before a private operation`,async()=>{
-  for(const selection of [{id:"other",field:"password"},{id:"login",field:"notes"}]){
+  for(const selection of [{id:"other",field:"password"},{id:"login:login",field:"notes"}]){
    const f=fixture(target),p=f.port();p.send({kind:"inspect",field:"password"});await tick();p.send({kind:"fill",...selection});await tick();
    assert.equal(f.operations.filter(item=>item.action==="fillLogin").length,0);
   }
  });
  test(`${target}: disconnect cancels a sleeping private request and drops a late result`,async()=>{
-  const f=fixture(target,{hold:true}),p=f.port();p.send({kind:"inspect",field:"password"});await tick();p.send({kind:"fill",field:"password",id:"login"});await tick();
+  const f=fixture(target,{hold:true}),p=f.port();p.send({kind:"inspect",field:"password"});await tick();p.send({kind:"fill",field:"password",id:"login:login"});await tick();
   const native=f.nativePorts.at(-1);p.p.disconnect();await tick();assert.equal(native.disconnected,true);
   native.onMessage.fire({ok:true,result:{kind:"login",id:"login",revision:7,password:"late synthetic password"}});await tick();
   assert.equal(p.replies.some(reply=>reply.kind==="fill"),false);
  });
  test(`${target}: navigation before private completion suppresses fields`,async()=>{
-  const f=fixture(target,{hold:true}),p=f.port();p.send({kind:"inspect",field:"password"});await tick();p.send({kind:"fill",field:"password",id:"login"});await tick();
+  const f=fixture(target,{hold:true}),p=f.port();p.send({kind:"inspect",field:"password"});await tick();p.send({kind:"fill",field:"password",id:"login:login"});await tick();
   f.navigate("https://other.example");f.nativePorts.at(-1).onMessage.fire({ok:true,result:{kind:"login",id:"login",revision:7,password:"synthetic"}});await tick();
   assert.equal(p.replies.some(reply=>reply.kind==="fill"),false);
  });
  test(`${target}: toolbar selection requires the original tab and opaque handle`,async()=>{
   const f=fixture(target),p=f.port();p.send({kind:"inspect",field:"password"});await tick();
   const offered=await f.forms.prepare(4);assert.equal(offered.loading,false);
-  await assert.rejects(()=>f.forms.choose(9,offered.handle,"login"));
-  await f.forms.choose(4,offered.handle,"login");assert.equal(p.replies.at(-1).kind,"select");
-  await assert.rejects(()=>f.forms.choose(4,offered.handle,"login"));
+  await assert.rejects(()=>f.forms.choose(9,offered.handle,"login:login"));
+  await f.forms.choose(4,offered.handle,"login:login");assert.equal(p.replies.at(-1).kind,"select");
+  await assert.rejects(()=>f.forms.choose(4,offered.handle,"login:login"));
  });
  test(`${target}: manager handoff is available only when the native host advertises it`,async()=>{
   for(const manager of [false,true]) {
@@ -69,8 +69,23 @@ for(const target of ["chromium","firefox"]){
    if(manager)assert.deepEqual(JSON.parse(JSON.stringify(f.operations[1])),{version:1,action:"openManager"});
   }
  });
+ test(`${target}: passkeys offer username metadata without invoking a private operation`,async()=>{
+  const f=fixture(target,{passkey:true}),p=f.port();p.send({kind:"inspect",field:"username"});await tick();
+  assert.equal(p.replies[0].candidates[0].kind,"passkey");
+  assert.equal(p.replies[0].candidates[0].hasPassword,false);
+  p.send({kind:"fill",field:"username",id:"passkey:passkey-record"});await tick();
+  assert.equal(p.replies.at(-1).username,"passkey-user");assert.equal(f.operations.length,1);
+ });
+ test(`${target}: passkeys are never offered in password/code fields or revealed as passwords`,async()=>{
+  for(const field of ["password","totp","username"]) {
+   const f=fixture(target,{passkey:true}),p=f.port();p.send({kind:"inspect",field});await tick();
+   if(field!=="username")assert.equal(p.replies[0].candidates.length,0);
+   p.send({kind:"fill",field:"password",id:"passkey:passkey-record"});await tick();
+   assert.equal(f.operations.length,1);assert.equal(p.replies.some(reply=>reply.kind==="fill"),false);
+  }
+ });
  test(`${target}: username-first filling uses only public selected metadata`,async()=>{
-  const f=fixture(target),p=f.port();p.send({kind:"inspect",field:"username"});await tick();p.send({kind:"fill",field:"username",id:"login"});await tick();
+  const f=fixture(target),p=f.port();p.send({kind:"inspect",field:"username"});await tick();p.send({kind:"fill",field:"username",id:"login:login"});await tick();
   assert.equal(p.replies.at(-1).username,"alice");assert.equal(f.operations.length,1);
  });
 }

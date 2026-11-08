@@ -65,6 +65,16 @@ impl FillContext {
             && url.port_or_known_default() == destination.port_or_known_default()
             && matching_login_hosts(&url, &destination))
     }
+    pub(crate) fn matches_passkey(&self, rp_id: &str) -> Result<bool> {
+        self.validate()?;
+        if rp_id.is_empty()
+            || psl::suffix(rp_id.as_bytes())
+                .is_some_and(|suffix| suffix.is_known() && suffix.as_bytes() == rp_id.as_bytes())
+        {
+            return Ok(false);
+        }
+        Ok(crate::passkey::validate_origin_for_rp(&self.origin, rp_id).is_ok())
+    }
     pub(crate) fn authorize(&self, metadata: &LoginMetadata, field: RevealField) -> Result<()> {
         if !matches!(field, RevealField::Password | RevealField::Totp) || !self.matches(metadata)? {
             return Err(Error::Security(
@@ -122,13 +132,22 @@ fn matching_login_hosts(saved: &url::Url, destination: &url::Url) -> bool {
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LoginCandidate {
-    pub selection: LoginSelection,
-    pub username: String,
-    pub title: String,
-    pub has_password: bool,
-    pub has_totp: bool,
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum LoginCandidate {
+    Login {
+        selection: LoginSelection,
+        username: String,
+        title: String,
+        #[serde(rename = "hasPassword")]
+        has_password: bool,
+        #[serde(rename = "hasTotp")]
+        has_totp: bool,
+    },
+    Passkey {
+        id: String,
+        username: String,
+        title: String,
+    },
 }
 
 #[derive(Deserialize)]
@@ -432,6 +451,30 @@ mod tests {
                 scope.authorize(&metadata(saved), RevealField::Totp).is_ok(),
                 expected,
                 "code check: {saved} -> {origin}"
+            );
+        }
+    }
+
+    #[test]
+    fn passkey_username_suggestions_follow_rp_scope_not_password_site_grouping() {
+        for (origin, rp, expected) in [
+            ("https://webauthn.io", "webauthn.io", true),
+            ("https://login.webauthn.io", "webauthn.io", true),
+            ("https://webauthn.io", "login.webauthn.io", false),
+            ("https://other.webauthn.io", "login.webauthn.io", false),
+            ("https://webauthn.io.attacker.com", "webauthn.io", false),
+            ("https://webauthn.io", "io", false),
+            ("https://alice.github.io", "github.io", false),
+            ("https://localhost", "localhost", true),
+        ] {
+            let scope = FillContext {
+                origin: origin.into(),
+                ..context()
+            };
+            assert_eq!(
+                scope.matches_passkey(rp).unwrap_or(false),
+                expected,
+                "{origin} -> {rp}"
             );
         }
     }

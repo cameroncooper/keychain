@@ -152,6 +152,8 @@ for automated tests; reserve real SEP/iCloud acceptance for deliberate user runs
   switch, and fixed native-app handoff when installed.
 - Password/code matching includes subdomains within the same registrable domain,
   with private Public Suffix List entries isolating unrelated hosting tenants.
+- Username menus additionally offer verified passkey account names without
+  submitting or signing; the site starts the ordinary explicit WebAuthn request.
 - Broker-scoped password/current-code filling is implemented for top-level HTTPS
   forms. Username-first filling uses public metadata only. Destination and field
   checks run before biometric/device access; original form/input checks run again

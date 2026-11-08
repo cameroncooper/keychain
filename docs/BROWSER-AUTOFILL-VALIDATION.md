@@ -55,3 +55,30 @@ backup: `/var/lib/keychain-service-backups/domain-matching.5vi5xezy/keychain-bro
 Read-only native inspection succeeded for `apple.com`, `account.apple.com` and
 `developer.apple.com`, returning identical sets of offered item IDs. No private
 fields were requested and no biometric operation or Apple write ran.
+
+## Passkey username suggestions
+
+Username menus now offer verified, enabled broker passkey account metadata as
+well as password logins. Entries have distinct typed IDs; passkey entries can
+fill only a username. Password/code fields exclude them, and attempts to request
+private login fields from a passkey suggestion are refused before native work.
+Suggestions follow RP host/subdomain scope, exclude public suffix RPs and do not
+inherit password matching across sibling subdomains.
+
+The shared JavaScript suite passed 64 tests and Rust library tests passed 241
+(with 27 ignored); Clippy with warnings denied passed. Both real packaged browser
+harnesses passed in Chromium 156.0.8078.79 and LibreWolf 156.0. Evidence:
+`/tmp/keychain-browser-harness-HyJBfO`. New cases select a passkey account in both
+username-only and username/password forms and verify username-only filling,
+no submission, no private field request and no assertion signing. This targeted
+run skipped the previously tested deadline case. All browser credentials and
+private operations in the harness were synthetic.
+
+The installed native host returned the expected WebAuthn test account as a
+passkey suggestion in a read-only `webauthn.io` inspection. The installed broker
+matches release SHA-256
+`f3bd99d15da3dbe9895c9f85abb0dcd517443c866fbfc8f6a9d581db8539470f`.
+Its prior version is retained at
+`/var/lib/keychain-service-backups/passkey-usernames.lfy1kg6e/keychain-broker`.
+Replacement occurred while inactive. No real private operation or Apple write
+ran. Reload the extension and refresh existing tabs to load the new form scripts.

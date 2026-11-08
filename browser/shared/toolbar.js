@@ -17,7 +17,7 @@ async function refresh() {
       const text = document.createElement("span");text.className="account-text";
       const name = document.createElement("span");name.className="account-name";name.textContent=candidate.username||candidate.title||"Account";
       const site = document.createElement("span");site.className="account-detail";site.textContent=reply.site;
-      const kind = document.createElement("span");kind.className="account-type";kind.textContent=reply.loginForm.field === "totp" ? "Code" : reply.loginForm.field === "username" ? "Username" : "Password";
+      const kind = document.createElement("span");kind.className="account-type";kind.textContent=candidate.kind === "passkey" ? "Passkey" : candidate.field === "totp" ? "Code" : candidate.field === "username" ? "Username" : "Password";
       text.append(name,site);row.append(text,kind);accounts.append(row);
       row.addEventListener("click",async()=>{
         row.disabled=true;
