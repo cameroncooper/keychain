@@ -4,7 +4,7 @@ const fs = require("node:fs");
 const vm = require("node:vm");
 
 // Minimal document fixture; real Chromium rendering is checked separately.
-async function fixture() {
+async function fixture(target) {
   const inputs = [];
   class Element {
     constructor(tag) {
@@ -51,14 +51,17 @@ async function fixture() {
       },
     } },
   });
-  vm.runInContext(fs.readFileSync(`${__dirname}/approval.js`, "utf8"), context);
+  if (target === "firefox") { context.browser = context.chrome; delete context.chrome; }
+  vm.runInContext(fs.readFileSync(`${__dirname}/../shared/approval.js`, "utf8"), context);
   await new Promise((resolve) => setImmediate(resolve));
   return { document, nodes, inputs, messages, closed: () => closed,
     submit: () => nodes.get("#approval-form").listeners.submit({ preventDefault() {} }) };
 }
 
+for (const target of ["chromium", "firefox"]) {
+const test = (name, fn) => require("node:test").test(`${target}: ${name}`, fn);
 test("Escape denies the request without sending a create action", async () => {
-  const f = await fixture();
+  const f = await fixture(target);
   f.document.keydown({ key: "Escape", preventDefault() {} });
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(f.messages.at(-1).type, "deny");
@@ -67,8 +70,10 @@ test("Escape denies the request without sending a create action", async () => {
 });
 
 test("the account chooser still submits an assertion selection", async () => {
-  const f = await fixture();
+  const f = await fixture(target);
   await f.submit();
   assert.equal(f.messages.at(-1).type, "approve");
   assert.equal(f.messages.at(-1).passkeyId, "credential-1");
 });
+
+}

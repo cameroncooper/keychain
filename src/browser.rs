@@ -1,9 +1,11 @@
-//! Security boundary for Chromium's `webAuthenticationProxy` adapter.
+//! Security boundary for the browser adapters.
 //!
-//! Chromium injects the calling origin into
-//! `extensions.remoteDesktopClientOverride` before forwarding a request to the extension. The
-//! native host accepts no separate, extension-supplied origin and requires that injected value on
-//! every request.
+//! Chromium supplies remoteDesktopClientOverride via its WebAuthn proxy. Firefox
+//! has no such proxy: the allowlisted extension background binds a top-level
+//! document port to runtime.Port.sender and supplies keychainFirefoxCaller.
+//! These mutually exclusive envelopes remain distinct; a page cannot supply
+//! the Firefox field alongside Chromium's injected envelope. Both are untrusted
+//! at the native/broker boundary until RP/origin and request policy are checked.
 
 use std::collections::BTreeSet;
 
@@ -133,6 +135,47 @@ struct CredentialDescriptor {
 struct RemoteDesktopClientOverride {
     origin: String,
     same_origin_with_ancestors: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FirefoxCaller {
+    origin: String,
+    top_level: bool,
+}
+
+/// Extract exactly one adapter's authenticated caller metadata. Firefox's
+/// background creates its envelope from browser-provided sender metadata, never
+/// from page options. Native messaging allowlists the actual adapter extension;
+/// this is not cryptographic proof against a compromised host or extension.
+pub(crate) fn caller_origin(
+    extensions: &mut serde_json::Map<String, serde_json::Value>,
+) -> Result<String> {
+    let chrome = extensions.remove("remoteDesktopClientOverride");
+    let firefox = extensions.remove("keychainFirefoxCaller");
+    match (chrome, firefox) {
+        (Some(value), None) => {
+            let caller: RemoteDesktopClientOverride = serde_json::from_value(value)?;
+            if !caller.same_origin_with_ancestors {
+                return Err(Error::Security(
+                    "cross-origin iframe WebAuthn requests are not supported".into(),
+                ));
+            }
+            Ok(caller.origin)
+        }
+        (None, Some(value)) => {
+            let caller: FirefoxCaller = serde_json::from_value(value)?;
+            if !caller.top_level {
+                return Err(Error::Security(
+                    "Firefox WebAuthn requires a top-level document".into(),
+                ));
+            }
+            Ok(caller.origin)
+        }
+        _ => Err(Error::Security(
+            "browser request requires exactly one authenticated caller envelope".into(),
+        )),
+    }
 }
 
 pub(crate) struct RequestContext {
@@ -394,14 +437,7 @@ impl RequestContext {
             )));
         }
         let mut request: ProxyRequest = serde_json::from_str(details)?;
-        let override_value = request
-            .extensions
-            .remove("remoteDesktopClientOverride")
-            .ok_or_else(|| {
-                Error::Security(
-                    "browser request is missing Chromium's caller-origin override".into(),
-                )
-            })?;
+        let caller_origin = caller_origin(&mut request.extensions)?;
         if !request.extensions.is_empty() {
             let names = request
                 .extensions
@@ -413,16 +449,10 @@ impl RequestContext {
                 "unsupported WebAuthn extensions: {names}"
             )));
         }
-        let caller: RemoteDesktopClientOverride = serde_json::from_value(override_value)?;
-        if !caller.same_origin_with_ancestors {
-            return Err(Error::Security(
-                "cross-origin iframe WebAuthn requests are not supported".into(),
-            ));
-        }
         let rp_id = passkey::normalize_rp_id(&request.rp_id).map_err(|message| {
             Error::InvalidData(format!("invalid relying-party ID: {message}"))
         })?;
-        let origin = passkey::validate_origin_for_rp(&caller.origin, &rp_id)?;
+        let origin = passkey::validate_origin_for_rp(&caller_origin, &rp_id)?;
 
         let challenge = canonical_base64url(&request.challenge, "challenge", 16, 4096)?;
         if request.allow_credentials.len() > MAX_ALLOW_CREDENTIALS {
@@ -631,7 +661,7 @@ mod tests {
 
     #[test]
     fn extension_and_installer_use_the_native_host_name() {
-        let service_worker = include_str!("../browser/chromium/service-worker.js");
+        let service_worker = include_str!("../browser/shared/core.js");
         let installer = include_str!("../browser/chromium/install-host.sh");
         assert!(service_worker.contains(NATIVE_HOST_NAME));
         assert!(installer.contains(NATIVE_HOST_NAME));
@@ -806,6 +836,42 @@ mod tests {
         assert_eq!(response["type"], "public-key");
         assert_eq!(response["rawId"], fixture.credential_id);
         assert!(response["response"]["clientDataJSON"].is_string());
+    }
+
+    #[test]
+    fn firefox_caller_is_top_level_exclusive_and_origin_checked_before_ipc() {
+        let fixture = Fixture::new();
+        let mut details: serde_json::Value =
+            serde_json::from_str(&fixture.details()).unwrap_or_else(|e| panic!("fixture: {e}"));
+        details["extensions"] = json!({"keychainFirefoxCaller": {
+            "origin":"https://example.com", "topLevel":true
+        }});
+        // Use the fixture's actual RP for a positive check.
+        let rp = details["rpId"].as_str().unwrap_or_else(|| panic!("rp"));
+        details["extensions"]["keychainFirefoxCaller"]["origin"] = json!(format!("https://{rp}"));
+        assert!(RequestContext::parse(&details.to_string()).is_ok());
+        for mutation in 0..4 {
+            let mut bad = details.clone();
+            match mutation {
+                0 => bad["extensions"]["keychainFirefoxCaller"]["topLevel"] = json!(false),
+                1 => {
+                    bad["extensions"]["keychainFirefoxCaller"]["origin"] =
+                        json!("https://unrelated.invalid")
+                }
+                2 => {
+                    bad["extensions"]["remoteDesktopClientOverride"] = json!({
+                        "origin":"https://example.com", "sameOriginWithAncestors":true
+                    })
+                }
+                _ => bad["extensions"]["keychainFirefoxCaller"]["unexpected"] = json!(true),
+            }
+            let request =
+                json!({"version":1,"action":"inspect","requestDetailsJson":bad.to_string()});
+            let reply = reply_for_broker_with(request.to_string().as_bytes(), |_| {
+                panic!("invalid caller reached IPC")
+            });
+            assert_eq!(reply["ok"], false);
+        }
     }
 
     #[test]

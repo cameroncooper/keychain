@@ -11,3 +11,6 @@ __pycache__/
 *.enc
 master.key
 software.key
+
+# Packaged browser extensions
+/browser/dist/

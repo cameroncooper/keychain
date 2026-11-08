@@ -1,3 +1,4 @@
+const extensionApi = globalThis.browser ?? globalThis.chrome;
 const params = new URLSearchParams(location.search);
 const requestId = Number(params.get("requestId"));
 const form = document.querySelector("#approval-form");
@@ -42,7 +43,7 @@ async function load() {
     site.textContent = "Invalid passkey request";
     return;
   }
-  const reply = await chrome.runtime.sendMessage({ type: "getPending", requestId });
+  const reply = await extensionApi.runtime.sendMessage({ type: "getPending", requestId });
   if (!reply?.ok || !reply.pending) {
     site.textContent = "This passkey request is no longer active";
     return;
@@ -71,7 +72,7 @@ form.addEventListener("submit", async (event) => {
     return;
   }
   setBusy(true);
-  const reply = await chrome.runtime.sendMessage({
+  const reply = await extensionApi.runtime.sendMessage({
     type: "approve",
     requestId,
     passkeyId: selected,
@@ -86,7 +87,7 @@ form.addEventListener("submit", async (event) => {
 
 cancelButton.addEventListener("click", async () => {
   setBusy(true);
-  await chrome.runtime.sendMessage({ type: "deny", requestId });
+  await extensionApi.runtime.sendMessage({ type: "deny", requestId });
   window.close();
 });
 
@@ -97,7 +98,7 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-chrome.runtime.onMessage.addListener((message) => {
+extensionApi.runtime.onMessage.addListener((message) => {
   if (message?.type === "requestCanceled" && message.requestId === requestId) {
     site.textContent = "The website canceled this request";
     form.hidden = true;

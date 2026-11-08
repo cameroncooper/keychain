@@ -3,6 +3,7 @@ set -euo pipefail
 
 extension_id="lcadeibeloholafalbgoehpbhnplmojh"
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+node "$script_dir/../build.mjs"
 binary="${1:-${script_dir}/../../target/release/keychain-browser-host}"
 
 if [[ ! -x "${binary}" ]]; then
@@ -40,4 +41,4 @@ trap - EXIT
 
 echo "Installed native host manifest: ${host_manifest}"
 echo "Chromium extension ID: ${extension_id}"
-echo "Load unpacked extension: ${script_dir}"
+echo "Load unpacked extension: ${script_dir}/../dist/chromium"

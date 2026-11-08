@@ -78,14 +78,7 @@ struct Selection {
     user_verification: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Caller {
-    origin: String,
-    same_origin_with_ancestors: bool,
-}
-
-/// All fields are frozen after validation, including Chromium's injected origin.
+/// All fields are frozen after validation, including the adapter's bound caller origin.
 /// Parse again at the privileged boundary; a browser inspection is not authority.
 pub struct CreationContext {
     binding: String,
@@ -106,21 +99,7 @@ impl CreationContext {
             return Err(invalid("creation request exceeds the 256-KiB limit"));
         }
         let mut options: Options = serde_json::from_str(details)?;
-        let caller: Caller = serde_json::from_value(
-            options
-                .extensions
-                .remove("remoteDesktopClientOverride")
-                .ok_or_else(|| {
-                    Error::Security(
-                        "creation request is missing Chromium's caller-origin override".into(),
-                    )
-                })?,
-        )?;
-        if !caller.same_origin_with_ancestors {
-            return Err(Error::Security(
-                "cross-origin iframe registration is not supported".into(),
-            ));
-        }
+        let caller_origin = crate::browser::caller_origin(&mut options.extensions)?;
         let credential_properties = match options.extensions.remove("credProps") {
             None | Some(serde_json::Value::Bool(false)) => false,
             Some(serde_json::Value::Bool(true)) => true,
@@ -129,7 +108,7 @@ impl CreationContext {
         if !options.extensions.is_empty() {
             return Err(invalid("unsupported creation extensions"));
         }
-        let origin_url = url::Url::parse(&caller.origin)?;
+        let origin_url = url::Url::parse(&caller_origin)?;
         let rp_id = match options.rp.id {
             Some(id) => id,
             None => origin_url
@@ -139,7 +118,7 @@ impl CreationContext {
         };
         let rp_id =
             super::normalize_rp_id(&rp_id).map_err(|_| invalid("invalid relying-party ID"))?;
-        let origin = super::validate_origin_for_rp(&caller.origin, &rp_id)?;
+        let origin = super::validate_origin_for_rp(&caller_origin, &rp_id)?;
         validate_text(&options.rp.name)?;
         validate_text(&options.user.name)?;
         validate_text(&options.user.display_name)?;
@@ -564,6 +543,23 @@ mod tests {
         details = options();
         details["excludeCredentials"] = json!(vec![json!({"type":"public-key","id":"AQ"}); 257]);
         assert!(CreationContext::parse(&details.to_string()).is_err());
+    }
+
+    #[test]
+    fn firefox_creation_origin_has_the_same_rp_and_exclusivity_checks() {
+        let mut request = options();
+        request["extensions"] = json!({"credProps":true,"keychainFirefoxCaller":{
+            "origin":"https://webauthn.io", "topLevel":true
+        }});
+        assert!(CreationContext::parse(&request.to_string()).is_ok());
+        request["extensions"]["keychainFirefoxCaller"]["origin"] =
+            json!("https://unrelated.invalid");
+        assert!(CreationContext::parse(&request.to_string()).is_err());
+        request["extensions"]["keychainFirefoxCaller"]["origin"] = json!("https://webauthn.io");
+        request["extensions"]["remoteDesktopClientOverride"] = json!({
+            "origin":"https://webauthn.io","sameOriginWithAncestors":true
+        });
+        assert!(CreationContext::parse(&request.to_string()).is_err());
     }
 
     #[test]

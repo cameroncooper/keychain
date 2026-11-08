@@ -3,8 +3,8 @@
 `keychain` is an experimental, read-only Rust CLI for accessing Apple Passwords from Linux. It
 implements native Apple authentication, an explicitly guarded Octagon trust join, CKKS download
 and decryption, local search, password display, TOTP generation, and read-only use of synced
-passkeys. An optional Chromium extension provides explicitly approved browser assertions. Python
-and a persistent container are not runtime dependencies.
+passkeys. Optional Chromium and Firefox/LibreWolf extensions provide explicitly approved browser
+assertions. Python and a persistent container are not runtime dependencies.
 
 This is an unofficial reverse-engineering project and is not affiliated with Apple. The protocol
 implementation has comprehensive offline tests; login, Octagon join, and read-only password sync
@@ -126,9 +126,12 @@ default-no approval, and emits a WebAuthn assertion JSON object. It binds the or
 RP ID and deliberately does not claim user verification. This is a diagnostic/integration surface,
 not the normal browser path.
 
-## Chromium passkeys
+## Browser passkeys
 
-Chromium 115 or newer can use synced passkeys through the extension in `browser/chromium`. Build
+Chromium and Firefox/LibreWolf adapters share one extension core. See
+[browser installation, security boundaries and tests](browser/README.md).
+
+For Chromium, build
 the release binaries and install the native-messaging manifest:
 
 ```sh
@@ -136,11 +139,12 @@ cargo build --release
 ./browser/chromium/install-host.sh
 ```
 
-Use Chromium with this extension. Firefox/LibreWolf integration requires a separate
-adapter; their built-in security-key prompt does not route to this native host.
+For Firefox/LibreWolf, run `./browser/firefox/install-host.sh` and load the built
+`browser/dist/firefox/manifest.json` through `about:debugging` as a temporary add-on.
+Its initial integration supports explicit passkey operations in top-level HTTPS pages.
 
 Then open `chrome://extensions`, enable Developer mode, choose **Load unpacked**, and select the
-absolute `browser/chromium` directory from this checkout. The manifest contains a fixed public key,
+absolute `browser/dist/chromium` directory from this checkout. The manifest contains a fixed public key,
 so its extension ID is stable: `lcadeibeloholafalbgoehpbhnplmojh`. Verify that this matches the ID
 shown by Chromium. The toolbar badge reads `ON` while passkey proxying is enabled; clicking the
 extension icon toggles it.
@@ -166,18 +170,21 @@ There are deliberate initial limits:
   **Other Options**. The extension forwards requests; storage selection stays in the native dialog.
   The browser never silently substitutes device storage for an iCloud save.
 - Cross-origin iframe requests and unsupported extensions are refused. Creation supports
-  `credProps`; the Chromium caller-origin override is always required.
+  `credProps`. Chrome requires its browser-injected caller override; Firefox requires
+  the separate background-validated top-level caller envelope.
 - The software backend refuses `userVerification: required`. The SEP broker requires a fresh
   verified biometric operation for native or protected-scalar signing.
 - Chromium's WebAuthentication Proxy replaces its normal authenticator handling while the badge is
   `ON`. Requests with no matching eligible passkey fail instead of falling back to a hardware key.
   Click the icon to show `OFF` before using Chromium's normal authenticators.
 
-The adapter relies on Chromium's documented
+The Chromium adapter relies on the documented
 [`webAuthenticationProxy`](https://developer.chrome.com/docs/extensions/reference/api/webAuthenticationProxy)
-API. The native host also requires Chromium's injected
-`extensions.remoteDesktopClientOverride` value, rechecks exact HTTPS origin/RP binding and the
-credential allow-list, and caps all messages and credential collections before parsing or signing.
+API and requires Chromium's injected `extensions.remoteDesktopClientOverride` value.
+Firefox binds the caller through its isolated content script and background sender metadata.
+The native host and broker reject ambiguous caller envelopes, recheck HTTPS origin/RP binding
+and credential allow-lists, and cap messages and collections before signing. See the
+[browser security model](browser/README.md#shared-code-and-browser-trust-boundaries).
 
 For tests at webauthn.io, its demo server expires registrations after 24 hours.
 A weeks-old passkey can remain in iCloud while the demo returns “Unrecognized credential ID”
