@@ -103,6 +103,18 @@ test("toolbar reports native readiness and never forwards arbitrary manager argu
   assert.deepEqual(JSON.parse(JSON.stringify(f.operations.at(-1))),{version:1,action:"openManager"});
 });
 
+test("manual field selection forwards only a bounded role and original probe token",async()=>{
+  const f=fixture();const calls=[];
+  f.context.keychainForms={prepare:async(...args)=>{calls.push(args);return {handle:"new-bound-request"};}};
+  const listener=f.chrome.runtime.onMessage.listeners[1];
+  const send=message=>new Promise(resolve=>listener(message,{id:"test-extension",url:"chrome-extension://test/toolbar.html"},resolve));
+  assert.equal((await send({type:"setFocusedFieldRole",role:"notes",token:"probe"})).ok,false);
+  assert.equal((await send({type:"setFocusedFieldRole",role:"password"})).ok,false);
+  assert.equal(calls.length,0);
+  assert.equal((await send({type:"setFocusedFieldRole",role:"totp",token:"probe"})).ok,true);
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)),[[4,"totp","probe"]]);
+});
+
 test("one biometric account starts signing without an approval window", async () => {
   const f = fixture();
   await vm.runInContext('handleGet({requestId:1,requestDetailsJson:"frozen"})', f.context);

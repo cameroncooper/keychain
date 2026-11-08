@@ -11,7 +11,9 @@ import crypto from "node:crypto";
 import assert from "node:assert/strict";
 import { spawn, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import {detectionPage} from "./fixtures/pages.mjs";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../..");
+const fieldFixtures=JSON.parse(await fs.readFile(path.join(root,"browser/tests/fixtures/fields.json"),"utf8"));
 const selection = process.argv[2] ?? "both";
 const theme = process.env.KEYCHAIN_HARNESS_THEME ?? "light";
 if (!["light","dark"].includes(theme)) throw new Error("Choose light or dark theme");
@@ -76,6 +78,11 @@ ${query.includes("usernameOnly") ? "" : '<label>Password<input id="password" typ
 <script>window.submissions=0;window.inputEvents=[];for(const form of document.forms)form.addEventListener('submit',event=>{event.preventDefault();window.submissions++});document.addEventListener('input',event=>window.inputEvents.push(event.target.id));</script>`;
 const server = https.createServer({key:await fs.readFile(path.join(workspace,"tls.key")),cert:await fs.readFile(path.join(workspace,"tls.crt"))}, (req,res)=>{
   res.setHeader("Content-Type", req.url === "/page.js" ? "application/javascript" : "text/html");
+  if(req.url.startsWith("/detection?")) {
+    const name=new URL(req.url,"https://localhost").searchParams.get("fixture");
+    const fixture=fieldFixtures.find(fixture=>fixture.name === name);
+    res.end(fixture ? detectionPage(fixture) : "Unknown fixture");return;
+  }
   res.end(req.url.startsWith("/forms") ? formsHTML(req.url) : req.url === "/page.js" ? clientScript : '<!doctype html><title>Keychain isolated test</title><script src="/page.js"></script>');
 });
 await new Promise(resolve=>server.listen(0,"127.0.0.1",resolve));
@@ -183,7 +190,10 @@ for (const target of selection === "both" ? ["chromium","firefox"] : [selection]
     // receive the delayed synthetic private result.
     for(const mutate of ["document.querySelector('#login').action='https://foreign.invalid/submit'", "document.querySelector('#password').replaceWith(document.querySelector('#password').cloneNode())",
       "document.querySelector('#password').style.visibility='hidden'",
-      "document.querySelector('#password').setAttribute('form','otp')"]) {
+      "document.querySelector('#password').setAttribute('form','otp')",
+      "document.querySelector('#username').setAttribute('aria-label','Newsletter email')",
+      "document.querySelector('#login button').textContent='Create an account'",
+      "document.querySelector('#login').append(document.createElement('input'))"]) {
       await wd("POST",`/session/${session}/url`,{url:origin+"/forms"});
       const before=(await fs.readFile(state.log,"utf8")).split("fillLogin").length;
       await chooseLogin("#username");
@@ -191,6 +201,14 @@ for (const target of selection === "both" ? ["chromium","firefox"] : [selection]
       await script(mutate);await sleep(600);
       assert.equal(await script("return document.querySelector('#password').value"),"");
     }
+    // Target routing attributes compare in full, even beyond classifier text bounds.
+    await wd("POST",`/session/${session}/url`,{url:origin+"/forms"});
+    await script("document.querySelector('#username').name='a'.repeat(600)");
+    const beforeLongName=(await fs.readFile(state.log,"utf8")).split("fillLogin").length;
+    await chooseLogin("#username");
+    for(let attempt=0;attempt<50;attempt++) {if((await fs.readFile(state.log,"utf8")).split("fillLogin").length>beforeLongName)break;await sleep(10);}
+    await script("document.querySelector('#username').name='a'.repeat(599)+'b'");await sleep(600);
+    assert.equal(await script("return document.querySelector('#password').value"),"");
     await wd("POST",`/session/${session}/url`,{url:origin+"/forms?usernameOnly"});
     const privateBefore=(await fs.readFile(state.log,"utf8")).split("fillLogin").length;
     await chooseLogin("#username");
@@ -219,6 +237,71 @@ for (const target of selection === "both" ? ["chromium","firefox"] : [selection]
       await until("return document.querySelector('#totpmfa').value==='123456'","totpmfa field was not filled");
       assert.equal(await script("return window.submissions"),0);
     }
+    async function manualSelection(role, stale = false, refused = false) {
+      let helper;
+      const toolbarURL=new URL("toolbar.html",pickerURL).href;
+      if(target === "firefox") {
+        // LibreWolf disables WebDriver openWindow; its extension window API is
+        // available (and is also how the production account picker opens).
+        const bootstrap=await wd("POST",`/session/${session}/window/new`,{type:"tab"});
+        await wd("POST",`/session/${session}/window`,{handle:bootstrap.handle});
+        await wd("POST",`/session/${session}/url`,{url:toolbarURL});
+        await wd("POST",`/session/${session}/execute/async`,{script:"const done=arguments[arguments.length-1];browser.windows.create({url:arguments[0],type:'popup'}).then(()=>done(true),error=>done({error:String(error)}));",args:[toolbarURL]});
+        await wd("DELETE",`/session/${session}/window`);
+        const handles=await wd("GET",`/session/${session}/window/handles`);
+        helper={handle:handles.find(handle=>handle !== mainHandle)};
+      } else {
+        helper=await wd("POST",`/session/${session}/window/new`,{type:"window"});
+      }
+      await wd("POST",`/session/${session}/window`,{handle:helper.handle});
+      await wd("POST",`/session/${session}/url`,{url:toolbarURL});
+      const pageURL=await wd("POST",`/session/${session}/execute/async`,{script:`
+        const done=arguments[arguments.length-1];const api=globalThis.browser??globalThis.chrome;
+        (async()=>{const tabs=await api.tabs.query({});const tab=tabs.find(tab=>tab.url?.includes('/detection?'));
+        const probe=await api.tabs.sendMessage(tab.id,{type:'keychainInspectForm'});window.manualProbe={tab:tab.id,...probe};return tab.url;})().then(done,error=>done({error:String(error)}));`,args:[]});
+      assert.equal(typeof pageURL,"string",JSON.stringify(pageURL));
+      if(stale) {await wd("POST",`/session/${session}/window`,{handle:mainHandle});await script("document.activeElement.setAttribute('name','changed-field')");await wd("POST",`/session/${session}/window`,{handle:helper.handle});}
+      const response=await wd("POST",`/session/${session}/execute/async`,{script:`
+        const role=arguments[0],done=arguments[arguments.length-1];const api=globalThis.browser??globalThis.chrome;
+        api.tabs.sendMessage(window.manualProbe.tab,{type:'keychainInspectForm',manualRole:role,manualToken:window.manualProbe.manualToken}).then(done,error=>done({error:String(error)}));`,args:[role]});
+      await wd("DELETE",`/session/${session}/window`);
+      await wd("POST",`/session/${session}/window`,{handle:mainHandle});
+      assert.equal(response.ok,!(stale || refused),JSON.stringify(response));
+    }
+    for(const fixture of fieldFixtures.filter(fixture=>fixture.browser !== false)) {
+      await wd("POST",`/session/${session}/url`,{url:origin+"/detection?fixture="+fixture.name});
+      await until("return document.querySelectorAll('input').length>0","dynamic fixture fields were not inserted");
+      const id=fixture.fields[fixture.focus].id;
+      const expected=fixture.expected[fixture.focus];
+      const count=(await fs.readFile(state.log,"utf8")).split("inspectLogins").length;
+      if(["excluded","new-password","unknown"].includes(expected)) {
+        const element=await wd("POST",`/session/${session}/element`,{using:"css selector",value:"#"+id});
+        await wd("POST",`/session/${session}/element/${element["element-6066-11e4-a52e-4f735466cecf"]}/click`,{});
+        await sleep(120);
+        assert.equal(await script("return !!document.querySelector('[data-keychain-menu]')"),false,fixture.name);
+        assert.equal((await fs.readFile(state.log,"utf8")).split("inspectLogins").length,count,fixture.name);
+        if(!fixture.manual) {
+          if(["signup","credit-card-code","segmented-code","newsletter","unmasked-password-hint"].includes(fixture.name)) await manualSelection("totp",false,true);
+          continue;
+        }
+        await manualSelection(fixture.manual);
+      }
+      await chooseLogin("#"+id);
+      const fill=fixture.manual ?? fixture.fill;
+      const target=fill === "password" ? fixture.fields.find(field=>field.type === "password" && !field.autocomplete?.includes("new-password"))?.id : id;
+      const expectedValue=fill === "password" ? "published-browser-password" : fill === "totp" ? "123456" : "test-user";
+      await until("return document.getElementById("+JSON.stringify(target)+").value==="+JSON.stringify(expectedValue),"fixture did not fill: "+fixture.name);
+      assert.equal(await script("return window.submissions"),0,fixture.name);
+      if(fixture.usernameTarget !== undefined) {
+        assert.equal(await script("return document.getElementById("+JSON.stringify(fixture.fields[fixture.usernameTarget].id)+").value"),"test-user");
+        assert.equal(await script("return document.getElementById("+JSON.stringify(fixture.fields[0].id)+").value"),"");
+      }
+    }
+    await wd("POST",`/session/${session}/url`,{url:origin+"/detection?fixture=unknown-code"});
+    const uncertain=await wd("POST",`/session/${session}/element`,{using:"css selector",value:"#f1"});
+    await wd("POST",`/session/${session}/element/${uncertain["element-6066-11e4-a52e-4f735466cecf"]}/click`,{});
+    await manualSelection("totp",true);
+    assert.equal(await script("return document.querySelector('#f1').value"),"");
     await wd("POST",`/session/${session}/url`,{url:new URL("toolbar.html",pickerURL).href});
     await sleep(500);
     await fs.writeFile(path.join(dir,`toolbar-${theme}.png`),Buffer.from(await wd("GET",`/session/${session}/screenshot`),"base64"));
@@ -226,7 +309,7 @@ for (const target of selection === "both" ? ["chromium","firefox"] : [selection]
     const color=await wd("GET",`/session/${session}/element/${html["element-6066-11e4-a52e-4f735466cecf"]}/css/color`);
     assert.equal(color.replaceAll(" ","").includes(theme === "dark" ? "240,240,243" : "36,36,38"),true,`Wrong ${theme} theme: ${color}`);
     const operations=await fs.readFile(state.log,"utf8"); assert.match(operations,/create/);assert.match(operations,/assert/);
-    await fs.writeFile(path.join(dir,"result.json"),JSON.stringify({passed:true,browser:started.capabilities.browserVersion,theme,checks:["availability","registration","credential prototypes/accessors","shared account picker","password/code filling","toolbar state/theme","changed form/field rejection","username-first metadata filling","passkey username suggestions without signing","public TOTP challenge form fields","assertion signature/origin/challenge","abort",...(skipDeadline ? [] : ["timeout"]),"fresh request after cancellation","foreign RP rejection"]},null,2));
+    await fs.writeFile(path.join(dir,"result.json"),JSON.stringify({passed:true,browser:started.capabilities.browserVersion,theme,checks:["availability","registration","credential prototypes/accessors","shared account picker","password/code filling","toolbar state/theme","changed form/field rejection","username-first metadata filling","passkey username suggestions without signing","public TOTP challenge form fields","shared detection corpus and negative fields","explicit manual roles and stale-probe refusal","assertion signature/origin/challenge","abort",...(skipDeadline ? [] : ["timeout"]),"fresh request after cancellation","foreign RP rejection"]},null,2));
     console.log(`${target}: passed registration, assertion verification, origin/RP, accessors, picker, password/code forms, abort${skipDeadline ? " (deadline skipped)" : " and timeout"} (${started.capabilities.browserVersion})`);
   } finally {if(session)await wd("DELETE",`/session/${session}`).catch(()=>{});driver.kill();await log.close();}
 }

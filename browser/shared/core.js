@@ -445,7 +445,7 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
   let source;
   try { source = new URL(sender.url); } catch { return false; }
   if (source.href !== api.runtime.getURL("toolbar.html")) return false;
-  if (!["getToolbarState", "setEnabled", "openManager", "fillSelectedLogin"].includes(message?.type)) return false;
+  if (!["getToolbarState", "setEnabled", "openManager", "fillSelectedLogin", "setFocusedFieldRole"].includes(message?.type)) return false;
   void (async () => {
     if (message.type === "setEnabled") {
       if (typeof message.enabled !== "boolean") throw new Error("Invalid browser setting");
@@ -453,6 +453,13 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
       else await detach();
       await api.storage.local.set({ proxyEnabled: message.enabled });
       return { ok: true };
+    }
+    if (message.type === "setFocusedFieldRole") {
+      if (!["username","password","totp"].includes(message.role) || typeof message.token !== "string") throw new Error("Invalid focused-field selection");
+      const [tab] = await api.tabs.query({active:true,currentWindow:true});
+      const form = await globalThis.keychainForms.prepare(tab.id,message.role,message.token);
+      if (!form?.handle) throw new Error("The focused field changed or is not eligible.");
+      return {ok:true};
     }
     if (message.type === "fillSelectedLogin") {
       const [tab] = await api.tabs.query({active:true,currentWindow:true});

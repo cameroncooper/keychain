@@ -84,6 +84,17 @@ for(const target of ["chromium","firefox"]){
    assert.equal(f.operations.length,1);assert.equal(p.replies.some(reply=>reply.kind==="fill"),false);
   }
  });
+ test(`${target}: manual role preparation binds the probe token to a new document connection`,async()=>{
+  const f=fixture(target);let observed;
+  f.api.tabs.sendMessage=async(tab,message)=>{
+    observed={tab,...message};const p=f.port();p.send({kind:"inspect",field:message.manualRole});return {ok:true};
+  };
+  const form=await f.forms.prepare(4,"totp","frozen-probe");
+  assert.equal(form.field,"totp");assert.ok(form.handle);
+  assert.deepEqual(JSON.parse(JSON.stringify(observed)),{tab:4,type:"keychainInspectForm",manualRole:"totp",manualToken:"frozen-probe"});
+  await assert.rejects(()=>f.forms.prepare(4,"notes","frozen-probe"));
+  f.forms.cancelAll();
+ });
  test(`${target}: username-first filling uses only public selected metadata`,async()=>{
   const f=fixture(target),p=f.port();p.send({kind:"inspect",field:"username"});await tick();p.send({kind:"fill",field:"username",id:"login:login"});await tick();
   assert.equal(p.replies.at(-1).username,"alice");assert.equal(f.operations.length,1);

@@ -29,6 +29,9 @@
       ],
       "js": [
         "menu-style.js",
+        "forms/classifier.js",
+        "forms/dom.js",
+        "forms/menu.js",
         "forms.js"
       ],
       "run_at": "document_start",

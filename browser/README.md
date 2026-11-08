@@ -89,6 +89,19 @@ receive no password. Navigation, disconnect, disabling and expiry revoke work.
 Passwords/codes are not persisted to extension storage; JavaScript/browser form
 memory is outside the native locked-memory guarantee.
 
+Field detection is split into a pure classifier, a DOM plan/delivery adapter,
+a menu view and the one-use controller. See [the field-system design](FIELD-DETECTION.md)
+for contracts, rule priority, bounds, the shared fixture corpus and extension rules.
+Labels/ARIA hints, autocomplete, form context and candidate confidence are combined;
+ambiguous fields do not receive automatic guesses. Search/newsletter/payment,
+new-password and identifiable SMS/recovery fields are excluded.
+
+For an **unknown** focused field, open the toolbar and choose what to fill, then
+select an account. This explicit fallback is tied to that input and its unchanged
+snapshot, expires after 30 seconds and does not create a saved site override.
+A password fallback requires a masked password input; excluded/new-password fields
+cannot use it. The normal broker and fingerprint requirements still apply.
+
 Shared CSS follows `prefers-color-scheme`. LibreWolf privacy settings can report
 a light theme to web pages while extension windows use dark mode; the inline menu
 respects that reported setting. Browser privacy/window-size constraints can also
@@ -104,8 +117,9 @@ verification before the UI can report an iCloud save.
 
 `shared/sender.js` validates browser-reported form/Firefox caller identity;
 `shared/forms-background.js` binds account inspection and selected fill to that
-connection. `shared/forms.js` owns the guarded field/controller and closed-shadow
-menu. The closed shadow root is presentation isolation, not authorization.
+connection. `shared/forms.js` owns the one-use page lifecycle; `shared/forms/`
+contains separate classifier, DOM/delivery and closed-shadow menu modules. The
+closed shadow root is presentation isolation, not authorization.
 `shared/core.js` owns native messaging, one-use selection, cancellation, bounded
 request deadlines, availability and response dispatch. `shared/approval.*` owns
 only account selection; storage/fingerprint decisions stay native.
@@ -166,6 +180,10 @@ Form-service tests cover metadata-only inspection, exact item selection, forged
 callers, stale toolbar handles, cancellation, navigation, username-only filling, passkey username suggestions and
 refusal to use a passkey suggestion for password/code reveal.
 Codec tests cover BufferSource offsets, response methods and fresh public copies.
+The declarative field corpus drives both pure classification tests and actual
+DOM/filling scenarios in both browser packages. It includes label/ARIA-only fields,
+username-first and form-less/dynamic controls, registration/search/payment
+negatives, explicit fallback and stale-proposal refusal.
 Rust tests check both caller envelopes and reject ambiguity/foreign RPs before IPC.
 
 For real browser execution, install matching ChromeDriver and GeckoDriver, then:

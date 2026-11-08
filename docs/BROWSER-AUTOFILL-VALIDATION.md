@@ -102,3 +102,30 @@ broker record. After the user's fresh operation-specific readiness, its existing
 encrypted software recovery copy. A subsequent read-only browser inventory
 confirmed password and TOTP eligibility for the website. No Apple record or
 website sign-in was changed; actual private browser filling remains user-initiated.
+
+## Modular field detection and guarded DOM plans
+
+Field handling is split into a pure metadata classifier, a DOM collection/plan
+adapter, a menu view and the request controller. The design and extension points
+are documented in `browser/FIELD-DETECTION.md`. No new production dependency or
+native protocol change is required.
+
+The shared JavaScript suite passed 108 tests. A 38-case declarative corpus drives
+pure classification and rendered fixtures in the actual browser packages (one
+disabled-input case is unit-only). Cases cover label/ARIA-only hints, username
+ranking, username-first, formless/dynamic controls, code hints, change-password,
+registration/reset/search/newsletter/payment/SMS/recovery negatives and ambiguous
+fields. An explicit toolbar fallback is bound to the original focused field,
+a one-use expiring proposal and normal account/native authorization. It cannot
+override excluded controls or put a password into an unmasked text input.
+
+The full Chromium 156.0.8078.79 / LibreWolf 156.0 run passed, including cancellation
+and deadline checks: `/tmp/keychain-browser-harness-aciOY2`. The final targeted
+run passed in both browsers after adding full target-attribute comparisons and
+a regression for an attribute change beyond the classifier's text bound:
+`/tmp/keychain-browser-harness-eeuQsI`. It also exercises manual roles, stale
+proposals, refusal to override excluded fields, and label/form-intent/control
+changes during authorization. The targeted run skipped the deadline case already
+covered by the full run. Built packages were checked against current shared
+sources. All providers and credentials in these browser runs were synthetic;
+no real SEP operation, Apple write or personal browser profile was used.

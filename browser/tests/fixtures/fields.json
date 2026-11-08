@@ -1,0 +1,532 @@
+[
+  {
+    "name": "standard-login",
+    "fields": [
+      {
+        "id": "user",
+        "autocomplete": "username"
+      },
+      {
+        "id": "secret",
+        "type": "password",
+        "autocomplete": "current-password"
+      }
+    ],
+    "buttons": "Sign in",
+    "expected": ["username", "password"],
+    "focus": 0,
+    "fill": "password"
+  },
+  {
+    "name": "accessible-label",
+    "fields": [
+      {
+        "id": "f1",
+        "label": "Email or phone number"
+      },
+      {
+        "id": "f2",
+        "type": "password"
+      }
+    ],
+    "buttons": "Sign In",
+    "expected": ["username", "password"],
+    "focus": 0,
+    "fill": "password"
+  },
+  {
+    "name": "aria-label",
+    "fields": [
+      {
+        "id": "f1",
+        "ariaLabel": "Account name"
+      },
+      {
+        "id": "f2",
+        "type": "password"
+      }
+    ],
+    "expected": ["username", "password"],
+    "focus": 0,
+    "fill": "password"
+  },
+  {
+    "name": "labelled-by",
+    "fields": [
+      {
+        "id": "f1",
+        "labelledBy": "User ID"
+      },
+      {
+        "id": "f2",
+        "type": "password"
+      }
+    ],
+    "expected": ["username", "password"],
+    "focus": 0,
+    "fill": "password"
+  },
+  {
+    "name": "placeholder",
+    "fields": [
+      {
+        "id": "f1",
+        "placeholder": "Email address"
+      }
+    ],
+    "expected": ["username"],
+    "focus": 0,
+    "fill": "username"
+  },
+  {
+    "name": "camel-case-name",
+    "fields": [
+      {
+        "id": "f1",
+        "name": "loginId"
+      }
+    ],
+    "expected": ["username"],
+    "focus": 0,
+    "fill": "username"
+  },
+  {
+    "name": "anonymous-before-password",
+    "fields": [
+      {
+        "id": "f1"
+      },
+      {
+        "id": "f2",
+        "type": "password"
+      }
+    ],
+    "expected": ["username", "password"],
+    "focus": 1,
+    "fill": "password"
+  },
+  {
+    "name": "username-first",
+    "fields": [
+      {
+        "id": "f1"
+      }
+    ],
+    "buttons": "Continue",
+    "expected": ["username"],
+    "focus": 0,
+    "fill": "username"
+  },
+  {
+    "name": "mfa-label",
+    "fields": [
+      {
+        "id": "f1",
+        "label": "Enter your MFA Code"
+      }
+    ],
+    "expected": ["totp"],
+    "focus": 0,
+    "fill": "totp"
+  },
+  {
+    "name": "totpmfa",
+    "fields": [
+      {
+        "id": "totpmfa"
+      }
+    ],
+    "expected": ["totp"],
+    "focus": 0,
+    "fill": "totp"
+  },
+  {
+    "name": "autocomplete-code",
+    "fields": [
+      {
+        "id": "f1",
+        "autocomplete": "one-time-code",
+        "type": "tel",
+        "maxLength": 6
+      }
+    ],
+    "expected": ["totp"],
+    "focus": 0,
+    "fill": "totp"
+  },
+  {
+    "name": "authenticator-context",
+    "heading": "Authenticator verification",
+    "fields": [
+      {
+        "id": "code",
+        "inputMode": "numeric",
+        "maxLength": 6
+      }
+    ],
+    "expected": ["totp"],
+    "focus": 0,
+    "fill": "totp"
+  },
+  {
+    "name": "masked-code",
+    "fields": [
+      {
+        "id": "f1",
+        "type": "password",
+        "ariaLabel": "Authenticator code"
+      }
+    ],
+    "expected": ["totp"],
+    "focus": 0,
+    "fill": "totp"
+  },
+  {
+    "name": "change-password",
+    "fields": [
+      {
+        "id": "f1",
+        "type": "password",
+        "autocomplete": "current-password"
+      },
+      {
+        "id": "f2",
+        "type": "password",
+        "autocomplete": "new-password"
+      },
+      {
+        "id": "f3",
+        "type": "password",
+        "label": "Confirm password"
+      }
+    ],
+    "buttons": "Change password",
+    "expected": ["password", "new-password", "new-password"],
+    "focus": 0,
+    "fill": "password"
+  },
+  {
+    "name": "explicit-best-username",
+    "fields": [
+      {
+        "id": "f1",
+        "type": "email"
+      },
+      {
+        "id": "f2",
+        "autocomplete": "username"
+      },
+      {
+        "id": "f3",
+        "type": "password"
+      }
+    ],
+    "expected": ["username", "username", "password"],
+    "focus": 2,
+    "fill": "password",
+    "usernameTarget": 1
+  },
+  {
+    "name": "newsletter",
+    "fields": [
+      {
+        "id": "email",
+        "type": "email"
+      }
+    ],
+    "buttons": "Subscribe",
+    "expected": ["excluded"],
+    "focus": 0
+  },
+  {
+    "name": "newsletter-label",
+    "fields": [
+      {
+        "id": "email",
+        "type": "email",
+        "label": "Newsletter email"
+      }
+    ],
+    "expected": ["excluded"],
+    "focus": 0
+  },
+  {
+    "name": "search-type",
+    "fields": [
+      {
+        "id": "user-search",
+        "type": "search"
+      }
+    ],
+    "expected": ["excluded"],
+    "focus": 0
+  },
+  {
+    "name": "search-group",
+    "search": true,
+    "fields": [
+      {
+        "id": "identifier"
+      }
+    ],
+    "expected": ["excluded"],
+    "focus": 0
+  },
+  {
+    "name": "signup",
+    "fields": [
+      {
+        "id": "email",
+        "type": "email"
+      },
+      {
+        "id": "password",
+        "type": "password"
+      }
+    ],
+    "buttons": "Create an account",
+    "expected": ["excluded", "excluded"],
+    "focus": 1
+  },
+  {
+    "name": "reset",
+    "fields": [
+      {
+        "id": "email",
+        "type": "email"
+      }
+    ],
+    "buttons": "Reset password",
+    "expected": ["excluded"],
+    "focus": 0
+  },
+  {
+    "name": "new-password",
+    "fields": [
+      {
+        "id": "f1",
+        "type": "password",
+        "autocomplete": "new-password"
+      }
+    ],
+    "expected": ["new-password"],
+    "focus": 0
+  },
+  {
+    "name": "confirm-password",
+    "fields": [
+      {
+        "id": "confirmPassword",
+        "type": "password"
+      }
+    ],
+    "expected": ["new-password"],
+    "focus": 0
+  },
+  {
+    "name": "credit-card-code",
+    "fields": [
+      {
+        "id": "code",
+        "autocomplete": "cc-csc",
+        "label": "Security code"
+      }
+    ],
+    "expected": ["excluded"],
+    "focus": 0
+  },
+  {
+    "name": "payment-group",
+    "fields": [
+      {
+        "id": "email",
+        "type": "email"
+      }
+    ],
+    "buttons": "Pay now",
+    "expected": ["excluded"],
+    "focus": 0
+  },
+  {
+    "name": "postal-code",
+    "fields": [
+      {
+        "id": "postalCode"
+      }
+    ],
+    "expected": ["excluded"],
+    "focus": 0
+  },
+  {
+    "name": "discount-code",
+    "fields": [
+      {
+        "id": "discountCode"
+      }
+    ],
+    "expected": ["excluded"],
+    "focus": 0
+  },
+  {
+    "name": "sms-code",
+    "fields": [
+      {
+        "id": "otp",
+        "autocomplete": "one-time-code",
+        "label": "SMS verification code"
+      }
+    ],
+    "expected": ["excluded"],
+    "focus": 0
+  },
+  {
+    "name": "recovery-code",
+    "fields": [
+      {
+        "id": "code",
+        "label": "Recovery code"
+      }
+    ],
+    "expected": ["excluded"],
+    "focus": 0
+  },
+  {
+    "name": "segmented-code",
+    "fields": [
+      {
+        "id": "otp1",
+        "autocomplete": "one-time-code",
+        "maxLength": 1
+      },
+      {
+        "id": "otp2",
+        "autocomplete": "one-time-code",
+        "maxLength": 1
+      }
+    ],
+    "expected": ["excluded", "excluded"],
+    "focus": 0
+  },
+  {
+    "name": "ambiguous-passwords",
+    "fields": [
+      {
+        "id": "f1",
+        "type": "password"
+      },
+      {
+        "id": "f2",
+        "type": "password"
+      }
+    ],
+    "expected": ["unknown", "unknown"],
+    "focus": 0,
+    "manual": "password"
+  },
+  {
+    "name": "ambiguous-username",
+    "fields": [
+      {
+        "id": "f1"
+      },
+      {
+        "id": "f2"
+      },
+      {
+        "id": "f3",
+        "type": "password"
+      }
+    ],
+    "expected": ["unknown", "unknown", "password"],
+    "focus": 0,
+    "manual": "username"
+  },
+  {
+    "name": "unknown-code",
+    "fields": [
+      {
+        "id": "f1",
+        "inputMode": "numeric",
+        "maxLength": 6
+      }
+    ],
+    "expected": ["unknown"],
+    "focus": 0,
+    "manual": "totp"
+  },
+  {
+    "name": "disabled",
+    "fields": [
+      {
+        "id": "email",
+        "type": "email",
+        "eligible": false
+      }
+    ],
+    "expected": ["excluded"],
+    "focus": 0,
+    "browser": false
+  },
+  {
+    "name": "signup-token-with-continue",
+    "fields": [
+      {
+        "id": "f1",
+        "autocomplete": "username"
+      },
+      {
+        "id": "f2",
+        "type": "password",
+        "autocomplete": "new-password"
+      }
+    ],
+    "buttons": "Continue",
+    "expected": ["excluded", "new-password"],
+    "focus": 0
+  },
+  {
+    "name": "unmasked-password-hint",
+    "fields": [
+      {
+        "id": "f1",
+        "autocomplete": "current-password"
+      }
+    ],
+    "expected": ["excluded"],
+    "focus": 0
+  },
+  {
+    "name": "formless-login",
+    "fields": [
+      {
+        "id": "f1",
+        "label": "Username"
+      },
+      {
+        "id": "f2",
+        "type": "password"
+      }
+    ],
+    "formless": true,
+    "expected": ["username", "password"],
+    "focus": 0,
+    "fill": "password"
+  },
+  {
+    "name": "dynamic-login",
+    "fields": [
+      {
+        "id": "f1",
+        "ariaLabel": "Email address"
+      },
+      {
+        "id": "f2",
+        "type": "password"
+      }
+    ],
+    "dynamic": true,
+    "expected": ["username", "password"],
+    "focus": 0,
+    "fill": "password"
+  }
+]
