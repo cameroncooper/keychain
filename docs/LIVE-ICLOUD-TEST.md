@@ -32,7 +32,7 @@ the frozen request without a storage field; the root broker supplies allowed
 destinations, validates the selection, and requires a second acknowledgment of
 the drawn, focused bound summary before proceeding. The same window transitions
 from the Apple-inspired save summary to fingerprint guidance. Private prompt
-protocol 3 rejects earlier versions, replayed selections and unavailable choices.
+protocol 4 rejects earlier versions, replayed selections and unavailable choices.
 
 The root broker and agent were updated together, with prior artifacts retained
 under `/var/lib/keychain-service-backups/update.mi6g06_y`. All release binaries

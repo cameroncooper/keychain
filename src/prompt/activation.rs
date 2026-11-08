@@ -157,13 +157,15 @@ pub(crate) fn ensure_running(canceled: &AtomicBool) -> io::Result<()> {
 
 /// Called after GPUI initialization and listener setup. Holding this connection
 /// owns the activation name; no authentication/success method is registered.
-pub fn claim_name() -> io::Result<zbus::Connection> {
+pub fn claim_name(interface: super::touchbar::TouchBar) -> io::Result<zbus::Connection> {
     let owner = keychain_sep_driver::peer::effective_uid();
     let runtime = runtime(owner)?;
     let address = bus_address(&runtime, owner)?;
     bounded(
         async {
             let bus = zbus::connection::Builder::address(address.as_str())
+                .map_err(failed)?
+                .serve_at(super::touchbar::PATH, interface)
                 .map_err(failed)?
                 .build()
                 .await

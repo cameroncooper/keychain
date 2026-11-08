@@ -172,7 +172,10 @@ impl Broker {
             .prepare_synced_registration(&request.binding, &context)?;
         authorization.check()?;
         self.with_protected_scalar(draft.record(), &authorization, |selected| {
-            authorization.status("Saving passkey to iCloud…")?;
+            authorization.status(
+                crate::prompt::PromptPhase::Processing,
+                "Saving passkey to iCloud…",
+            )?;
             PendingCreation {
                 registry: &self.registry,
                 draft: &draft,

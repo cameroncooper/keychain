@@ -41,11 +41,11 @@ Changing destination requires a fresh selection and authorization lifetime.
 
 ## Private protocol and deployment
 
-Broker/agent protocol **3** adds a `choose-creation` presentation with typed allowed
+Broker/agent protocol **4** retains a `choose-creation` presentation with typed allowed
 storage choices and a `selected` reply. Ordinary presentations still accept only
 a display acknowledgment or cancellation. Selection is not biometric approval.
 Both selection and the bound summary have independent display acknowledgments.
-Versions 1 and 2 are rejected; install the matching broker and desktop agent.
+Versions 1–3 are rejected; install the matching broker and desktop agent.
 
 Native messaging keeps its existing protocol version, but `create` no longer
 accepts a `storage` field. Reload the extension with the updated native host.

@@ -264,8 +264,12 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                     "No fingerprint or SEP operation will run",
                 ),
             )?;
-            prompt.status("Click Cancel or press Escape")?;
             let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            prompt.set_deadline(Some(deadline))?;
+            prompt.status(
+                keychain::prompt::PromptPhase::DiagnosticCancel,
+                "Click Cancel or press Escape — do not touch the reader",
+            )?;
             while !prompt.canceled() && std::time::Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(25));
             }
@@ -344,30 +348,39 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 None
             };
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            if let Some(prompt) = &mut prompt {
+                prompt.set_deadline(Some(deadline))?;
+            }
             let mut device = Device::open(&cli.device)?;
             eprintln!("Synthetic decrypt check: touch an enrolled finger to the reader");
             let size = key.decrypt_into(
                 &mut device,
                 &sealed,
                 output.as_mut_array(),
-                Duration::from_secs(60),
+                deadline.saturating_duration_since(std::time::Instant::now()),
                 |guidance| {
                     let Some(prompt) = &mut prompt else {
                         return true;
                     };
-                    if prompt.canceled() {
+                    if std::time::Instant::now() >= deadline || prompt.canceled() {
                         return false;
                     }
                     prompt
-                        .status(match guidance {
-                            Guidance::WaitingForDevice => "Waiting for the fingerprint reader…",
-                            Guidance::Preparing => "Preparing fingerprint reader…",
-                            Guidance::PlaceFinger => "Touch the fingerprint reader",
-                        })
+                        .status(
+                            guidance.into(),
+                            match guidance {
+                                Guidance::WaitingForDevice => "Waiting for the fingerprint reader…",
+                                Guidance::Preparing => "Preparing fingerprint reader…",
+                                Guidance::PlaceFinger => "Touch the fingerprint reader",
+                            },
+                        )
                         .is_ok()
                 },
             )?;
-            if prompt.as_ref().is_some_and(|prompt| prompt.canceled()) {
+            if std::time::Instant::now() >= deadline
+                || prompt.as_ref().is_some_and(|prompt| prompt.canceled())
+            {
                 return Err(keychain::security::sep::ProviderError::Canceled.into());
             }
             let item = item_view(output.as_array(), size, context)?;
@@ -409,10 +422,20 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 None
             };
+            let deadline = std::time::Instant::now() + Duration::from_secs(timeout);
+            if let Some(prompt) = &prompt {
+                prompt
+                    .lock()
+                    .map_err(|_| "prompt connection failed")?
+                    .set_deadline(Some(deadline))?;
+            }
             let display = prompt.clone();
             let last = std::sync::Mutex::new(None);
             let started = std::time::Instant::now();
             let provider = NativeSepProvider::new(key, cli.device, move |guidance| {
+                if std::time::Instant::now() >= deadline {
+                    return false;
+                }
                 if let Some(display) = &display {
                     let Ok(mut session) = display.lock() else {
                         return false;
@@ -425,7 +448,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                         Guidance::Preparing => "Preparing fingerprint reader…",
                         Guidance::PlaceFinger => "Touch the fingerprint reader",
                     };
-                    if session.status(text).is_err() {
+                    if session.status(guidance.into(), text).is_err() {
                         return false;
                     }
                 }
@@ -452,7 +475,7 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 provider.reference(),
                 &provider.public_sec1()?,
                 message.as_bytes(),
-                Duration::from_secs(timeout),
+                deadline.saturating_duration_since(std::time::Instant::now()),
             )?;
             let signature = outcome.into_signature(
                 provider.reference(),
@@ -464,6 +487,9 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
                 if session.canceled() {
                     return Err("biometric operation canceled".into());
                 }
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("biometric operation expired".into());
             }
             println!(
                 "verified native biometric signature: {}",

@@ -15,11 +15,50 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 
 pub mod activation;
+pub mod timing;
+pub mod touchbar;
+pub use timing::Deadline;
 
 const MAX_FRAME: usize = 8192;
 
-/// Private broker/agent protocol. Upgrade both artifacts together; no v1 fallback.
-pub const VERSION: u32 = 3;
+/// Private broker/agent protocol. Upgrade both artifacts together; no older-protocol fallback.
+pub const VERSION: u32 = 4;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PromptPhase {
+    ChoosingStorage,
+    Presenting,
+    WaitingForDevice,
+    Preparing,
+    PlaceFinger,
+    Processing,
+    DiagnosticCancel,
+}
+impl From<keychain_sep_driver::Guidance> for PromptPhase {
+    fn from(value: keychain_sep_driver::Guidance) -> Self {
+        use keychain_sep_driver::Guidance as G;
+        match value {
+            G::WaitingForDevice => Self::WaitingForDevice,
+            G::Preparing => Self::Preparing,
+            G::PlaceFinger => Self::PlaceFinger,
+        }
+    }
+}
+pub fn validate_status(message: &str) -> io::Result<()> {
+    let forbidden = |c: char| {
+        c.is_control()
+            || matches!(
+                c,
+                '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+            )
+    };
+    if message.len() > 512 || message.chars().any(forbidden) {
+        return Err(io::Error::other("invalid prompt status"));
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -221,14 +260,18 @@ pub enum DisplayEvent {
     Present {
         version: u32,
         request: Presentation,
+        deadline: Deadline,
     },
     ChooseCreation {
         version: u32,
         request: Presentation,
         choices: Vec<PromptStorage>,
+        deadline: Deadline,
     },
     Status {
         id: Uuid,
+        phase: PromptPhase,
+        deadline: Deadline,
         message: String,
     },
     Finished {
@@ -268,6 +311,7 @@ pub fn read_presentation(stream: &mut UnixStream) -> io::Result<Presentation> {
     let DisplayEvent::Present {
         version: VERSION,
         request,
+        deadline: _,
     } = read_frame(stream)?
     else {
         return Err(io::Error::other("unsupported prompt protocol or message"));
@@ -301,27 +345,36 @@ pub fn validate_creation_choices(
     Ok(())
 }
 
-pub fn read_initial_presentation(
+pub fn read_initial_display(
     stream: &mut UnixStream,
-) -> io::Result<(Presentation, Option<Vec<PromptStorage>>)> {
+) -> io::Result<(Presentation, Option<Vec<PromptStorage>>, Deadline)> {
     match read_frame(stream)? {
         DisplayEvent::Present {
             version: VERSION,
             request,
+            deadline,
         } => {
             request.validate()?;
-            Ok((request, None))
+            Ok((request, None, deadline))
         }
         DisplayEvent::ChooseCreation {
             version: VERSION,
             request,
             choices,
+            deadline,
         } => {
             validate_creation_choices(&request, &choices)?;
-            Ok((request, Some(choices)))
+            Ok((request, Some(choices), deadline))
         }
         _ => Err(io::Error::other("unsupported prompt protocol or message")),
     }
+}
+
+pub fn read_initial_presentation(
+    stream: &mut UnixStream,
+) -> io::Result<(Presentation, Option<Vec<PromptStorage>>)> {
+    let (request, choices, _) = read_initial_display(stream)?;
+    Ok((request, choices))
 }
 
 fn connect_agent(path: &Path, owner: u32) -> io::Result<UnixStream> {
@@ -348,7 +401,10 @@ fn connect_agent(path: &Path, owner: u32) -> io::Result<UnixStream> {
 
 pub struct PromptSession {
     stream: UnixStream,
-    last_status: Option<String>,
+    last_status: Option<(PromptPhase, String, Deadline)>,
+    deadline: Deadline,
+    enforced_deadline: Option<std::time::Instant>,
+    diagnostic_cancel: bool,
     id: Uuid,
     canceled: Arc<AtomicBool>,
     reader: Option<std::thread::JoinHandle<()>>,
@@ -363,11 +419,13 @@ impl PromptSession {
         stream.set_read_timeout(Some(Duration::from_secs(5)))?;
         stream.set_write_timeout(Some(Duration::from_secs(1)))?;
         let id = request.id;
+        let diagnostic_cancel = request.operation == PromptOperation::DiagnosticCancel;
         write_frame(
             &mut stream,
             &DisplayEvent::Present {
                 version: VERSION,
                 request,
+                deadline: Deadline(None),
             },
         )?;
         match read_frame(&mut stream)? {
@@ -377,7 +435,7 @@ impl PromptSession {
                 return Err(io::Error::other("prompt was not presented"));
             }
         }
-        Self::from_visible(stream, id)
+        Self::from_visible(stream, id, diagnostic_cancel)
     }
 
     /// Selection is not authorization. Only a choice from this root-supplied
@@ -412,13 +470,24 @@ impl PromptSession {
                 version: VERSION,
                 request: request.clone(),
                 choices: choices.clone(),
+                deadline: Deadline(None),
             },
         )?;
         if !matches!(read_frame(&mut stream)?, AgentEvent::Visible { id: received } if received == id)
         {
             return Err(io::Error::other("creation chooser was not presented"));
         }
+        check()?;
         let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        write_frame(
+            &mut stream,
+            &DisplayEvent::Status {
+                id,
+                phase: PromptPhase::ChoosingStorage,
+                deadline: Deadline::from_instant(deadline)?,
+                message: "Choose where to save this passkey".into(),
+            },
+        )?;
         loop {
             check()?;
             if std::time::Instant::now() >= deadline {
@@ -470,6 +539,7 @@ impl PromptSession {
                 &DisplayEvent::Present {
                     version: VERSION,
                     request,
+                    deadline: Deadline(None),
                 },
             )?;
             stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -478,11 +548,11 @@ impl PromptSession {
                 return Err(io::Error::other("bound creation summary was not presented"));
             }
             check()?;
-            return Ok((storage, Self::from_visible(stream, id)?));
+            return Ok((storage, Self::from_visible(stream, id, false)?));
         }
     }
 
-    fn from_visible(stream: UnixStream, id: Uuid) -> io::Result<Self> {
+    fn from_visible(stream: UnixStream, id: Uuid, diagnostic_cancel: bool) -> io::Result<Self> {
         stream.set_read_timeout(None)?;
         let mut input = stream.try_clone()?;
         let canceled = Arc::new(AtomicBool::new(false));
@@ -496,6 +566,9 @@ impl PromptSession {
         Ok(Self {
             stream,
             last_status: None,
+            deadline: Deadline(None),
+            enforced_deadline: None,
+            diagnostic_cancel,
             id,
             canceled,
             reader: Some(reader),
@@ -504,23 +577,46 @@ impl PromptSession {
     pub fn canceled(&self) -> bool {
         self.canceled.load(Ordering::Acquire)
     }
-    pub fn status(&mut self, message: &str) -> io::Result<()> {
-        if message.len() > 512 || message.chars().any(char::is_control) {
-            return Err(io::Error::other("invalid status"));
+    pub fn set_deadline(&mut self, deadline: Option<std::time::Instant>) -> io::Result<()> {
+        if self.enforced_deadline != deadline {
+            self.deadline = deadline
+                .map(Deadline::from_instant)
+                .transpose()?
+                .unwrap_or_default();
+            self.enforced_deadline = deadline;
         }
-        // The blocking key API exposes no live sensor guidance. Its control
-        // loop rechecks revocation frequently; unchanged text needs no IPC.
-        if self.last_status.as_deref() == Some(message) {
+        let (phase, message, _) = self.last_status.clone().unwrap_or((
+            PromptPhase::Preparing,
+            if self.diagnostic_cancel {
+                "Click Cancel or press Escape — do not touch the reader".into()
+            } else {
+                "Preparing fingerprint reader…".into()
+            },
+            Deadline(None),
+        ));
+        self.status(phase, &message)
+    }
+    pub fn status(&mut self, phase: PromptPhase, message: &str) -> io::Result<()> {
+        validate_status(message)?;
+        let phase = if self.diagnostic_cancel {
+            PromptPhase::DiagnosticCancel
+        } else {
+            phase
+        };
+        let next = (phase, message.to_owned(), self.deadline);
+        if self.last_status.as_ref() == Some(&next) {
             return Ok(());
         }
         write_frame(
             &mut self.stream,
             &DisplayEvent::Status {
                 id: self.id,
+                phase,
+                deadline: self.deadline,
                 message: message.into(),
             },
         )?;
-        self.last_status = Some(message.into());
+        self.last_status = Some(next);
         Ok(())
     }
 }
@@ -673,13 +769,14 @@ mod tests {
     }
     #[test]
     fn agent_rejects_old_wire_versions_and_invalid_context_before_presentation() -> io::Result<()> {
-        for version in [1, VERSION + 1] {
+        for version in [1, 2, 3, VERSION + 1] {
             let (mut sender, mut receiver) = UnixStream::pair()?;
             write_frame(
                 &mut sender,
                 &DisplayEvent::Present {
                     version,
                     request: assertion(),
+                    deadline: Deadline(None),
                 },
             )?;
             assert!(read_presentation(&mut receiver).is_err());
@@ -692,6 +789,7 @@ mod tests {
             &DisplayEvent::Present {
                 version: VERSION,
                 request,
+                deadline: Deadline(None),
             },
         )?;
         assert!(read_presentation(&mut receiver).is_err());
@@ -701,6 +799,7 @@ mod tests {
             &DisplayEvent::Present {
                 version: VERSION,
                 request: request.clone(),
+                deadline: Deadline(None),
             },
         )?;
         assert_eq!(read_presentation(&mut receiver)?, request);
@@ -723,7 +822,7 @@ mod tests {
         ] {
             assert!(validate_creation_choices(&request, &choices).is_err());
         }
-        for version in [1, 2] {
+        for version in [1, 2, 3] {
             let (mut sender, mut receiver) = UnixStream::pair()?;
             write_frame(
                 &mut sender,
@@ -731,6 +830,7 @@ mod tests {
                     version,
                     request: request.clone(),
                     choices: vec![PromptStorage::ICloudSynced],
+                    deadline: Deadline(None),
                 },
             )?;
             assert!(read_initial_presentation(&mut receiver).is_err());
@@ -756,6 +856,9 @@ mod tests {
                 assert_eq!(shown, request);
                 assert_eq!(offered, Some(choices));
                 write_frame(&mut agent, &AgentEvent::Visible { id })?;
+                assert!(
+                    matches!(read_frame(&mut agent)?,DisplayEvent::Status {id:received,phase:PromptPhase::ChoosingStorage,deadline:Deadline(Some(_)),..} if received==id)
+                );
                 let storage = if case == 2 {
                     PromptStorage::ProtectedLocalCopy
                 } else {
@@ -826,8 +929,15 @@ mod tests {
             read_initial_presentation(&mut agent)?;
             write_frame(&mut agent, &AgentEvent::Visible { id })?;
             signal.store(true, Ordering::Release);
-            let result: io::Result<DisplayEvent> = read_frame(&mut agent);
-            assert!(result.is_err());
+            while let Ok(event) = read_frame::<DisplayEvent>(&mut agent) {
+                assert!(matches!(
+                    event,
+                    DisplayEvent::Status {
+                        phase: PromptPhase::ChoosingStorage,
+                        ..
+                    }
+                ));
+            }
             Ok(())
         });
         assert!(
@@ -857,5 +967,76 @@ mod tests {
             keychain_sep_driver::peer::credentials(&a).unwrap_or_else(|e| panic!("peer: {e}"));
         assert_eq!(peer.uid, keychain_sep_driver::peer::effective_uid());
         assert_eq!(peer.pid as u32, std::process::id());
+    }
+}
+
+#[cfg(test)]
+mod touchbar_protocol_tests {
+    use super::*;
+    #[test]
+    fn deadline_is_mandatory_nullable_and_status_is_typed() -> io::Result<()> {
+        let request = Presentation::diagnostic(
+            Uuid::new_v4(),
+            PromptOperation::DiagnosticSign,
+            "private account",
+        );
+        let value = serde_json::to_value(DisplayEvent::Present {
+            version: VERSION,
+            request: request.clone(),
+            deadline: Deadline(None),
+        })
+        .map_err(io::Error::other)?;
+        assert!(serde_json::from_value::<DisplayEvent>(value.clone()).is_ok());
+        let mut missing = value;
+        missing
+            .as_object_mut()
+            .ok_or_else(|| io::Error::other("object"))?
+            .remove("deadline");
+        assert!(serde_json::from_value::<DisplayEvent>(missing).is_err());
+        for bad in [
+            serde_json::json!(-1),
+            serde_json::json!(1.2),
+            serde_json::json!("now"),
+        ] {
+            let value = serde_json::json!({"event":"status","id":request.id,"phase":"place-finger","deadline":bad,"message":"Touch"});
+            assert!(serde_json::from_value::<DisplayEvent>(value).is_err());
+        }
+        assert!(serde_json::from_value::<DisplayEvent>(serde_json::json!({"event":"status","id":request.id,"deadline":null,"message":"Touch"})).is_err());
+        Ok(())
+    }
+    #[test]
+    fn status_deduplicates_phase_message_deadline_and_pins_diagnostics() -> io::Result<()> {
+        let (service, mut agent) = UnixStream::pair()?;
+        let id = Uuid::new_v4();
+        let mut session = PromptSession::from_visible(service, id, true)?;
+        let target = std::time::Instant::now() + Duration::from_secs(1);
+        session.set_deadline(Some(target))?;
+        let first: DisplayEvent = read_frame(&mut agent)?;
+        let DisplayEvent::Status {
+            phase: PromptPhase::DiagnosticCancel,
+            deadline: Deadline(Some(deadline)),
+            ..
+        } = first
+        else {
+            return Err(io::Error::other("unexpected first status"));
+        };
+        session.set_deadline(Some(target))?;
+        session.status(PromptPhase::PlaceFinger, "Do not touch")?;
+        assert!(
+            matches!(read_frame(&mut agent)?,DisplayEvent::Status{phase:PromptPhase::DiagnosticCancel,deadline:Deadline(Some(next)),..} if next==deadline)
+        );
+        session.status(PromptPhase::Preparing, "Do not touch")?;
+        agent.set_read_timeout(Some(Duration::from_millis(15)))?;
+        assert!(read_frame::<DisplayEvent>(&mut agent).is_err());
+        session.set_deadline(None)?;
+        assert!(matches!(
+            read_frame(&mut agent)?,
+            DisplayEvent::Status {
+                deadline: Deadline(None),
+                ..
+            }
+        ));
+        drop(session);
+        Ok(())
     }
 }

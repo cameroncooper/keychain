@@ -506,7 +506,10 @@ impl Broker {
         authorization.check()?;
         let bytes = envelope::item_view(memory.as_array(), length, &binding)?;
         let view = LoginView::parse(bytes, &record.metadata, &record.content_binding)?;
-        authorization.status("Finishing verification…")?;
+        authorization.status(
+            crate::prompt::PromptPhase::Processing,
+            "Finishing verification…",
+        )?;
         let result = operation(&view);
         drop(memory);
         authorization.check()?;

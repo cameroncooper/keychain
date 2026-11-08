@@ -1,8 +1,9 @@
 //! GPUI presentation agent. Root-only socket requests; no SEP access or success grant.
 use super::*;
+use crate::prompt::touchbar::{Publication, RequestKey};
 use crate::prompt::{
-    AgentEvent, DisplayEvent, Presentation, PromptStorage, read_frame, read_initial_presentation,
-    write_frame,
+    AgentEvent, Deadline, DisplayEvent, Presentation, PromptPhase, PromptStorage, read_frame,
+    read_initial_display, write_frame,
 };
 use gpui_kit::assets::{AllAssets, IconName};
 use gpui_kit::base::Disableable;
@@ -24,37 +25,58 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 enum Event {
-    Begin(Presentation, Option<Vec<PromptStorage>>, UnixStream),
-    Bind(Presentation),
-    Status(Uuid, String),
-    End(Uuid),
+    Begin(
+        RequestKey,
+        Presentation,
+        Option<Vec<PromptStorage>>,
+        Deadline,
+        UnixStream,
+    ),
+    Bind(RequestKey, Presentation, Deadline),
+    Status(RequestKey, PromptPhase, Deadline, String),
+    End(RequestKey),
 }
 struct Active {
-    id: Uuid,
+    key: RequestKey,
     window: AnyWindowHandle,
     view: Entity<AuthPrompt>,
 }
 
-fn listen(listener: UnixListener, output: mpsc::SyncSender<Event>) -> io::Result<()> {
+fn listen(
+    listener: UnixListener,
+    output: mpsc::SyncSender<Event>,
+    publication: Publication,
+) -> io::Result<()> {
     for connection in listener.incoming() {
         let stream = connection?;
         if keychain_sep_driver::peer::credentials(&stream)?.uid != 0 {
             continue;
         }
         let output = output.clone();
+        let publication = publication.clone();
         std::thread::spawn(move || {
             let mut input = stream;
             let _ = input.set_read_timeout(Some(Duration::from_secs(5)));
             let _ = input.set_write_timeout(Some(Duration::from_secs(1)));
             let mut active_id = None;
             let _result = (|| -> io::Result<()> {
-                let (request, choices) = read_initial_presentation(&mut input)?;
+                let (request, choices, deadline) = read_initial_display(&mut input)?;
                 let initial = request.clone();
                 let mut choosing = choices.clone();
                 let id = request.id;
-                active_id = Some(id);
+                let key = RequestKey {
+                    id,
+                    connection: Uuid::new_v4(),
+                };
+                active_id = Some(key);
                 output
-                    .send(Event::Begin(request, choices, input.try_clone()?))
+                    .send(Event::Begin(
+                        key,
+                        request,
+                        choices,
+                        deadline,
+                        input.try_clone()?,
+                    ))
                     .map_err(io::Error::other)?;
                 // All real operations have an upper bound, including forgotten UI.
                 input.set_read_timeout(Some(Duration::from_secs(125)))?;
@@ -63,6 +85,7 @@ fn listen(listener: UnixListener, output: mpsc::SyncSender<Event>) -> io::Result
                         DisplayEvent::Present {
                             version: crate::prompt::VERSION,
                             request,
+                            deadline,
                         } if choosing.is_some() => {
                             request.validate()?;
                             let offered = choosing
@@ -81,18 +104,17 @@ fn listen(listener: UnixListener, output: mpsc::SyncSender<Event>) -> io::Result
                                 ));
                             }
                             output
-                                .send(Event::Bind(request))
+                                .send(Event::Bind(key, request, deadline))
                                 .map_err(io::Error::other)?;
                         }
                         DisplayEvent::Status {
                             id: received,
+                            phase,
+                            deadline,
                             message,
-                        } if received == id
-                            && message.len() <= 512
-                            && !message.chars().any(char::is_control) =>
-                        {
+                        } if received == id && crate::prompt::validate_status(&message).is_ok() => {
                             output
-                                .send(Event::Status(id, message))
+                                .send(Event::Status(key, phase, deadline, message))
                                 .map_err(io::Error::other)?;
                         }
                         DisplayEvent::Finished { id: received } if received == id => return Ok(()),
@@ -102,8 +124,9 @@ fn listen(listener: UnixListener, output: mpsc::SyncSender<Event>) -> io::Result
             })();
             // On read failure terminate the operation and remove its window.
             let _ = input.shutdown(Shutdown::Both);
-            if let Some(id) = active_id {
-                let _ = output.send(Event::End(id));
+            if let Some(key) = active_id {
+                let _ = publication.retire(key);
+                let _ = output.send(Event::End(key));
             }
         });
     }
@@ -113,10 +136,13 @@ fn listen(listener: UnixListener, output: mpsc::SyncSender<Event>) -> io::Result
 /// Drop (including a window close) always shuts down the broker connection.
 struct Channel {
     id: Uuid,
+    key: RequestKey,
+    publication: Publication,
     stream: UnixStream,
 }
 impl Channel {
     fn cancel(&mut self) {
+        let _ = self.publication.retire(self.key);
         let _ = write_frame(&mut self.stream, &AgentEvent::Cancel { id: self.id });
         let _ = self.stream.shutdown(Shutdown::Both);
     }
@@ -146,14 +172,19 @@ struct AuthPrompt {
 }
 impl AuthPrompt {
     fn acknowledge_display(&mut self, window: &mut Window) {
-        if self.presented || !self.first_frame || !window.is_visible() || !window.is_window_active()
-        {
+        if !self.first_frame || !window.is_visible() || !window.is_window_active() {
+            return;
+        }
+        if self.presented {
+            let channel = self.channel.borrow();
+            let _ = channel.publication.visible(channel.key);
             return;
         }
         let mut channel = self.channel.borrow_mut();
         let id = channel.id;
         if write_frame(&mut channel.stream, &AgentEvent::Visible { id }).is_ok() {
             self.presented = true;
+            let _ = channel.publication.visible(channel.key);
             eprintln!("keychain-auth-agent: prompt presented");
         } else {
             channel.cancel();
@@ -194,11 +225,12 @@ impl AuthPrompt {
             .text_size(px(13.))
             .line_height(px(18.))
             .track_focus(&self.focus)
-            .on_key_down(|event, window, _| {
+            .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, _| {
                 if event.keystroke.key == "escape" {
+                    view.channel.borrow_mut().cancel();
                     window.remove_window();
                 }
-            })
+            }))
             .child(
                 div()
                     .mx_4()
@@ -240,7 +272,10 @@ impl AuthPrompt {
                                     .text_size(px(12.))
                                     .rounded(px(6.))
                                     .bg(rgb(palette.tile))
-                                    .on_click(|_, window, _| window.remove_window()),
+                                    .on_click(cx.listener(|view, _, window, _| {
+                                        view.channel.borrow_mut().cancel();
+                                        window.remove_window();
+                                    })),
                             ),
                     ),
             )
@@ -507,12 +542,13 @@ impl Render for AuthPrompt {
             .text_size(px(13.))
             .line_height(px(18.))
             .track_focus(&self.focus)
-            .on_key_down(|event, window, _| {
+            .on_key_down(cx.listener(|view, event: &KeyDownEvent, window, _| {
                 if event.keystroke.key == "escape" {
                     eprintln!("keychain-auth-agent: prompt canceled by Escape");
+                    view.channel.borrow_mut().cancel();
                     window.remove_window();
                 }
-            })
+            }))
             .child(
                 div()
                     .flex()
@@ -560,7 +596,10 @@ impl Render for AuthPrompt {
                                     .px_2()
                                     .text_size(px(12.))
                                     .bg(rgb(palette.tile))
-                                    .on_click(|_, window, _| window.remove_window()),
+                                    .on_click(cx.listener(|view, _, window, _| {
+                                        view.channel.borrow_mut().cancel();
+                                        window.remove_window();
+                                    })),
                             ),
                     ),
             )
@@ -666,13 +705,20 @@ fn acknowledge_next_frame(view: WeakEntity<AuthPrompt>, window: &mut Window) {
 }
 
 fn open_prompt(
+    key: RequestKey,
+    publication: Publication,
     request: Presentation,
     stream: UnixStream,
     choices: Option<Vec<PromptStorage>>,
     cx: &mut App,
 ) -> gpui_kit::Result<Active> {
     let id = request.id;
-    let channel = Rc::new(RefCell::new(Channel { id, stream }));
+    let channel = Rc::new(RefCell::new(Channel {
+        id,
+        key,
+        publication,
+        stream,
+    }));
     let close = channel.clone();
     let (window, view) = gpui_kit::open_window(
         WindowOptions {
@@ -712,18 +758,24 @@ fn open_prompt(
                         if window.is_window_active() {
                             view.acknowledge_display(window);
                             cx.notify();
-                        } else if view.presented && view.selection.is_none() {
-                            eprintln!(
-                                "keychain-auth-agent: prompt canceled after focus loss (activation)"
-                            );
-                            // Mapping can briefly change focus before the first frame,
-                            // particularly while the browser chooser is closing. No
-                            // capture is permitted until presentation is acknowledged.
-                            // Selection grants no authorization and may remain open across focus
-                            // changes. After the bound summary is acknowledged, switching away
-                            // always ends the authorization lifetime.
-                            view.channel.borrow_mut().cancel();
-                            window.remove_window();
+                        } else {
+                            {
+                                let channel = view.channel.borrow();
+                                let _ = channel.publication.hide(channel.key);
+                            }
+                            if view.presented && view.selection.is_none() {
+                                eprintln!(
+                                    "keychain-auth-agent: prompt canceled after focus loss (activation)"
+                                );
+                                // Mapping can briefly change focus before the first frame,
+                                // particularly while the browser chooser is closing. No
+                                // capture is permitted until presentation is acknowledged.
+                                // Selection grants no authorization and may remain open across focus
+                                // changes. After the bound summary is acknowledged, switching away
+                                // always ends the authorization lifetime.
+                                view.channel.borrow_mut().cancel();
+                                window.remove_window();
+                            }
                         }
                     });
                 let initial_status =
@@ -753,7 +805,7 @@ fn open_prompt(
             view
         },
     )?;
-    Ok(Active { id, window, view })
+    Ok(Active { key, window, view })
 }
 
 pub fn run() -> io::Result<()> {
@@ -816,9 +868,11 @@ pub fn run() -> io::Result<()> {
         }
     };
 
+    let (publication, publications) = Publication::new();
+    let listener_publication = publication.clone();
     let (sender, receiver) = mpsc::sync_channel(16);
     std::thread::spawn(move || {
-        if let Err(error) = listen(listener, sender) {
+        if let Err(error) = listen(listener, sender, listener_publication) {
             eprintln!("keychain-auth-agent: {error}");
         }
     });
@@ -828,7 +882,8 @@ pub fn run() -> io::Result<()> {
         .run(move |cx| {
             gpui_kit::init(cx);
             Theme::sync_system_appearance(None, cx);
-            let bus = match crate::prompt::activation::claim_name() {
+            let (cancel_sender,cancel_commands)=mpsc::sync_channel(16);
+            let bus = match crate::prompt::activation::claim_name(publication.interface(cancel_sender)) {
                 Ok(bus) => bus,
                 Err(error) => {
                     eprintln!("keychain-auth-agent: {error}");
@@ -836,6 +891,7 @@ pub fn run() -> io::Result<()> {
                     return;
                 }
             };
+            publications.run(bus.clone());
             cx.spawn(async move |cx| {
                 let _lifetime = (_lock, bus);
                 let mut active: Option<Active> = None;
@@ -843,23 +899,36 @@ pub fn run() -> io::Result<()> {
                 loop {
                     async_io::Timer::after(Duration::from_millis(25)).await;
                     let keep_running = cx.update(|cx| {
+                        while let Ok(command) = cancel_commands.try_recv() {
+                            if active.as_ref().is_some_and(|current| current.key == command.key) {
+                                if let Some(current) = active.take() {
+                                    let _ = publication.retire(current.key);
+                                    current.view.read(cx).channel.borrow_mut().cancel();
+                                    let _ = current.window.update(cx, |_, window, _| window.remove_window());
+                                    last_activity = Instant::now();
+                                }
+                            }
+                            command.applied();
+                        }
                         while let Ok(event) = receiver.try_recv() {
                             last_activity = Instant::now();
                             match event {
-                                Event::Begin(request, choices, stream) => {
+                                Event::Begin(key, request, choices, deadline, stream) => {
                                     if active.is_some() {
                                         let _ = stream.shutdown(Shutdown::Both);
                                         continue;
                                     }
-                                    match open_prompt(request, stream, choices, cx) {
+                                    let _ = publication.begin(key, &request, choices.is_some(), deadline);
+                                    match open_prompt(key, publication.clone(), request, stream, choices, cx) {
                                         Ok(prompt) => active = Some(prompt),
-                                        Err(error) => eprintln!(
-                                            "keychain-auth-agent: cannot display prompt: {error}"
-                                        ),
+                                        Err(error) => {
+                                            let _ = publication.retire(key);
+                                            eprintln!("keychain-auth-agent: cannot display prompt: {error}");
+                                        }
                                     }
                                 }
-                                Event::Bind(request) => {
-                                    if let Some(current) = active.as_ref().filter(|a| a.id == request.id) {
+                                Event::Bind(key, request, deadline) => {
+                                    if let Some(current) = active.as_ref().filter(|a| a.key == key) {
                                         let _ = current.window.update(cx, |_, window, cx| {
                                             current.view.update(cx, |view, cx| {
                                                 if !view.selection.as_ref().is_some_and(|selection| selection.submitted)
@@ -868,6 +937,7 @@ pub fn run() -> io::Result<()> {
                                                     window.remove_window();
                                                     return;
                                                 }
+                                                let _ = publication.bind(key, &request, deadline);
                                                 view.selection = None;
                                                 view.presented = false;
                                                 view.first_frame = false;
@@ -878,16 +948,18 @@ pub fn run() -> io::Result<()> {
                                         });
                                     }
                                 }
-                                Event::Status(id, text) => {
-                                    if let Some(current) = active.as_ref().filter(|a| a.id == id) {
+                                Event::Status(key, phase, deadline, text) => {
+                                    if let Some(current) = active.as_ref().filter(|a| a.key == key) {
+                                        let _ = publication.status(key, phase, deadline, &text);
                                         current.view.update(cx, |view, cx| {
                                             view.status = text;
                                             cx.notify();
                                         });
                                     }
                                 }
-                                Event::End(id) => {
-                                    if active.as_ref().is_some_and(|a| a.id == id) {
+                                Event::End(key) => {
+                                    if active.as_ref().is_some_and(|a| a.key == key) {
+                                        let _ = publication.retire(key);
                                         if let Some(current) = active.take() {
                                             let _ = current
                                                 .window
@@ -902,6 +974,10 @@ pub fn run() -> io::Result<()> {
                         if let Some(current) = active.as_ref() {
                             let _ = current.window.update(cx, |_, window, cx| {
                                 current.view.update(cx, |view, _| {
+                                    if !window.is_window_active() {
+                                        let channel = view.channel.borrow();
+                                        let _ = channel.publication.hide(channel.key);
+                                    }
                                     if view.presented && view.selection.is_none() && !window.is_window_active() {
                                         eprintln!("keychain-auth-agent: prompt canceled after focus loss (poll)");
                                         view.channel.borrow_mut().cancel();

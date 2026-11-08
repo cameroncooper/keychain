@@ -1,4 +1,5 @@
 use super::*;
+use crate::prompt::PromptPhase;
 use crate::security::sep::{ProviderError, StoredSepKey};
 
 impl Broker {
@@ -43,7 +44,7 @@ impl Broker {
                 Ok(())
             }
         };
-        let (storage, prompt) = PromptSession::choose_creation(
+        let (storage, mut prompt) = PromptSession::choose_creation(
             &path, self.owner, request, choices, &check,
         )
         .map_err(|e| match e.kind() {
@@ -61,6 +62,10 @@ impl Broker {
             S::DeviceOnly => P::DeviceBound,
             _ => return Err(ProviderError::UnsupportedPolicy.into()),
         };
+        let deadline = Instant::now() + Duration::from_secs(60);
+        prompt
+            .set_deadline(Some(deadline))
+            .map_err(|e| Error::io("prompt deadline", e))?;
         Ok((
             storage,
             Arc::new(NativeAuthorization {
@@ -68,7 +73,7 @@ impl Broker {
                 canceled,
                 session,
                 cancellation_test: false,
-                deadline: Instant::now() + Duration::from_secs(60),
+                deadline,
             }),
         ))
     }
@@ -84,14 +89,18 @@ impl Broker {
             return Err(ProviderError::Canceled.into());
         }
         let path = PathBuf::from(format!("/run/user/{}/keychain-auth.sock", self.owner));
-        let prompt = PromptSession::connect(&path, self.owner, presentation)
+        let mut prompt = PromptSession::connect(&path, self.owner, presentation)
             .map_err(|e| Error::io(&path, e))?;
+        let deadline = Instant::now() + Duration::from_secs(60);
+        prompt
+            .set_deadline(Some(deadline))
+            .map_err(|e| Error::io("prompt deadline", e))?;
         Ok(Arc::new(NativeAuthorization {
             prompt: Mutex::new(prompt),
             canceled,
             session,
             cancellation_test,
-            deadline: Instant::now() + Duration::from_secs(60),
+            deadline,
         }))
     }
 }
@@ -148,12 +157,12 @@ impl NativeAuthorization {
             .filter(|remaining| *remaining >= Duration::from_millis(1))
             .ok_or_else(|| ProviderError::Expired.into())
     }
-    pub(super) fn status(&self, message: &str) -> Result<()> {
+    pub(super) fn status(&self, phase: PromptPhase, message: &str) -> Result<()> {
         self.check()?;
         self.prompt
             .lock()
             .map_err(|_| Error::Refused("prompt failed".into()))?
-            .status(message)
+            .status(phase, message)
             .map_err(|e| Error::io("desktop prompt status", e))
     }
     // Called by the provider's control thread while its separate caller blocks
@@ -166,16 +175,23 @@ impl NativeAuthorization {
             return false;
         };
         prompt
-            .status(if self.cancellation_test {
-                "Click Cancel or press Escape — do not touch the reader"
-            } else {
-                use keychain_sep_driver::Guidance;
-                match guidance {
-                    Guidance::WaitingForDevice => "Waiting for the fingerprint reader…",
-                    Guidance::Preparing => "Preparing fingerprint reader…",
-                    Guidance::PlaceFinger => "Touch the fingerprint reader",
-                }
-            })
+            .status(
+                if self.cancellation_test {
+                    PromptPhase::DiagnosticCancel
+                } else {
+                    guidance.into()
+                },
+                if self.cancellation_test {
+                    "Click Cancel or press Escape — do not touch the reader"
+                } else {
+                    use keychain_sep_driver::Guidance;
+                    match guidance {
+                        Guidance::WaitingForDevice => "Waiting for the fingerprint reader…",
+                        Guidance::Preparing => "Preparing fingerprint reader…",
+                        Guidance::PlaceFinger => "Touch the fingerprint reader",
+                    }
+                },
+            )
             .is_ok()
     }
     pub(super) fn provider(

@@ -15,6 +15,7 @@ use std::os::unix::fs::{FileTypeExt, OpenOptionsExt};
 use std::path::Path;
 use std::time::{Duration, Instant};
 use zeroize::Zeroize;
+pub mod clock;
 pub mod memory;
 pub mod peer;
 
