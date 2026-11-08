@@ -82,3 +82,23 @@ Its prior version is retained at
 `/var/lib/keychain-service-backups/passkey-usernames.lfy1kg6e/keychain-broker`.
 Replacement occurred while inactive. No real private operation or Apple write
 ran. Reload the extension and refresh existing tabs to load the new form scripts.
+
+## Public TOTP challenge form
+
+The public `https://authenticationtest.com/totpChallenge/` form uses email and
+password inputs plus a text input named/id `totpmfa`, without a one-time-code
+autocomplete token. Its form disables autocomplete. The classifier now recognizes
+that MFA name and common MFA/code variants on text/tel/number/password inputs.
+
+The shared JavaScript suite passed 64 tests. Both actual packaged Chromium and
+LibreWolf harnesses passed a local synthetic fixture with this form structure,
+starting from both email and password, then filling the MFA field without
+submitting. Evidence: `/tmp/keychain-browser-harness-Obuvp4`. The targeted run
+skipped the previously validated deadline case; no new Rust/native change ran.
+
+Separately, the existing TOTP Test login had neither an active nor a staged
+broker record. After the user's fresh operation-specific readiness, its existing
+`keychain protect` flow completed revision 1 with biometrics and retained the
+encrypted software recovery copy. A subsequent read-only browser inventory
+confirmed password and TOTP eligibility for the website. No Apple record or
+website sign-in was changed; actual private browser filling remains user-initiated.

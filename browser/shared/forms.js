@@ -30,7 +30,8 @@
     if (!visible(field)) return null;
     const autocomplete = (field.autocomplete || "").toLowerCase().split(/\s+/);
     if (autocomplete.includes("new-password")) return null;
-    if (autocomplete.includes("one-time-code") || /(?:^|[\s_-])(otp|totp|verification|2fa)(?:$|[\s_-])/.test((field.name+" "+field.id).toLowerCase())) {
+    if (["text","tel","number","password"].includes(field.type) &&
+        (autocomplete.includes("one-time-code") || /(?:^|[\s_-])(?:otp|totp(?:mfa|code)?|mfa(?:code)?|verification(?:code)?|2fa(?:code)?)(?:$|[\s_-])/.test((field.name+" "+field.id).toLowerCase()))) {
       return field.maxLength > 0 && field.maxLength < 6 ? null : "totp";
     }
     if (field.type === "password" || autocomplete.includes("current-password")) return "password";

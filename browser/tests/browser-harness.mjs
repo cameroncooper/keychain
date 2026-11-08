@@ -60,7 +60,14 @@ window.runKeychainChecks = async () => {
 await fs.writeFile(path.join(workspace, "page.js"), clientScript);
 execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", path.join(workspace,"tls.key"),
   "-out", path.join(workspace,"tls.crt"), "-days", "1", "-subj", "/CN=localhost", "-addext", "subjectAltName=DNS:localhost"], {stdio:"ignore"});
-const formsHTML = query => `<!doctype html><meta charset="utf-8"><title>Keychain form fixture</title>
+const formsHTML = query => query.includes("totpChallenge") ? `<!doctype html><meta charset="utf-8"><title>Public TOTP form shape</title>
+<style>body{font:14px system-ui;margin:24px}label,input{display:block}input{width:280px;height:32px;margin:6px 0 18px}</style>
+<form id="login" action="/login/?mode=totpChallenge" method="post" autocomplete="off">
+<label for="email">E-Mail Address</label><input type="email" name="email" id="email" placeholder="E-Mail Address">
+<label for="password">Password</label><input type="password" name="password" id="password" placeholder="Password">
+<label for="totpmfa">Enter your MFA Code:</label><input type="text" name="totpmfa" id="totpmfa" placeholder="123456">
+<input type="submit" value="Log In"></form>
+<script>window.submissions=0;document.querySelector("form").addEventListener("submit",event=>{event.preventDefault();window.submissions++});</script>` : `<!doctype html><meta charset="utf-8"><title>Keychain form fixture</title>
 <style>body{font:14px system-ui;margin:24px}label,input{display:block}input{width:280px;height:32px;margin:6px 0 18px}form{margin:0 0 24px}</style>
 <form id="login" action="/submit" method="post"><label>Username<input id="username" name="username" autocomplete="username"></label>
 ${query.includes("usernameOnly") ? "" : '<label>Password<input id="password" type="password" name="password" autocomplete="current-password"></label>'}
@@ -202,6 +209,16 @@ for (const target of selection === "both" ? ["chromium","firefox"] : [selection]
       assert.equal((await fs.readFile(state.log,"utf8")).split("fillLogin").length,before);
       assert.equal((await fs.readFile(state.log,"utf8")).split("assert").length,assertionsBefore);
     }
+    // Public authenticationtest.com form structure: autocomplete off, all
+    // three fields in one form, and an unlabeled-by-autocomplete totpmfa input.
+    for(const field of ["#email","#password"]) {
+      await wd("POST",`/session/${session}/url`,{url:origin+"/forms?totpChallenge"});
+      await chooseLogin(field);
+      await until("return document.querySelector('#email').value==='test-user' && document.querySelector('#password').value==='published-browser-password'","public TOTP form login was not filled");
+      await chooseLogin("#totpmfa");
+      await until("return document.querySelector('#totpmfa').value==='123456'","totpmfa field was not filled");
+      assert.equal(await script("return window.submissions"),0);
+    }
     await wd("POST",`/session/${session}/url`,{url:new URL("toolbar.html",pickerURL).href});
     await sleep(500);
     await fs.writeFile(path.join(dir,`toolbar-${theme}.png`),Buffer.from(await wd("GET",`/session/${session}/screenshot`),"base64"));
@@ -209,7 +226,7 @@ for (const target of selection === "both" ? ["chromium","firefox"] : [selection]
     const color=await wd("GET",`/session/${session}/element/${html["element-6066-11e4-a52e-4f735466cecf"]}/css/color`);
     assert.equal(color.replaceAll(" ","").includes(theme === "dark" ? "240,240,243" : "36,36,38"),true,`Wrong ${theme} theme: ${color}`);
     const operations=await fs.readFile(state.log,"utf8"); assert.match(operations,/create/);assert.match(operations,/assert/);
-    await fs.writeFile(path.join(dir,"result.json"),JSON.stringify({passed:true,browser:started.capabilities.browserVersion,theme,checks:["availability","registration","credential prototypes/accessors","shared account picker","password/code filling","toolbar state/theme","changed form/field rejection","username-first metadata filling","passkey username suggestions without signing","assertion signature/origin/challenge","abort",...(skipDeadline ? [] : ["timeout"]),"fresh request after cancellation","foreign RP rejection"]},null,2));
+    await fs.writeFile(path.join(dir,"result.json"),JSON.stringify({passed:true,browser:started.capabilities.browserVersion,theme,checks:["availability","registration","credential prototypes/accessors","shared account picker","password/code filling","toolbar state/theme","changed form/field rejection","username-first metadata filling","passkey username suggestions without signing","public TOTP challenge form fields","assertion signature/origin/challenge","abort",...(skipDeadline ? [] : ["timeout"]),"fresh request after cancellation","foreign RP rejection"]},null,2));
     console.log(`${target}: passed registration, assertion verification, origin/RP, accessors, picker, password/code forms, abort${skipDeadline ? " (deadline skipped)" : " and timeout"} (${started.capabilities.browserVersion})`);
   } finally {if(session)await wd("DELETE",`/session/${session}`).catch(()=>{});driver.kill();await log.close();}
 }
