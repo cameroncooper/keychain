@@ -86,6 +86,23 @@ Navigation, hiding the document, disconnect, disable, Escape and deadlines retai
 the existing revocation behavior. Page-controlled menu presentation is not a
 trusted authorization surface; native prompts show the actual destination.
 
+## Suggestion placement
+
+The shared menu measures its rendered height instead of assuming a fixed popup
+size. It prefers below the focused field, flips above when that fits, and uses
+the roomier side with a scrollable height limit when neither side fits in full.
+Horizontal placement stays inside the visible viewport, including visual
+viewport offsets. It keeps a gap around the field and never clamps the menu
+across it. With no usable space, or after the field leaves the viewport, it
+cancels the inline menu; the extension toolbar remains available.
+
+Only while the menu is open, a frame callback compares the anchor and viewport
+geometry to follow scroll, resize and layout shifts. A ResizeObserver marks menu
+or field size changes, and content updates request remeasurement. Unchanged
+frames do not restyle or remeasure the menu. Closing disconnects the observer
+and cancels the callback. This code reads geometry and public menu content, not
+editable values, and does not change authorization or form-delivery checks.
+
 ## Explicit fallback
 
 For an unknown focused field, the extension toolbar can offer a manual role.

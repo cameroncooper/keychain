@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "name": "Keychain",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Fill passwords and verification codes and use passkeys through the local Keychain biometric broker.",
   "browser_specific_settings": {
     "gecko": {

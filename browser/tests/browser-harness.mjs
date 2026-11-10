@@ -167,7 +167,7 @@ for (const target of selection === "both" ? ["chromium","firefox"] : [selection]
     const script=code=>wd("POST",`/session/${session}/execute/sync`,{script:code,args:[]});
     async function until(code, message) {
       for(let attempt=0;attempt<60;attempt++){const value=await script(code);if(value)return value;await sleep(75);}
-      const diagnostic=await script("return {active:document.activeElement?.id,menu:document.querySelector('[data-keychain-menu]')?.dataset.keychainState,inputs:[...document.querySelectorAll('input')].map(field=>({id:field.id,type:field.type,autocomplete:field.autocomplete,maxLength:field.maxLength,visible:getComputedStyle(field).visibility,rect:field.getBoundingClientRect().toJSON()}))}").catch(()=>null);
+      const diagnostic=await script("return {active:document.activeElement?.id,menu:document.querySelector('[data-keychain-menu]')?.dataset.keychainState,placement:document.querySelector('[data-keychain-menu]')?.dataset.keychainPlacement,menuRect:document.querySelector('[data-keychain-menu]')?.getBoundingClientRect().toJSON(),viewport:{width:innerWidth,height:innerHeight},inputs:[...document.querySelectorAll('input')].map(field=>({id:field.id,type:field.type,autocomplete:field.autocomplete,maxLength:field.maxLength,visible:getComputedStyle(field).visibility,rect:field.getBoundingClientRect().toJSON()}))}").catch(()=>null);
       throw new Error(`${target}: ${message}: ${JSON.stringify(diagnostic)}`);
     }
     let capturedInline = false;
@@ -178,6 +178,24 @@ for (const target of selection === "both" ? ["chromium","firefox"] : [selection]
       if(!capturedInline) { capturedInline=true;await fs.writeFile(path.join(dir,`inline-${theme}.png`),Buffer.from(await wd("GET",`/session/${session}/screenshot`),"base64")); }
       await wd("POST",`/session/${session}/actions`,{actions:[{type:"key",id:"keyboard",actions:[...Array.from({length:row+1},()=>[{type:"keyDown",value:"\ue015"},{type:"keyUp",value:"\ue015"}]).flat(),{type:"keyDown",value:"\ue007"},{type:"keyUp",value:"\ue007"}]}]});
     }
+    // Placement uses real rendered menu dimensions in both browser engines.
+    // Moving the same anchor must not leave an overlay covering editable text.
+    await wd("POST",`/session/${session}/url`,{url:origin+"/forms?usernameOnly"});
+    await script("document.querySelector('#username').style.cssText='position:fixed;left:100px;top:20px;width:280px;height:32px'");
+    const anchor = await wd("POST",`/session/${session}/element`,{using:"css selector",value:"#username"});
+    await wd("POST",`/session/${session}/element/${anchor["element-6066-11e4-a52e-4f735466cecf"]}/click`,{});
+    const clearPlacement = side => `const field=document.querySelector('#username'),menu=document.querySelector('[data-keychain-menu]');
+      if(!menu || menu.dataset.keychainState!=='ready' || menu.dataset.keychainPlacement!==${JSON.stringify(side)})return false;
+      const a=field.getBoundingClientRect(),b=menu.getBoundingClientRect();
+      return getComputedStyle(menu).visibility==='visible' && b.left>=7 && b.right<=innerWidth-7 && b.top>=7 && b.bottom<=innerHeight-7 &&
+        (b.top>=a.bottom+3 || b.bottom<=a.top-3);`;
+    await until(clearPlacement("below"),"menu did not remain below the top field");
+    await script("document.querySelector('#username').style.top=(innerHeight-48)+'px'");
+    await until(clearPlacement("above"),"menu did not flip above the moved field");
+    await script("document.querySelector('#username').style.cssText='position:absolute;left:100px;top:1200px;width:280px;height:32px';document.body.style.minHeight='2000px';scrollTo(0,1150)");
+    await until(clearPlacement("below"),"menu did not follow a scroll/reflow");
+    await script("document.querySelector('#username').style.cssText='position:fixed;left:100px;top:8px;width:280px;height:calc(100vh - 16px)'");
+    await until("return !document.querySelector('[data-keychain-menu]')","menu did not dismiss when neither side had usable space");
     await wd("POST",`/session/${session}/url`,{url:origin+"/forms"});
     await chooseLogin("#username");
     await until("return document.querySelector('#password').value==='published-browser-password'","password was not filled");
@@ -312,7 +330,7 @@ for (const target of selection === "both" ? ["chromium","firefox"] : [selection]
     const color=await wd("GET",`/session/${session}/element/${html["element-6066-11e4-a52e-4f735466cecf"]}/css/color`);
     assert.equal(color.replaceAll(" ","").includes(theme === "dark" ? "240,240,243" : "36,36,38"),true,`Wrong ${theme} theme: ${color}`);
     const operations=await fs.readFile(state.log,"utf8"); assert.match(operations,/create/);assert.match(operations,/assert/);
-    await fs.writeFile(path.join(dir,"result.json"),JSON.stringify({passed:true,browser:started.capabilities.browserVersion,theme,checks:["availability","registration","credential prototypes/accessors","shared account picker","password/code filling","toolbar state/theme","changed form/field rejection","username-first metadata filling","passkey username suggestions without signing","public TOTP challenge form fields","shared detection corpus and negative fields","explicit manual roles and stale-probe refusal","assertion signature/origin/challenge","abort",...(skipDeadline ? [] : ["timeout"]),"fresh request after cancellation","foreign RP rejection"]},null,2));
+    await fs.writeFile(path.join(dir,"result.json"),JSON.stringify({passed:true,browser:started.capabilities.browserVersion,theme,checks:["availability","registration","credential prototypes/accessors","shared account picker","password/code filling","toolbar state/theme","changed form/field rejection","username-first metadata filling","passkey username suggestions without signing","public TOTP challenge form fields","shared detection corpus and negative fields","menu placement and non-overlap after layout/scroll changes","explicit manual roles and stale-probe refusal","assertion signature/origin/challenge","abort",...(skipDeadline ? [] : ["timeout"]),"fresh request after cancellation","foreign RP rejection"]},null,2));
     console.log(`${target}: passed registration, assertion verification, origin/RP, accessors, picker, password/code forms, abort${skipDeadline ? " (deadline skipped)" : " and timeout"} (${started.capabilities.browserVersion})`);
   } finally {if(session)await wd("DELETE",`/session/${session}`).catch(()=>{});driver.kill();await log.close();}
 }
