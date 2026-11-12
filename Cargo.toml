@@ -9,22 +9,16 @@ publish = false
 
 [workspace]
 members = ["crates/sep-driver"]
-exclude = ["helpers/mac-anisette", "prototypes/qt"]
+exclude = ["helpers/mac-anisette", "prototypes/qt", "desktop"]
 resolver = "2"
 
 [features]
-desktop-ui = ["dep:gpui-kit"]
-desktop-agent = ["desktop-ui"]
+desktop-agent = ["dep:gpui-kit"]
 
 [[bin]]
 name = "keychain-auth-agent"
 path = "src/bin/keychain-auth-agent.rs"
 required-features = ["desktop-agent"]
-
-[[bin]]
-name = "keychain-gui"
-path = "src/bin/keychain-gui.rs"
-required-features = ["desktop-ui"]
 
 [dependencies]
 keychain-sep-driver = { path = "crates/sep-driver" }

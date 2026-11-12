@@ -1,0 +1,18 @@
+pkgname=keychain-gui
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Keychain credential browser with a Qt Quick frontend'
+arch=('aarch64' 'x86_64')
+url='https://github.com/cameroncooper/keychain'
+license=('MIT')
+options=('!debug')
+depends=('qt6-base' 'qt6-declarative' 'qt6-wayland')
+source=('keychain-gui' 'cameroncooper.keychain.desktop' 'cameroncooper.keychain.svg' 'LICENSE' 'THIRD-PARTY-NOTICES.md')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+package() {
+    install -Dm755 "$srcdir/keychain-gui" "$pkgdir/usr/bin/keychain-gui"
+    install -Dm644 "$srcdir/cameroncooper.keychain.desktop" "$pkgdir/usr/share/applications/cameroncooper.keychain.desktop"
+    install -Dm644 "$srcdir/cameroncooper.keychain.svg" "$pkgdir/usr/share/icons/hicolor/scalable/apps/cameroncooper.keychain.svg"
+    install -Dm644 "$srcdir/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+    install -Dm644 "$srcdir/THIRD-PARTY-NOTICES.md" "$pkgdir/usr/share/licenses/$pkgname/THIRD-PARTY-NOTICES.md"
+}

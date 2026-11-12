@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+"$root/desktop/bin/build"
+stage="$root/target/desktop-package"
+mkdir -p "$stage"
+install -m644 "$root/desktop/pkgbuild/PKGBUILD" "$root/desktop/pkgbuild/cameroncooper.keychain.desktop" "$root/desktop/pkgbuild/cameroncooper.keychain.svg" "$root/LICENSE" "$root/desktop/THIRD-PARTY-NOTICES.md" "$stage/"
+install -m755 "$root/target/release/keychain-gui" "$stage/keychain-gui"
+cd "$stage"
+makepkg --force --cleanbuild --noconfirm
+# This package installs only the GUI. Broker/agent services are installed separately.
+package_path=$(makepkg --packagelist)
+[[ -f "$package_path" ]]
+sudo pacman --upgrade --noconfirm "$package_path"

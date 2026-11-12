@@ -1,3 +1,7 @@
+> The accepted CXX-Qt frontend now lives in [`desktop/`](../../desktop/README.md)
+> and uses real inventory/reveal code. This directory remains an isolated,
+> synthetic framework comparison; production changes belong in `desktop/`.
+
 # Keychain Qt Quick prototype
 
 ![Keychain preview with synthetic accounts](docs/preview-dark.png)

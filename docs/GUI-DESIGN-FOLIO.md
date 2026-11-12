@@ -141,3 +141,17 @@ Touch Bar checks belong to the later integration stage.
 Folio's code is MIT licensed. If components or drawing code are adapted, preserve
 its copyright and license attribution with the adapted files.
 [Folio license](https://github.com/omacom/folio/blob/ac9d14f263e2bef8b8c8d960386fd4500cabb7b3/LICENSE)
+
+## Accepted implementation
+
+The CXX-Qt prototype was accepted and is now the main app in
+[`desktop/`](../desktop/README.md), replacing the GPUI credential browser.
+The separate GPUI authentication agent remains installed and unchanged.
+The shared Rust controller retains selected-field reveals, cancellation,
+identity/revision checks and the existing focus/time limits.
+
+The first usable app has automatic Omarchy-palette/Qt-appearance fallback,
+metadata browsing and deliberate password/code/notes reveals. Theme preferences,
+live corner-radius detection, translated catalogs and a Qt authentication popup
+remain follow-up work. The synthetic encrypted-vault harness validates the actual
+production QML and adapter; hardware acceptance is separate.

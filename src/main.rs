@@ -146,7 +146,9 @@ fn launch_gui() -> Result<()> {
     let executable = std::env::current_exe().map_err(|e| Error::io("keychain executable", e))?;
     let gui = executable.with_file_name("keychain-gui");
     if !gui.is_file() {
-        return Err(Error::Config("desktop UI is not installed alongside keychain; build with `cargo build --release --features desktop-agent --bins`".into()));
+        return Err(Error::Config(
+            "desktop UI is not installed alongside keychain; build with `desktop/bin/build`".into(),
+        ));
     }
     Err(Error::io(&gui, std::process::Command::new(&gui).exec()))
 }

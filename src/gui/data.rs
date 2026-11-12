@@ -1,5 +1,4 @@
 //! Metadata-only desktop model and selected-field reveal; no UI entities.
-use super::BLUE;
 use crate::broker::login::{LoginMetadata, RevealField, RevealedLogin};
 use crate::config::Config;
 use crate::model::PasskeyProvenance;
@@ -7,7 +6,6 @@ use crate::paths::AppPaths;
 use crate::security::backend_for_config;
 use crate::store::StateStore;
 use crate::{Error, Result};
-use gpui_kit::assets::IconName;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -15,14 +13,14 @@ use std::sync::{
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Category {
+pub enum Category {
     All,
     Passwords,
     Passkeys,
     Codes,
 }
 impl Category {
-    pub(super) fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             Self::All => "All",
             Self::Passwords => "Passwords",
@@ -30,23 +28,7 @@ impl Category {
             Self::Codes => "Codes",
         }
     }
-    pub(super) fn icon(self) -> IconName {
-        match self {
-            Self::All => IconName::KeyRound,
-            Self::Passwords => IconName::LockKeyhole,
-            Self::Passkeys => IconName::UserRound,
-            Self::Codes => IconName::Timer,
-        }
-    }
-    pub(super) fn color(self) -> u32 {
-        match self {
-            Self::All => BLUE,
-            Self::Passwords => 0x8a63d2,
-            Self::Passkeys => 0x25ad51,
-            Self::Codes => 0xf0ad00,
-        }
-    }
-    pub(super) fn contains(self, item: &Item) -> bool {
+    pub fn contains(self, item: &Item) -> bool {
         match self {
             Self::All => true,
             Self::Passwords => item.login.is_some(),
@@ -57,35 +39,25 @@ impl Category {
 }
 
 #[derive(Clone, PartialEq)]
-pub(super) struct Item {
-    pub(super) id: String,
-    pub(super) title: String,
-    pub(super) domain: String,
-    pub(super) username: String,
-    pub(super) storage: &'static str,
-    pub(super) protection: &'static str,
-    pub(super) login: Option<LoginMetadata>,
-    pub(super) route: Option<crate::config::LoginRoute>,
+pub struct Item {
+    pub id: String,
+    pub title: String,
+    pub domain: String,
+    pub username: String,
+    pub storage: &'static str,
+    pub protection: &'static str,
+    pub login: Option<LoginMetadata>,
+    pub route: Option<crate::config::LoginRoute>,
 }
 impl Item {
-    pub(super) fn matches(&self, category: Category, query: &str) -> bool {
+    pub fn matches(&self, category: Category, query: &str) -> bool {
         category.contains(self)
             && [&self.title, &self.domain, &self.username, &self.id]
                 .iter()
                 .any(|v| v.to_lowercase().contains(query))
     }
-    pub(super) fn icon(&self) -> IconName {
-        if self.login.is_some() {
-            IconName::Globe
-        } else {
-            IconName::KeyRound
-        }
-    }
-    pub(super) fn color(&self) -> u32 {
-        if self.login.is_some() { BLUE } else { 0x25ad51 }
-    }
 }
-pub(super) fn load_items() -> Result<Vec<Item>> {
+pub fn load_items() -> Result<Vec<Item>> {
     let paths = AppPaths::discover()?;
     let config = Config::load(&paths)?;
     let backend = backend_for_config(&config, &paths)?;
@@ -110,7 +82,11 @@ fn items_from(config: &Config, store: &StateStore<'_>) -> Result<Vec<Item>> {
             },
             domain: login.domain.clone(),
             username: login.username.clone(),
-            storage: "iCloud-synced",
+            storage: if route.is_some() {
+                "Protected local copy"
+            } else {
+                "iCloud-synced"
+            },
             protection: if route.is_some() {
                 "Fingerprint required"
             } else {
@@ -149,7 +125,7 @@ fn items_from(config: &Config, store: &StateStore<'_>) -> Result<Vec<Item>> {
     });
     Ok(items)
 }
-pub(super) fn reveal_field(
+pub fn reveal_field(
     selected: &Item,
     field: RevealField,
     canceled: Arc<AtomicBool>,
@@ -246,7 +222,7 @@ fn reveal_from(
         },
     })
 }
-pub(super) fn now() -> u64 {
+pub fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

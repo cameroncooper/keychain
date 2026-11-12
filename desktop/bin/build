@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+# Let Qt discover qmake6; an explicit QMAKE from the caller is respected.
+cargo build --release --locked --manifest-path "$root/desktop/Cargo.toml" --target-dir "$root/target" -j 1 --bin keychain-gui

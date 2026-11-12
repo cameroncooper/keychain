@@ -1,26 +1,25 @@
 # Desktop app and authentication window
 
-The native desktop stack is GPUI-kit 0.9.0, pinned in Cargo.toml/Cargo.lock.
-There is no GTK dependency. The upstream [application recipe and architecture](https://github.com/longbridge/gpui-kit)
-provide the GPUI/component initialization and platform backend. This is an optional
-build: `desktop-ui` builds `keychain-gui`, and `desktop-agent` also builds the
-separate authentication agent. The terminal-only build remains independent.
+The main application uses Qt Quick and CXX-Qt 0.10.0 in the separate
+`desktop/` Cargo workspace. Build it with `desktop/bin/build`; the terminal and
+service builds stay independent of Qt. The authentication agent retains
+GPUI-kit 0.9.0 behind the `desktop-agent` feature. Neither uses GTK.
+See [desktop build and tests](../desktop/README.md).
 
 ## Windows and interaction
 
 `keychain gui` replaces its process with the adjacent `keychain-gui` executable,
 without a shell or PATH lookup. Both entry points protect against core dumping.
-The app refuses root execution. On Linux it uses the GPUI Wayland/X11 renderer;
+The app refuses root execution. On Linux it uses Qt Quick on Wayland/X11;
 the compositor remains responsible for placement, focus and decorations.
 
-The [Apple Passwords reference](https://cdsassets.apple.com/live/7WUAS350/images/macos/sequoia/macos-sequoia-passwords-selected-website-edit-password.png)
-informs the three-pane layout: quiet gray category tiles at left, searchable
-credential list in the middle, and grouped detail cards at right. Categories are
-All, Passwords, Passkeys and Codes; unsupported collections are omitted. The app
-uses bundled icons instead of downloading favicons or contacting listed sites.
-Category tiles and list items use GPUI Base buttons for keyboard and accessibility
-behavior; search and action buttons use GPUI Component. Ctrl+F focuses search.
-Narrow tiled windows replace the sidebar with a compact filter strip.
+The accepted [Folio-inspired design](GUI-DESIGN-FOLIO.md) uses a category sidebar,
+searchable inventory and selected-item details. Font, spacing, focus, vector and
+scrollbar conventions follow the [source audit](../prototypes/qt/docs/FOLIO-STYLE-AUDIT.md).
+Categories are All, Logins, Passkeys and Codes. Ctrl+F/Ctrl+K focuses search;
+Escape hides/cancels. Narrow windows replace the sidebar with a compact filter
+strip and navigate between list and details. Icons are embedded paths; no
+favicons or website requests are made.
 
 Details describe whether an item is synced or device-only separately from how
 its local key is protected. The app reads the shared `inventory::visible_index`
@@ -59,7 +58,7 @@ the fingerprint window to close and focus to return, then discarded. Focusing th
 deactivates the app: pending verification is allowed to finish, but it cannot display
 fields in an inactive app window. No automatic clipboard writes or secret logging.
 
-Rendering intentional plaintext necessarily passes copies into GPUI text/layout
+Rendering intentional plaintext necessarily passes copies into Qt text/layout
 and GPU resources; we cannot promise to wipe renderer, GPU, compositor, screenshot
 or accessibility copies. Hiding is a display lifetime limit, not a claim of total
 memory erasure. The existing software backend remains accessible to same-UID code.
@@ -166,18 +165,14 @@ session, cancellation and authorization checks.
 
 ### Desktop appearance
 
-Both windows follow the generic XDG Desktop Portal Settings preference
-`org.freedesktop.appearance/color-scheme`: 0 is no preference, 1 prefers dark, and
-2 prefers light. GPUI's Linux platform already reads this setting and subscribes
-to its change signal. Keychain synchronizes GPUI Component's theme when each
-window opens and observes subsequent window-appearance changes. Custom surfaces,
-text, dividers, error states and the fingerprint artwork use a shared light/dark
-palette; components use the matching GPUI theme. Missing portal support/no
-preference uses GPUI's light fallback. Appearance does not affect authorization.
+The authentication agent follows the generic XDG Desktop Portal Settings
+preference `org.freedesktop.appearance/color-scheme` and observes changes via
+GPUI. Its appearance policy and cancellation behavior are unchanged.
 
-No Omarchy config, GTK theme name or desktop-specific setting is read to select
-appearance. The portal expresses a preference rather than a complete vendor color
-palette. Reference: [Settings portal specification](https://flatpak.github.io/xdg-desktop-portal/docs/doc-org.freedesktop.portal.Settings.html).
+The main application polls the read-only Omarchy palette once per second, with
+Qt's platform light/dark preference as fallback. No desktop configuration is
+changed. Appearance never affects authorization. Production QML has translation
+hooks but no translated catalog yet; corners currently remain square.
 
 
 Refinement validation on 2026-11-06: the installed agent rendered the new rounded

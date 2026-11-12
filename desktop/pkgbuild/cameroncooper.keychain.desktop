@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Keychain
+Comment=Browse your passwords, passkeys and verification codes
+Exec=keychain-gui
+Icon=cameroncooper.keychain
+Terminal=false
+Categories=Utility;Security;
+Keywords=Passwords;Passkeys;TOTP;Keychain;
+StartupNotify=true
+StartupWMClass=cameroncooper.keychain

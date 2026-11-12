@@ -205,3 +205,13 @@ The metadata list currently uses bounded full snapshots into QML. Native
 incremental models and large-inventory benchmarks remain explicit selection
 gates. Refer to the prototype README for commands, screenshots, dependency
 pinning, validation scope and the observed portal-registration warning.
+
+## Implementation decision
+
+The user accepted the CXX-Qt prototype. The production frontend is now in the
+separate [`desktop/`](../desktop/README.md) workspace, backed by the shared Rust
+inventory and selected-field controller. The main GPUI app is removed; the GPUI
+authentication agent and broker stay in place. Inventory rows are republished
+only after inventory/search/filter changes, separately from selection and secret
+presentation. An incremental Qt model and large-inventory benchmark remain
+future work. Synthetic tests do not qualify new hardware behavior.

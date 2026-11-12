@@ -252,18 +252,19 @@ and the remaining requirements for SEP-protected keys and passkeys.
 
 ## Desktop app
 
-Build the native GPUI-kit app and authentication agent:
+Build the Qt Quick app separately from the GPUI authentication agent:
 
 ```sh
 cargo build --release --locked --features desktop-agent --bins
+desktop/bin/build
 ./target/release/keychain gui
 ```
 
 `keychain gui` launches the adjacent `keychain-gui` executable. The CLI and services
-remain usable without compiling the optional desktop UI. For the app alone, use
-`--features desktop-ui --bins`.
+remain usable without compiling Qt. The app lives in the separate `desktop/`
+Cargo workspace; see [desktop build and tests](desktop/README.md).
 
-The app has All, Passwords, Passkeys and Codes filters, search, and credential details.
+The app has All, Logins, Passkeys and Codes filters, search, and credential details.
 It reads the same local inventory as `keychain list`, including device-bound passkeys.
 Refresh reloads local items; use `keychain sync` to fetch iCloud changes. Password,
 notes and current-code reveal is explicit and selected-field only; protected logins
@@ -271,14 +272,14 @@ use the broker's fingerprint prompt. Revealed fields hide after 30 seconds, code
 expiry, selection/search changes, window deactivation or Escape. No secret is copied
 to the clipboard automatically. Sync and account setup remain CLI operations; this app does not expose editing or deletion.
 
-The small authentication window uses the same GPUI UI stack but runs in its separate
-D-Bus activated agent. Reinstall the service artifacts to switch the installed GTK
-agent to GPUI; building alone does not replace installed services. See
+The small authentication window retains GPUI and runs in its separate
+D-Bus activated agent. Building or installing the main GUI does not replace
+installed authentication services. See
 [desktop UI design](docs/DESKTOP-UI.md) for the security boundaries and remaining work.
 
-The app and fingerprint prompt follow the XDG Desktop Portal light/dark preference,
-including appearance changes while open. This does not depend on Omarchy-specific
-files. The authentication popup cancels its operation when it loses focus.
+The app follows the Omarchy palette when available, otherwise Qt’s platform
+light/dark preference. The fingerprint prompt retains its XDG Desktop Portal
+appearance support and cancels its operation when it loses focus.
 
 GUI builds and tests can have large linker memory peaks. On the 16 GB Asahi
 machine, run desktop validation serially to avoid concurrent debug linkers:

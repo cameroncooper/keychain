@@ -1,0 +1,3 @@
+# CXX-Qt writes machine-local language-server paths here.
+/.qmlls.ini
+/target/
