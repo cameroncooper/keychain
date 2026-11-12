@@ -1,7 +1,10 @@
+// Control focus and scrollbar styling adapted from Folio (MIT).
+// Copyright (c) 2026 David Heinemeier Hansson; see ../THIRD-PARTY-NOTICES.md.
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Controls.Material
 import QtQuick.Layouts
+import QtQuick.Shapes
 import PrototypeBackend
 
 ApplicationWindow {
@@ -13,7 +16,28 @@ ApplicationWindow {
     visible: true
     title: qsTr("Keychain Preview")
     font.family: "monospace"
-    font.pixelSize: 13
+    font.pixelSize: metrics.body
+    // Folio 61b7e20 measurements; Keychain-specific dimensions are explicit.
+    readonly property QtObject metrics: QtObject {
+        readonly property int body: 13
+        readonly property int secondary: 12
+        readonly property int section: 11
+        readonly property int pathTitle: 14
+        readonly property int detailTitle: 15
+        readonly property int dialogTitle: 16
+        readonly property int topBar: 60
+        readonly property int sidebar: 190
+        readonly property int sidebarRow: 34
+        readonly property int control: 36
+        readonly property int actionMinimum: 88
+        readonly property int icon: 18
+        readonly property real iconStroke: 1.6
+        readonly property int inset: 14
+        readonly property int detailInset: 28
+        readonly property int detailGap: 22
+        readonly property int credentialRow: 56 // Two lines rather than Folio's 32-pixel file row.
+        readonly property int credentialPane: 340
+    }
     property QtObject backend: Backend {}
     property var state: JSON.parse(backend.snapshot)
     onStateChanged: if (!state.selected)
@@ -21,7 +45,7 @@ ApplicationWindow {
     property var tokens: state.theme
     property color ink: tokens.foreground
     property color accent: tokens.accent
-    property color line: Qt.alpha(ink, 0.13)
+    property color line: Qt.alpha(ink, 0.12)
     property bool compact: width < 800
     property bool detailsOpen: false
     property bool helpOpen: false
@@ -94,7 +118,7 @@ ApplicationWindow {
         color: win.ink
         textFormat: Text.PlainText
         font.family: "monospace"
-        font.pixelSize: 13
+        font.pixelSize: win.metrics.body
         elide: Text.ElideRight
         verticalAlignment: Text.AlignVCenter
     }
@@ -103,62 +127,78 @@ ApplicationWindow {
         property bool leading: false
         property bool primary: false
         property bool selected: false
-        implicitHeight: 36
-        implicitWidth: Math.max(36, caption.implicitWidth + 24)
+        property bool navigation: false
+        property bool toolbar: false
+        implicitHeight: navigation ? win.metrics.sidebarRow : win.metrics.control
+        implicitWidth: toolbar ? win.metrics.control : navigation ? caption.implicitWidth + 28 : Math.max(win.metrics.actionMinimum, caption.implicitWidth + 32)
+        leftPadding: navigation ? win.metrics.inset : toolbar ? 0 : 16
+        rightPadding: leftPadding
         hoverEnabled: true
         focusPolicy: Qt.TabFocus
         Accessible.name: text
+        Keys.onShortcutOverride: event => {
+            if (!(event.modifiers & (Qt.ControlModifier | Qt.AltModifier)) && [Qt.Key_Return, Qt.Key_Enter, Qt.Key_Space].includes(event.key))
+                event.accepted = true;
+        }
+        Keys.onReturnPressed: clicked()
+        Keys.onEnterPressed: clicked()
         background: Rectangle {
-            color: button.primary ? win.accent : button.selected ? Qt.alpha(win.accent, 0.16) : button.hovered ? Qt.alpha(win.ink, 0.08) : "transparent"
-            border.width: button.activeFocus ? 1 : 0
-            border.color: win.accent
-            radius: win.tokens.radius
+            color: button.primary ? win.accent : button.selected ? Qt.alpha(win.accent, 0.16) : button.hovered ? Qt.alpha(win.ink, button.navigation ? 0.06 : button.toolbar ? 0.08 : 0.10) : button.navigation || button.toolbar ? "transparent" : Qt.alpha(win.ink, 0.05)
+            radius: Math.min(4, win.tokens.radius)
+            Rectangle {
+                visible: button.activeFocus
+                anchors.fill: parent
+                anchors.margins: button.navigation ? 0 : -3
+                color: "transparent"
+                radius: parent.radius + 3
+                border.width: button.navigation ? 1 : 2
+                border.color: win.tokens.selectionInk
+            }
         }
         contentItem: Words {
             id: caption
             text: button.text
-            color: button.primary ? win.tokens.onAccent : button.selected ? win.tokens.selectionInk : win.ink
+            color: button.primary ? win.tokens.onAccent : button.selected ? win.tokens.bright : win.ink
             horizontalAlignment: button.leading ? Text.AlignLeft : Text.AlignHCenter
         }
     }
-    component Mark: Canvas {
-        property string kind: "Login"
-        implicitWidth: 24
-        implicitHeight: 24
-        onKindChanged: requestPaint()
-        Connections {
-            target: win
-            function onInkChanged() {
-                requestPaint();
+    component ToolbarAction: QuietButton {
+        id: action
+        property string glyph
+        toolbar: true
+        contentItem: Item {
+            Mark {
+                anchors.centerIn: parent
+                kind: action.glyph
             }
         }
-        onPaint: {
-            const c = getContext("2d");
-            c.reset();
-            c.strokeStyle = win.ink;
-            c.lineWidth = 1.5;
-            c.beginPath();
-            c.arc(10, 10, 6, 0, Math.PI * 2);
-            c.stroke();
-            if (kind === "Passkey") {
-                c.beginPath();
-                c.moveTo(14, 14);
-                c.lineTo(22, 22);
-                c.moveTo(18, 18);
-                c.lineTo(21, 15);
-                c.stroke();
-            } else if (kind === "Code") {
-                c.beginPath();
-                c.moveTo(10, 6);
-                c.lineTo(10, 10);
-                c.lineTo(13, 12);
-                c.stroke();
-            } else {
-                c.beginPath();
-                c.ellipse(7, 4, 6, 12);
-                c.moveTo(4, 10);
-                c.lineTo(16, 10);
-                c.stroke();
+        ToolTip {
+            visible: action.hovered
+            delay: 600
+            text: action.text
+            enter: null
+            exit: null
+        }
+    }
+    component Mark: Item {
+        id: mark
+        property string kind: "Login"
+        implicitWidth: win.metrics.icon
+        implicitHeight: win.metrics.icon
+        readonly property string drawing: kind === "Passkey" ? "M13 8a5 5 0 1 0-10 0a5 5 0 1 0 10 0M11.5 11.5L22 22M18 18L21 15" : kind === "Code" ? "M21 12a9 9 0 1 0-18 0a9 9 0 1 0 18 0M12 6V12L16 14" : kind === "Refresh" ? "M20 7a8 8 0 1 0 0 10M14 7H20V1" : kind === "Help" ? "M8 8a4 4 0 1 1 4 4V15M12 19V20" : "M21 12a9 9 0 1 0-18 0a9 9 0 1 0 18 0M15 12a3 9 0 1 0-6 0a3 9 0 1 0 6 0M3 12H21"
+        Shape {
+            anchors.fill: parent
+            preferredRendererType: Shape.CurveRenderer
+            ShapePath {
+                strokeColor: win.ink
+                fillColor: "transparent"
+                strokeWidth: win.metrics.iconStroke
+                capStyle: win.tokens.radius > 0 ? ShapePath.RoundCap : ShapePath.SquareCap
+                joinStyle: win.tokens.radius > 0 ? ShapePath.RoundJoin : ShapePath.MiterJoin
+                scale: Qt.size(mark.width / 24, mark.height / 24)
+                PathSvg {
+                    path: mark.drawing
+                }
             }
         }
     }
@@ -171,14 +211,14 @@ ApplicationWindow {
             spacing: 0
             RowLayout {
                 Layout.fillWidth: true
-                Layout.preferredHeight: 60
+                Layout.preferredHeight: win.metrics.topBar
                 Layout.leftMargin: 22
                 Layout.rightMargin: 18
                 spacing: 14
                 Words {
                     text: qsTr("Keychain")
                     font.weight: Font.DemiBold
-                    font.pixelSize: 16
+                    font.pixelSize: win.metrics.pathTitle
                 }
                 Item {
                     Layout.fillWidth: true
@@ -187,6 +227,8 @@ ApplicationWindow {
                     id: search
                     objectName: "search"
                     Layout.preferredWidth: Math.min(320, win.width * 0.35)
+                    font.family: "monospace"
+                    font.pixelSize: win.metrics.pathTitle
                     placeholderText: qsTr("Search accounts")
                     Accessible.name: qsTr("Search accounts")
                     onTextChanged: win.act("search", text)
@@ -196,12 +238,14 @@ ApplicationWindow {
                         border.color: win.accent
                     }
                 }
-                QuietButton {
+                ToolbarAction {
+                    glyph: "Refresh"
                     text: qsTr("Refresh")
                     onClicked: win.act("refresh")
                 }
-                QuietButton {
-                    text: "?"
+                ToolbarAction {
+                    glyph: "Help"
+                    text: qsTr("Keyboard shortcuts")
                     onClicked: win.helpOpen = true
                 }
             }
@@ -221,6 +265,7 @@ ApplicationWindow {
                     model: ["All", "Login", "Passkey", "Code"]
                     QuietButton {
                         required property string modelData
+                        navigation: true
                         text: modelData === "All" ? qsTr("All") : modelData === "Login" ? qsTr("Logins") : modelData === "Passkey" ? qsTr("Passkeys") : qsTr("Codes")
                         selected: win.state.category === modelData
                         onClicked: win.act("filter", modelData)
@@ -234,21 +279,19 @@ ApplicationWindow {
                 ColumnLayout {
                     id: categoryPane
                     visible: win.width >= 1000
-                    Layout.minimumWidth: 190
-                    Layout.maximumWidth: 190
-                    Layout.preferredWidth: 190
+                    Layout.minimumWidth: win.metrics.sidebar
+                    Layout.maximumWidth: win.metrics.sidebar
+                    Layout.preferredWidth: win.metrics.sidebar
                     Layout.fillHeight: true
-                    Layout.topMargin: 24
-                    Layout.leftMargin: 12
-                    Layout.rightMargin: 12
-                    spacing: 4
+                    Layout.topMargin: 20
+                    spacing: 1
                     Words {
                         text: qsTr("LIBRARY")
-                        color: Qt.alpha(win.ink, 0.65)
-                        font.pixelSize: 11
+                        color: win.tokens.secondary
                         font.letterSpacing: 1.3
-                        Layout.leftMargin: 12
-                        Layout.bottomMargin: 12
+                        font.pixelSize: win.metrics.section
+                        Layout.leftMargin: 26
+                        Layout.bottomMargin: 6
                     }
                     Repeater {
                         model: ["All", "Login", "Passkey", "Code"]
@@ -256,6 +299,9 @@ ApplicationWindow {
                             required property string modelData
                             Layout.fillWidth: true
                             leading: true
+                            navigation: true
+                            Layout.leftMargin: 12
+                            Layout.rightMargin: 12
                             text: modelData === "All" ? qsTr("All items") : modelData === "Login" ? qsTr("Logins") : modelData === "Passkey" ? qsTr("Passkeys") : qsTr("Codes")
                             selected: win.state.category === modelData
                             onClicked: win.act("filter", modelData)
@@ -266,9 +312,9 @@ ApplicationWindow {
                     }
                     Words {
                         text: qsTr("SAMPLE LIBRARY")
-                        font.pixelSize: 10
-                        color: Qt.alpha(win.ink, 0.6)
-                        Layout.leftMargin: 12
+                        font.pixelSize: win.metrics.section
+                        color: win.tokens.secondary
+                        Layout.leftMargin: 26
                         Layout.bottomMargin: 20
                     }
                 }
@@ -281,17 +327,20 @@ ApplicationWindow {
                 ColumnLayout {
                     id: credentialPane
                     visible: !win.compact || !win.detailsOpen
-                    Layout.minimumWidth: win.compact ? 0 : 340
-                    Layout.maximumWidth: win.compact ? 100000 : 340
+                    Layout.minimumWidth: win.compact ? 0 : win.metrics.credentialPane
+                    Layout.maximumWidth: win.compact ? 100000 : win.metrics.credentialPane
                     Layout.fillHeight: true
                     Layout.fillWidth: win.compact
-                    Layout.preferredWidth: win.compact ? win.width : 340
+                    Layout.preferredWidth: win.compact ? win.width : win.metrics.credentialPane
                     spacing: 0
                     Words {
                         text: qsTr("%n accounts", "", win.state.items.length)
-                        color: Qt.alpha(win.ink, 0.65)
-                        Layout.margins: 20
-                        font.pixelSize: 11
+                        color: win.tokens.secondary
+                        Layout.leftMargin: win.metrics.inset
+                        Layout.rightMargin: win.metrics.inset
+                        Layout.topMargin: 12
+                        Layout.bottomMargin: 12
+                        font.pixelSize: win.metrics.secondary
                     }
                     ListView {
                         id: accounts
@@ -300,8 +349,20 @@ ApplicationWindow {
                         Layout.fillHeight: true
                         clip: true
                         model: win.state.items
-                        spacing: 2
-                        ScrollBar.vertical: ScrollBar {}
+                        spacing: 0
+                        ScrollBar.vertical: ScrollBar {
+                            id: bar
+                            padding: 2
+                            contentItem: Rectangle {
+                                implicitWidth: 4
+                                implicitHeight: 4
+                                radius: Math.min(2, win.tokens.radius)
+                                color: Qt.alpha(win.ink, bar.pressed ? 0.5 : 0.28)
+                                visible: bar.size < 1 && (bar.active || bar.hovered)
+                            }
+                            background: null
+                            transitions: []
+                        }
                         Keys.onReturnPressed: if (currentItem)
                             win.choose(currentItem.modelData.id)
                         delegate: AbstractButton {
@@ -309,7 +370,7 @@ ApplicationWindow {
                             required property var modelData
                             required property int index
                             width: ListView.view.width
-                            height: 76
+                            height: win.metrics.credentialRow
                             hoverEnabled: true
                             focusPolicy: Qt.TabFocus
                             Accessible.name: modelData.site + " " + modelData.account
@@ -321,20 +382,26 @@ ApplicationWindow {
                                 accounts.currentIndex = index
                             Keys.onReturnPressed: win.choose(modelData.id)
                             background: Rectangle {
-                                color: win.state.selected && win.state.selected.id === row.modelData.id ? Qt.alpha(win.accent, 0.13) : row.hovered ? Qt.alpha(win.ink, 0.05) : "transparent"
+                                x: 4
+                                width: parent.width - 8
+                                radius: Math.min(4, win.tokens.radius)
+                                color: win.state.selected && win.state.selected.id === row.modelData.id ? Qt.alpha(win.accent, 0.18) : row.hovered ? Qt.alpha(win.ink, 0.05) : "transparent"
                                 border.width: row.activeFocus ? 1 : 0
                                 border.color: win.accent
                             }
                             contentItem: RowLayout {
                                 anchors.fill: parent
-                                anchors.margins: 18
-                                spacing: 14
+                                anchors.leftMargin: win.metrics.inset
+                                anchors.rightMargin: win.metrics.inset
+                                anchors.topMargin: 8
+                                anchors.bottomMargin: 8
+                                spacing: 12
                                 Mark {
                                     kind: row.modelData.kind
                                 }
                                 ColumnLayout {
                                     Layout.fillWidth: true
-                                    spacing: 5
+                                    spacing: 4
                                     Words {
                                         Layout.fillWidth: true
                                         text: row.modelData.site
@@ -343,14 +410,14 @@ ApplicationWindow {
                                     Words {
                                         Layout.fillWidth: true
                                         text: row.modelData.account
-                                        font.pixelSize: 11
-                                        color: Qt.alpha(win.ink, 0.65)
+                                        font.pixelSize: win.metrics.secondary
+                                        color: win.tokens.secondary
                                     }
                                 }
                                 Words {
                                     text: row.modelData.kind
-                                    color: Qt.alpha(win.ink, 0.6)
-                                    font.pixelSize: 10
+                                    color: win.tokens.secondary
+                                    font.pixelSize: win.metrics.secondary
                                 }
                             }
                         }
@@ -378,13 +445,13 @@ ApplicationWindow {
                         anchors.centerIn: parent
                         visible: !win.state.selected
                         text: qsTr("Select an account")
-                        color: Qt.alpha(win.ink, 0.65)
+                        color: win.tokens.secondary
                     }
                     ColumnLayout {
                         visible: !!win.state.selected
                         anchors.fill: parent
-                        anchors.margins: 28
-                        spacing: 20
+                        anchors.margins: win.metrics.detailInset
+                        spacing: win.metrics.detailGap
                         QuietButton {
                             visible: win.compact
                             text: qsTr("← Accounts")
@@ -398,7 +465,7 @@ ApplicationWindow {
                             }
                             Words {
                                 Layout.fillWidth: true
-                                font.pixelSize: 20
+                                font.pixelSize: win.metrics.detailTitle
                                 font.weight: Font.DemiBold
                                 text: win.state.selected ? win.state.selected.site : ""
                                 wrapMode: Text.Wrap
@@ -406,9 +473,9 @@ ApplicationWindow {
                             }
                         }
                         Words {
-                            text: qsTr("ACCOUNT")
-                            font.pixelSize: 10
-                            color: Qt.alpha(win.ink, 0.6)
+                            text: qsTr("Account")
+                            font.pixelSize: win.metrics.secondary
+                            color: win.tokens.secondary
                         }
                         Words {
                             Layout.fillWidth: true
@@ -424,9 +491,9 @@ ApplicationWindow {
                         RowLayout {
                             Layout.fillWidth: true
                             Words {
-                                text: win.state.selected && win.state.selected.kind === "Code" ? qsTr("VERIFICATION CODE") : win.state.selected && win.state.selected.kind === "Passkey" ? qsTr("PASSKEY") : qsTr("PASSWORD")
-                                font.pixelSize: 10
-                                color: Qt.alpha(win.ink, 0.6)
+                                text: win.state.selected && win.state.selected.kind === "Code" ? qsTr("Verification code") : win.state.selected && win.state.selected.kind === "Passkey" ? qsTr("Passkey") : qsTr("Password")
+                                font.pixelSize: win.metrics.secondary
+                                color: win.tokens.secondary
                             }
                             Item {
                                 Layout.fillWidth: true
@@ -451,18 +518,18 @@ ApplicationWindow {
                         }
                         GridLayout {
                             columns: 2
-                            columnSpacing: 32
-                            rowSpacing: 18
+                            columnSpacing: 16
+                            rowSpacing: 12
                             Words {
                                 text: qsTr("Saved in")
-                                color: Qt.alpha(win.ink, 0.65)
+                                color: win.tokens.secondary
                             }
                             Words {
                                 text: win.state.selected ? win.state.selected.storage : ""
                             }
                             Words {
                                 text: qsTr("Protection")
-                                color: Qt.alpha(win.ink, 0.65)
+                                color: win.tokens.secondary
                             }
                             Words {
                                 text: qsTr("Touch ID · preview")
@@ -474,7 +541,7 @@ ApplicationWindow {
                             wrapMode: Text.Wrap
                             elide: Text.ElideNone
                             color: Qt.alpha(win.ink, 0.7)
-                            font.pixelSize: 11
+                            font.pixelSize: win.metrics.secondary
                         }
                         Item {
                             Layout.fillHeight: true
@@ -482,8 +549,8 @@ ApplicationWindow {
                         Words {
                             Layout.fillWidth: true
                             text: qsTr("Design preview · sample accounts only")
-                            color: Qt.alpha(win.ink, 0.55)
-                            font.pixelSize: 11
+                            color: win.tokens.secondary
+                            font.pixelSize: win.metrics.section
                             wrapMode: Text.Wrap
                         }
                     }
@@ -497,7 +564,7 @@ ApplicationWindow {
         anchors.centerIn: parent
         width: Math.min(460, win.width - 48)
         height: 300
-        padding: 28
+        padding: win.metrics.detailInset
         visible: win.helpOpen
         modal: true
         focus: true
@@ -512,10 +579,10 @@ ApplicationWindow {
             border.color: win.accent
         }
         contentItem: ColumnLayout {
-            spacing: 20
+            spacing: 16
             Words {
                 text: qsTr("Keyboard shortcuts")
-                font.pixelSize: 17
+                font.pixelSize: win.metrics.dialogTitle
             }
             Words {
                 text: qsTr("Ctrl+F / Ctrl+K    Search")
@@ -534,6 +601,11 @@ ApplicationWindow {
                 onClicked: win.helpOpen = false
             }
         }
+    }
+    Words {
+        id: fontProbe
+        visible: false
+        text: "M"
     }
     // Runs through the real Rust adapters and Qt event loop, with synthetic data.
     Component {
@@ -559,6 +631,11 @@ ApplicationWindow {
             case 0:
                 win.verify(win.state.items.length === 6, "initial rows");
                 win.verify(win.compact ? credentialPane.width >= win.width - 4 : detailPane.width >= 280 && credentialPane.width <= 360 && (!categoryPane.visible || categoryPane.width <= 220), "pane geometry");
+                win.verify(fontProbe.font.pixelSize === 13 && fontProbe.font.family === "monospace", "body typography");
+                win.verify(search.font.pixelSize === 14 && search.font.family === "monospace", "search typography");
+                win.verify(!categoryPane.visible || categoryPane.width === 190, "sidebar total width");
+                win.verify(!accounts.currentItem || accounts.currentItem.height === 56, "credential row height");
+                console.log("STYLE font=" + fontProbe.fontInfo.family + " body=" + fontProbe.font.pixelSize + " search=" + search.font.pixelSize + " sidebar=" + categoryPane.width);
                 search.text = "webauthn";
                 break;
             case 1:

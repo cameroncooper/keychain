@@ -38,6 +38,9 @@ separate validation.
 
 [Light preview](docs/preview-light.png) · [Narrow preview](docs/preview-narrow.png)
 
+[Folio spacing and typography audit](docs/FOLIO-STYLE-AUDIT.md) records the
+source measurements, corrections and intentional differences.
+
 ## Shared structure
 
 - `qml/Main.qml`: embedded in both executables; only the backend import changes.
@@ -106,6 +109,7 @@ checks remain separate from these state/lifecycle checks.
 - [CXX-Qt](https://github.com/KDAB/cxx-qt), including its Cargo and threading examples.
 - [Official Qt Bridge](https://github.com/qt/qtbridge-rust), including its QObject and thread-handle examples.
 
-The prototype's own source follows the repository's MIT license. Dependency
+The prototype's own source follows the repository's MIT license. Adapted Folio
+control patterns retain their [MIT attribution](THIRD-PARTY-NOTICES.md). Dependency
 licenses include CXX-Qt's MIT/Apache options and Qt Bridge's LGPLv3/commercial
 terms; this experiment does not change those dependencies' licenses.

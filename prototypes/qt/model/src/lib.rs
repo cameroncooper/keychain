@@ -217,7 +217,7 @@ fn theme() -> serde_json::Value {
     let light = std::env::var("KEYCHAIN_QT_THEME").as_deref() == Ok("light");
     let mut colors = serde_json::json!({"background":if light{"#f4f3ef"}else{"#16161a"},
         "detail":if light{"#eae9e4"}else{"#111114"},"foreground":if light{"#29292e"}else{"#c8c8d0"},
-        "accent":if light{"#806400"}else{"#ffd60a"},"onAccent":"#16161a","radius":0});
+        "bright":if light{"#202025"}else{"#ececf1"},"accent":if light{"#806400"}else{"#ffd60a"},"onAccent":"#16161a","radius":0});
     if std::env::var_os("KEYCHAIN_QT_THEME").is_none()
         && let Some(home) = std::env::var_os("HOME")
     {
@@ -234,6 +234,7 @@ fn theme() -> serde_json::Value {
                             "background" => "background",
                             "dark_background" => "detail",
                             "foreground" => "foreground",
+                            "bright_foreground" => "bright",
                             "accent" => "accent",
                             _ => continue,
                         };
@@ -258,9 +259,21 @@ fn theme() -> serde_json::Value {
     } else {
         colors["foreground"].clone()
     };
+    let foreground = colors["foreground"].as_str().unwrap_or("#c8c8d0");
+    colors["secondary"] = mix(background, foreground, 0.68).into();
     colors["selectionInk"] = selection;
     colors["onAccent"] = if a > 0.179 { "#000000" } else { "#ffffff" }.into();
     colors
+}
+// Folio derives secondary text from the base palette rather than per-widget opacity.
+fn mix(background: &str, foreground: &str, amount: f64) -> String {
+    let bg = u32::from_str_radix(background.trim_start_matches('#'), 16).unwrap_or(0);
+    let fg = u32::from_str_radix(foreground.trim_start_matches('#'), 16).unwrap_or(0);
+    let channel = |shift: u32| {
+        (((bg >> shift) & 255) as f64 * (1.0 - amount) + ((fg >> shift) & 255) as f64 * amount)
+            .round() as u8
+    };
+    format!("#{:02x}{:02x}{:02x}", channel(16), channel(8), channel(0))
 }
 fn luminance(hex: &str) -> f64 {
     let rgb = u32::from_str_radix(hex.trim_start_matches('#'), 16).unwrap_or(0);
