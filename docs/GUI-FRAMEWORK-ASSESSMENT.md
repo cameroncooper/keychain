@@ -189,3 +189,19 @@ in packaging review; Qt Bridges documents LGPLv3/commercial licensing.
 This is a design and source assessment. Neither bridge has been built or
 qualified on this Asahi host as part of this report, and no service binaries or
 desktop settings were changed.
+
+## Native prototype results
+
+The [isolated prototype](../prototypes/qt/README.md) now builds the same QML view
+and synthetic Rust model through CXX-Qt 0.10.0 and official Qt Bridge 0.4.1.
+Both native aarch64 executables ran with Qt 6.12.0 on this Asahi host, including
+real Wayland rendering and synthetic cancellation/lifecycle checks. This
+establishes prototype feasibility beyond the published platform matrix, not
+upstream ARM64 support or production qualification.
+
+The UI and application model are shared. Each adapter has roughly sixty lines
+of QObject/property/dispatch code; neither requires a handwritten C++ frontend.
+The metadata list currently uses bounded full snapshots into QML. Native
+incremental models and large-inventory benchmarks remain explicit selection
+gates. Refer to the prototype README for commands, screenshots, dependency
+pinning, validation scope and the observed portal-registration warning.

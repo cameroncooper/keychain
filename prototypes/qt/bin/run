@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+case ${1:-cxxqt} in
+  cxxqt) package=keychain-cxxqt-prototype ;;
+  qtbridge) package=keychain_qtbridge_prototype ;;
+  *) echo 'usage: bin/run [cxxqt|qtbridge]' >&2; exit 2 ;;
+esac
+export QMAKE=${QMAKE:-/usr/bin/qmake6}
+export QT_QUICK_CONTROLS_STYLE=Material
+export QT_FORCE_STDERR_LOGGING=1
+cargo build --locked --manifest-path "$root/Cargo.toml" -p "$package" -j 1
+exec "$root/target/debug/$package"

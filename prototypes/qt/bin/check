@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+export QMAKE=${QMAKE:-/usr/bin/qmake6}
+export QT_QUICK_CONTROLS_STYLE=Material
+export QT_FORCE_STDERR_LOGGING=1
+cargo test --locked --manifest-path "$root/Cargo.toml" -p prototype-model -j 1
+mkdir -p "$root/evidence"
+for package in keychain-cxxqt-prototype keychain_qtbridge_prototype; do
+  cargo build --locked --manifest-path "$root/Cargo.toml" -p "$package" -j 1
+  for variant in dark light narrow; do
+    theme=$variant
+    width=1200
+    if [[ $variant == narrow ]]; then theme=dark; width=640; fi
+    log="$root/evidence/$package-$variant.log"
+    KEYCHAIN_QT_SMOKE=1 KEYCHAIN_QT_THEME="$theme" KEYCHAIN_QT_WIDTH="$width" \
+      KEYCHAIN_QT_SCREENSHOT="$root/evidence/$package-$variant.png" \
+      QT_QPA_PLATFORM=offscreen QT_QUICK_BACKEND=software \
+      timeout 20s "$root/target/debug/$package" > "$log" 2>&1
+    cat "$log"
+    grep -q 'SMOKE PASS' "$log"
+    if grep -Eq 'SMOKE FAIL|ReferenceError|TypeError|Cannot|Error:' "$log"; then exit 1; fi
+    echo "$package $variant: passed"
+  done
+done

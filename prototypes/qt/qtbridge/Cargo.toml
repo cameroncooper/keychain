@@ -1,0 +1,9 @@
+[package]
+name = "keychain_qtbridge_prototype"
+version = "0.1.0"
+edition = "2024"
+publish = false
+[dependencies]
+prototype-model.workspace = true
+qtbridge = "=0.4.1"
+cxx-qt-lib.workspace = true

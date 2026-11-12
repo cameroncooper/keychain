@@ -9,7 +9,7 @@ publish = false
 
 [workspace]
 members = ["crates/sep-driver"]
-exclude = ["helpers/mac-anisette"]
+exclude = ["helpers/mac-anisette", "prototypes/qt"]
 resolver = "2"
 
 [features]
