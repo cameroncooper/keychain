@@ -32,7 +32,7 @@ pub struct BackendRust {
 impl Default for BackendRust {
     fn default() -> Self {
         let controller = Controller::default();
-        let theme = crate::theme::theme(false);
+        let theme = crate::theme::theme(false, crate::theme::hyprland_rounding());
         let mut state = controller.snapshot();
         state["theme"] = theme.clone();
         Self {
@@ -78,7 +78,9 @@ impl ffi::Backend {
         let action = action.to_string();
         let arg = arg.to_string();
         if action == "theme" {
-            self.as_mut().rust_mut().theme = crate::theme::theme(arg == "light");
+            // Polled by the window only while it is active, as Folio does.
+            let radius = crate::theme::hyprland_rounding();
+            self.as_mut().rust_mut().theme = crate::theme::theme(arg == "light", radius);
         } else {
             self.as_mut().rust_mut().controller.command(&action, &arg);
         }

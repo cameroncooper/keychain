@@ -169,10 +169,12 @@ The authentication agent follows the generic XDG Desktop Portal Settings
 preference `org.freedesktop.appearance/color-scheme` and observes changes via
 GPUI. Its appearance policy and cancellation behavior are unchanged.
 
-The main application polls the read-only Omarchy palette once per second, with
-Qt's platform light/dark preference as fallback. No desktop configuration is
-changed. Appearance never affects authorization. Production QML has translation
-hooks but no translated catalog yet; corners currently remain square.
+While its window is active, the main application re-reads the read-only
+Omarchy palette (every named color, plus `mode`) and Hyprland's
+`decoration:rounding` once per second. Qt's platform light/dark preference is
+the fallback. No desktop configuration is changed. Appearance never affects
+authorization. Production QML has translation hooks but no translated catalog
+yet.
 
 
 Refinement validation on 2026-11-06: the installed agent rendered the new rounded

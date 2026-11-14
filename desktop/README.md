@@ -44,7 +44,18 @@ The palette follows the full Omarchy color file live when available; otherwise
 Qt's platform light/dark preference selects the fallback palette. Fonts use the
 system monospace family at 13 logical pixels. No desktop configuration is changed.
 Translations use `qsTr` hooks; a translated catalog and live language switching
-are not yet implemented. Theme corner radius currently defaults to square.
+are not yet implemented. Corners follow Hyprland's `decoration:rounding` (asked
+over its request socket, 100 ms timeouts) and stay square elsewhere. Palette and
+rounding are re-read once per second only while the window is active.
+
+QML lives in `qml/` as one module (`KeychainBackend`) of small components:
+`Theme` (singleton: palette tokens and every measurement), `Words`, `Glyph`,
+`PlainButton`, `IconButton`, `NavButton`, `PlainField`, `QuietScrollBar`,
+`TopBar`, `Sidebar`, `FilterStrip`, `AccountList`, `DetailPane` and
+`HelpOverlay`. `build.rs` lists them. qmlcachegen compiles them into the
+binary, and the app loads `qrc:/qt/qml/KeychainBackend/qml/Main.qml`. Add a
+new component to `build.rs` as well as `qml/`. The redesign plan is in
+[GUI-FOLIO-OVERHAUL-PLAN](../docs/GUI-FOLIO-OVERHAUL-PLAN.md).
 
 | Shortcut | Action |
 | --- | --- |

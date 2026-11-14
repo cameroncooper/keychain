@@ -1,6 +1,6 @@
 mod backend;
 mod theme;
-use cxx_qt_lib::{QByteArray, QGuiApplication, QQmlApplicationEngine, QUrl};
+use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
 fn main() {
     if let Err(error) = keychain_sep_driver::memory::make_process_nondumpable() {
         eprintln!("keychain-gui: {error}");
@@ -17,10 +17,10 @@ fn main() {
         eprintln!("Keychain QML failed to load");
         std::process::exit(1);
     });
-    engine.pin_mut().load_data(
-        &QByteArray::from(include_str!("../qml/Main.qml").as_bytes()),
-        &QUrl::from("qrc:/Keychain.qml"),
-    );
+    // Compiled into the binary by build.rs; nothing is read from disk.
+    engine
+        .pin_mut()
+        .load(&QUrl::from("qrc:/qt/qml/KeychainBackend/qml/Main.qml"));
     let code = app.pin_mut().exec();
     drop(engine);
     drop(app);

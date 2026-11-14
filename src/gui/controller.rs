@@ -34,7 +34,18 @@ pub struct Controller {
     active: bool,
     shown: Option<(RevealField, RevealedLogin, Instant)>,
     awaiting: Option<(RevealField, RevealedLogin, Instant)>,
+    pending_field: Option<RevealField>,
     message: String,
+    tone: Tone,
+    refreshed_at: Option<u64>,
+}
+/// How the window should present `message`: progress may be delayed so fast
+/// work never flashes; errors stay until dismissed or replaced.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tone {
+    Progress,
+    Notice,
+    Error,
 }
 impl Default for Controller {
     fn default() -> Self {
@@ -56,7 +67,10 @@ impl Default for Controller {
             active: false,
             shown: None,
             awaiting: None,
+            pending_field: None,
             message: String::new(),
+            tone: Tone::Notice,
+            refreshed_at: None,
         }
     }
 }
@@ -76,6 +90,7 @@ impl Controller {
         self.canceled = Arc::new(AtomicBool::new(false));
         self.generation = self.generation.wrapping_add(1);
         self.pending = false;
+        self.pending_field = None;
         self.shown = None;
         self.reveal_revision = self.reveal_revision.wrapping_add(1);
         self.awaiting = None;
@@ -128,12 +143,13 @@ impl Controller {
                 "password" => self.start_reveal(RevealField::Password),
                 "totp" => self.start_reveal(RevealField::Totp),
                 "notes" => self.start_reveal(RevealField::Notes),
-                _ => self.message = "Choose one supported field to reveal.".into(),
+                _ => self.say(Tone::Error, "Choose one supported field to reveal."),
             },
             "cancel" => {
                 self.invalidate();
                 self.message.clear();
             }
+            "dismiss" => self.message.clear(),
             "focus" => {
                 self.active = arg == "true";
                 // The native fingerprint window takes focus. Retain a pending request,
@@ -151,7 +167,7 @@ impl Controller {
             return;
         }
         self.invalidate();
-        self.message = "Loading saved accounts…".into();
+        self.say(Tone::Progress, "Loading saved accounts…");
         let tx = self.tx.clone();
         let running = self.inventory_running.clone();
         std::thread::spawn(move || {
@@ -177,12 +193,16 @@ impl Controller {
             return;
         }
         if self.reveal_running.swap(true, Ordering::AcqRel) {
-            self.message = "Wait for the previous verification to finish.".into();
+            self.say(
+                Tone::Notice,
+                "Wait for the previous verification to finish.",
+            );
             return;
         }
         self.invalidate();
         self.pending = true;
-        self.message = "Waiting for verification…".into();
+        self.pending_field = Some(field);
+        self.say(Tone::Progress, "Waiting for verification…");
         let tx = self.tx.clone();
         let generation = self.generation;
         let canceled = self.canceled.clone();
@@ -208,8 +228,9 @@ impl Controller {
                     self.rows_revision = self.rows_revision.wrapping_add(1);
                     self.reconcile_selection();
                     self.message.clear();
+                    self.refreshed_at = Some(now());
                 }
-                Err(error) => self.message = display_text(&error.to_string()),
+                Err(error) => self.say(Tone::Error, &display_text(&error.to_string())),
             },
             Completion::Reveal(generation, item, field, result)
                 if generation == self.generation
@@ -222,12 +243,16 @@ impl Controller {
                     }
                     Ok(_) => {
                         self.pending = false;
-                        self.message =
-                            "The reveal response did not match the selected field.".into();
+                        self.pending_field = None;
+                        self.say(
+                            Tone::Error,
+                            "The reveal response did not match the selected field.",
+                        );
                     }
                     Err(error) => {
                         self.pending = false;
-                        self.message = display_text(&error.to_string());
+                        self.pending_field = None;
+                        self.say(Tone::Error, &display_text(&error.to_string()));
                     }
                 }
             }
@@ -245,12 +270,14 @@ impl Controller {
         {
             self.awaiting = None;
             self.pending = false;
-            self.message = "Return to Keychain and choose Reveal again.".into();
+            self.pending_field = None;
+            self.say(Tone::Notice, "Return to Keychain and choose Reveal again.");
         } else if self.active {
             if let Some((field, value, _)) = self.awaiting.take() {
                 self.shown = Some((field, value, at));
                 self.reveal_revision = self.reveal_revision.wrapping_add(1);
                 self.pending = false;
+                self.pending_field = None;
                 self.message.clear();
             }
         }
@@ -261,6 +288,10 @@ impl Controller {
             self.shown = None;
             self.reveal_revision = self.reveal_revision.wrapping_add(1);
         }
+    }
+    fn say(&mut self, tone: Tone, message: &str) {
+        self.tone = tone;
+        self.message = message.into();
     }
     pub fn reveal_revision(&self) -> u64 {
         self.reveal_revision
@@ -293,16 +324,62 @@ impl Controller {
         )
     }
     pub fn snapshot(&self) -> Value {
-        json!({"selected": self.selected().map(metadata), "category": match self.category { Category::All => "All", Category::Passwords => "Login", Category::Passkeys => "Passkey", Category::Codes => "Code" },
-            "busy":self.pending, "loading":self.inventory_running.load(Ordering::Acquire), "message":self.message,
-            "revealedField":self.shown.as_ref().map(|(f,_,_)| match f { RevealField::Password => "password", RevealField::Notes => "notes", RevealField::Totp => "totp", _ => "" }),
-            "expires":self.shown.as_ref().and_then(|(_,v,_)| v.totp.as_ref().map(|c| c.expires))})
+        self.snapshot_at(Instant::now())
+    }
+    fn snapshot_at(&self, at: Instant) -> Value {
+        // Counts follow the search, so the sidebar says what each category holds
+        // for what's being looked for.
+        let count = |category: Category| {
+            self.items
+                .iter()
+                .filter(|i| i.matches(category, &self.query))
+                .count()
+        };
+        // Whole seconds, rounded up, so the label reaches 1 before the value hides.
+        let hides_in = self.shown.as_ref().map(|(_, _, revealed)| {
+            REVEAL_LIFETIME
+                .saturating_sub(at.duration_since(*revealed))
+                .as_millis()
+                .div_ceil(1000) as u64
+        });
+        json!({"selected": self.selected().map(metadata), "category": category_name(self.category),
+            "busy":self.pending, "loading":self.inventory_running.load(Ordering::Acquire),
+            "message":self.message,
+            "tone": match self.tone { Tone::Progress => "progress", Tone::Notice => "notice", Tone::Error => "error" },
+            "pendingField": self.pending_field.map(field_name),
+            "revealedField":self.shown.as_ref().map(|(f,_,_)| field_name(*f)),
+            "hidesIn": hides_in,
+            "expires":self.shown.as_ref().and_then(|(_,v,_)| v.totp.as_ref().map(|c| c.expires)),
+            "counts": {"All": count(Category::All), "Login": count(Category::Passwords),
+                       "Passkey": count(Category::Passkeys), "Code": count(Category::Codes)},
+            "refreshedAt": self.refreshed_at,
+            // Every reveal asks the broker, which asks for a fingerprint when the
+            // record is protected. Unlock sessions will report "locked"/"unlocked".
+            "auth": {"mode": "per-operation"}})
+    }
+}
+fn category_name(category: Category) -> &'static str {
+    match category {
+        Category::All => "All",
+        Category::Passwords => "Login",
+        Category::Passkeys => "Passkey",
+        Category::Codes => "Code",
+    }
+}
+fn field_name(field: RevealField) -> &'static str {
+    match field {
+        RevealField::Password => "password",
+        RevealField::Notes => "notes",
+        RevealField::Totp => "totp",
+        RevealField::All => "",
     }
 }
 fn metadata(item: &Item) -> Value {
     json!({"id":item.id, "site":display_text(&item.title), "domain":display_domain(&item.domain), "account":display_text(&item.username),
         "kind":if item.login.is_some() {"Login"}else{"Passkey"}, "storage":item.storage, "protection":item.protection,
-        "password":item.login.as_ref().is_some_and(|l| l.has_password), "notes":item.login.as_ref().is_some_and(|l| l.has_notes), "totp":item.login.as_ref().is_some_and(|l| l.has_totp)})
+        "password":item.login.as_ref().is_some_and(|l| l.has_password), "notes":item.login.as_ref().is_some_and(|l| l.has_notes), "totp":item.login.as_ref().is_some_and(|l| l.has_totp),
+        // Both the broker route and SEP-held passkeys are labeled from data.rs.
+        "protected": item.protection.starts_with("Fingerprint required")})
 }
 fn valid_response(item: &Item, field: RevealField, value: &RevealedLogin) -> bool {
     value.id == item.id
@@ -446,6 +523,45 @@ mod tests {
         assert_eq!(c.revealed(), "123456");
         c.tick(at + Duration::from_millis(100), 100);
         assert!(c.revealed().is_empty());
+    }
+    #[test]
+    fn snapshot_reports_counts_lifetime_pending_field_tone_and_auth_mode() {
+        let at = Instant::now();
+        let mut c = controller();
+        let mut other = item();
+        other.id = "b".into();
+        other.login = None;
+        other.protection = "Fingerprint required · Secure Enclave";
+        c.items.push(other);
+        let s = c.snapshot_at(at);
+        assert_eq!(
+            s["counts"],
+            json!({"All": 2, "Login": 1, "Passkey": 1, "Code": 1})
+        );
+        assert_eq!(s["auth"]["mode"], "per-operation");
+        assert_eq!(s["hidesIn"], Value::Null);
+        assert_eq!(c.rows()[1]["protected"], true);
+        assert_eq!(c.rows()[0]["protected"], false);
+        c.command("search", "nothing");
+        assert_eq!(c.snapshot_at(at)["counts"]["All"], 0);
+        c.command("search", "");
+        c.command("select", "a");
+        // start_reveal would spawn a worker against the real profile; set its state.
+        c.pending = true;
+        c.pending_field = Some(RevealField::Password);
+        c.say(Tone::Progress, "Waiting for verification…");
+        let s = c.snapshot_at(at);
+        assert_eq!(s["pendingField"], "password");
+        assert_eq!(s["tone"], "progress");
+        c.command("cancel", "");
+        deliver(&mut c, at);
+        let s = c.snapshot_at(at + Duration::from_millis(5500));
+        assert_eq!(s["pendingField"], Value::Null);
+        assert_eq!(s["hidesIn"], 25);
+        c.say(Tone::Error, "broken");
+        assert_eq!(c.snapshot_at(at)["tone"], "error");
+        c.command("dismiss", "");
+        assert_eq!(c.snapshot_at(at)["message"], "");
     }
     #[test]
     fn extra_fields_wrong_revision_or_identity_fail_closed() {

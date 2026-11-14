@@ -61,6 +61,8 @@ fn main() {
             .env("QT_FORCE_STDERR_LOGGING", "1")
             .env("QT_QUICK_CONTROLS_STYLE", "Material")
             .env("KEYCHAIN_TEST_MODE", mode)
+            // The fixture must not follow the developer's live compositor.
+            .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
             .output()
             .unwrap();
         let log = format!(
@@ -133,7 +135,8 @@ fn child() {
     source.push('}');
     engine.pin_mut().load_data(
         &QByteArray::from(source.as_bytes()),
-        &QUrl::from("qrc:/KeychainTest.qml"),
+        // Beside the production files, so the module's components resolve.
+        &QUrl::from("qrc:/qt/qml/KeychainBackend/qml/KeychainTest.qml"),
     );
     let code = app.pin_mut().exec();
     drop(engine);
