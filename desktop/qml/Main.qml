@@ -114,21 +114,24 @@ ApplicationWindow {
     function act(action, arg) {
         backend.command(action, arg || "");
     }
+    // A click on an account.
     function choose(id) {
         act("select", id);
         if (compact)
-            openDetails();
+            openDetails(false);
     }
     function filter(key) {
         if (compact)
             detailsOpen = false;
         act("filter", key);
     }
-    function openDetails() {
+    // From the keyboard, the main action takes the keyboard (with its ring);
+    // from a click, the details take it quietly.
+    function openDetails(byKeyboard) {
         if (!selected)
             return;
         detailsOpen = true;
-        Qt.callLater(() => detailPane.focusKeyboard());
+        Qt.callLater(() => byKeyboard ? detailPane.focusKeyboard() : detailPane.focusQuietly());
     }
     function closeDetails() {
         detailsOpen = false;
@@ -158,7 +161,7 @@ ApplicationWindow {
         if (key !== (selected && selected.id))
             act("select", key);
         if (compact)
-            openDetails();
+            openDetails(true);
         else
             detailPane.runPrimary();
     }

@@ -35,7 +35,9 @@ AbstractButton {
              : Qt.alpha(Theme.foreground, 0.05)
         // A ring clear of the button, so it shows on an accent fill too.
         Rectangle {
-            visible: button.activeFocus
+            // Only for keyboard focus (Tab, or the keyboard opening details on
+            // it); a click never leaves a ring behind.
+            visible: button.visualFocus
             anchors.fill: parent
             anchors.margins: -3
             radius: parent.radius + 3

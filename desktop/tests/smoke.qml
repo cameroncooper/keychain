@@ -6,6 +6,19 @@
     function check(condition, label) {
         if (!condition) { console.error("GUI SMOKE FAIL: " + label); Qt.exit(1); }
     }
+    function ringFits(control) {
+        const ring = control.mapToItem(null, -3, -3);
+        for (let at = control.parent; at; at = at.parent) {
+            if (!at.clip)
+                continue;
+            const clip = at.mapToItem(null, 0, 0);
+            if (ring.x < clip.x - 0.5 || ring.y < clip.y - 0.5
+                    || ring.x + control.width + 6 > clip.x + at.width + 0.5
+                    || ring.y + control.height + 6 > clip.y + at.height + 0.5)
+                return false;
+        }
+        return true;
+    }
     function grab(name, then) {
         surface.grabToImage(function(result) {
             win.check(result.saveToFile("/tmp/keychain-production-" + name + ".png"), "synthetic screenshot " + name);
@@ -77,6 +90,11 @@
                 win.check(win.items.length === 1, "code filter");
                 win.act("focus", "true");
                 win.check(detailPane.primaryField === "password", "primary action is the password");
+                // Every focus ring, 3 pixels outside its button, fits inside every
+                // clipping ancestor (the scroll area and its Flickable both clip).
+                for (const stop of detailPane.keyboardStops())
+                    if (stop.visible && stop.width > 0)
+                        win.check(win.ringFits(stop), "focus ring inside every clip");
                 win.activate(win.selected.id);  // ⏎: the main action (wide) or details (narrow)
                 if (win.compact) {
                     win.check(win.detailsOpen && topBar.canGoBack, "narrow opens details");
@@ -86,6 +104,9 @@
                 ++win.testStep; break;
             case 4:
                 if (win.state.busy) return;
+                // ⏎ in a narrow window put the keyboard, with its ring, on the main action.
+                if (win.compact)
+                    win.check(detailPane.keyboardStops()[0].visualFocus, "keyboard opens details on the main action");
                 win.check(backend.revealed === "synthetic-password", "password reveal");
                 win.check(win.state.hidesIn > 25 && win.state.hidesIn <= 30 && win.state.pendingField === null, "reveal lifetime");
                 win.check(!backend.snapshot.includes("synthetic-password") && !backend.rows.includes("synthetic-password"), "metadata isolation");
@@ -136,6 +157,10 @@
                 win.act("reveal", "password"); ++win.testStep; break;
             case 10:
                 if (win.state.busy) return;
+                // A click opened these details: nothing in them shows a focus ring.
+                win.check(!detailPane.keyboardStops().some(stop => stop.visualFocus), "a click leaves no focus ring");
+                // The screenshot shows a keyboard ring on the rightmost control (copy).
+                detailPane.keyboardStops()[1].forceActiveFocus(Qt.TabFocusReason);
                 win.check(backend.revealed === "synthetic-password", "second password reveal");
                 // Characters read left to right in every layout direction.
                 const drawn = detailPane.passwordRow.characterFlow.children.filter(c => c.character !== undefined).sort((a, b) => a.x - b.x).map(c => c.character).join("");

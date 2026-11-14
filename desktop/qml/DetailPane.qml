@@ -44,6 +44,14 @@ FocusScope {
         stops.push(websiteRow.action);
         return stops.filter(stop => stop.visible && stop.enabled);
     }
+    readonly property int ringRoom: 4
+    // Opened by a click: the details take the keyboard without lighting up
+    // a control, and ⏎ still runs the main action.
+    function focusQuietly() {
+        forceActiveFocus(Qt.MouseFocusReason);
+    }
+    Keys.onReturnPressed: runPrimary()
+    Keys.onEnterPressed: runPrimary()
     function focusKeyboard() {
         const stops = keyboardStops();
         if (stops.length)
@@ -239,7 +247,7 @@ FocusScope {
             radius: Theme.rowRadius
             color: primary.hovered ? Qt.lighter(Theme.accent, 1.08) : Theme.accent
             Rectangle {
-                visible: primary.activeFocus
+                visible: primary.visualFocus
                 anchors.fill: parent
                 anchors.margins: -3
                 radius: parent.radius + 3
@@ -274,14 +282,22 @@ FocusScope {
         id: scroll
         visible: !!pane.selected
         anchors.fill: parent
-        anchors.margins: Theme.detailInset
-        anchors.bottomMargin: Theme.detailInset + (primary.visible ? primary.height + 16 : 0)
+        // The scroll area and its inner Flickable both clip, and focus rings
+        // sit 3 pixels outside their buttons. The content is inset inside the
+        // scrolled area (and the margins give that back, so nothing moves),
+        // which leaves the rings room at every edge.
+        anchors.margins: Theme.detailInset - pane.ringRoom
+        anchors.bottomMargin: Theme.detailInset - pane.ringRoom + (primary.visible ? primary.height + 16 : 0)
         clip: true
         contentWidth: availableWidth
+        contentHeight: details.implicitHeight + 2 * pane.ringRoom
         ScrollBar.vertical: QuietScrollBar {}
 
         ColumnLayout {
-            width: scroll.availableWidth
+            id: details
+            x: pane.ringRoom
+            y: pane.ringRoom
+            width: scroll.availableWidth - 2 * pane.ringRoom
             spacing: Theme.detailGap
 
             // What it is.

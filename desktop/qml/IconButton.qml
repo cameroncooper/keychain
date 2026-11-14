@@ -38,7 +38,9 @@ AbstractButton {
              : button.hovered && button.enabled ? Qt.alpha(Theme.foreground, 0.08)
              : "transparent"
         Rectangle {
-            visible: button.activeFocus
+            // Only for keyboard focus (Tab, or the keyboard opening details on
+            // it); a click never leaves a ring behind.
+            visible: button.visualFocus
             anchors.fill: parent
             anchors.margins: -3
             radius: parent.radius + 3
