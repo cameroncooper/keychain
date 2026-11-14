@@ -13,7 +13,7 @@ TextField {
     font.pixelSize: Theme.body
     color: Theme.bright
     selectionColor: Theme.accent
-    selectedTextColor: Theme.onAccent
+    selectedTextColor: Theme.accentText
     placeholderTextColor: "transparent"
     leftPadding: 12
     rightPadding: 12

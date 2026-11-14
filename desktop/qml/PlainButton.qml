@@ -47,7 +47,7 @@ AbstractButton {
     contentItem: Words {
         id: label
         text: button.text
-        color: button.destructive ? Theme.background : button.primary ? Theme.onAccent : Theme.foreground
+        color: button.destructive ? Theme.background : button.primary ? Theme.accentText : Theme.foreground
         font.weight: button.filled ? Font.DemiBold : Font.Normal
         horizontalAlignment: Text.AlignHCenter
     }

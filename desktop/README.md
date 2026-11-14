@@ -50,25 +50,38 @@ rounding are re-read once per second only while the window is active.
 
 QML lives in `qml/` as one module (`KeychainBackend`) of small components:
 `Theme` (singleton: palette tokens and every measurement), `Words`, `Glyph`,
-`PlainButton`, `IconButton`, `NavButton`, `PlainField`, `QuietScrollBar`,
-`TopBar`, `Sidebar`, `FilterStrip`, `AccountList`, `DetailPane` and
-`HelpOverlay`. `build.rs` lists them. qmlcachegen compiles them into the
+`PlainButton`, `IconButton`, `PlainField`, `QuietScrollBar`, `KeychainMenu`,
+`MenuEntry`, `MenuLine`, `TopBar`, `Banner`, `Sidebar`, `AccountList`,
+`DetailPane`, `UnlockView` and `HelpOverlay`. `build.rs` lists them. qmlcachegen compiles them into the
 binary, and the app loads `qrc:/qt/qml/KeychainBackend/qml/Main.qml`. Add a
 new component to `build.rs` as well as `qml/`. The redesign plan is in
 [GUI-FOLIO-OVERHAUL-PLAN](../docs/GUI-FOLIO-OVERHAUL-PLAN.md).
 
+The window opens in search. ↓, Enter or Tab go to the results. The arrows
+select an account, and its details show the main action that Enter runs.
+
 | Shortcut | Action |
 | --- | --- |
-| Ctrl+F / Ctrl+K | Search |
-| Tab / Shift+Tab | Move focus |
-| Enter | Open focused account |
-| Escape | Hide, cancel, back, clear search |
+| / , Ctrl+F, Ctrl+K | Search |
+| ↑ ↓ Home End PgUp PgDn | Move through accounts |
+| Enter | The account's main action (narrow windows: open its details) |
+| Tab / Shift+Tab | Categories, accounts, details |
+| Ctrl+1…4 | All, Logins, Passkeys, Codes |
+| Alt+Enter, Menu, right-click | Account menu |
+| Ctrl+Shift+U | Copy username |
+| Ctrl+O | Open the website in your browser |
+| F5 | Reload local inventory |
+| Alt+← | Back to accounts (narrow windows) |
+| Escape | Stop, hide, dismiss, back, clear search |
 | ? | Keyboard shortcuts |
 | Q | Close, outside text entry |
 
 `bin/check` tests the production adapter/QML against an isolated encrypted
-software vault in dark, light and narrow layouts. Screenshots in
-`/tmp/keychain-production-{dark,light,narrow}.png` contain synthetic content only.
+software vault in dark, light and narrow layouts. It drives launch focus,
+search, arrow selection, the Tab regions, the Escape steps, reveals through the
+main action, the menu, help, copy username and the locked/unlocked modes.
+Screenshots in `/tmp/keychain-production-{dark,light,narrow}{,-revealed,-locked}.png`
+contain synthetic content only.
 Controller unit tests separately cover stale results, field/identity/revision
 mismatch, focus handoff, timeouts, cancellation and destruction. Biometric
 hardware behavior still belongs to the existing broker/agent acceptance tests.

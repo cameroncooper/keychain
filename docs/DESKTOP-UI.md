@@ -16,10 +16,31 @@ the compositor remains responsible for placement, focus and decorations.
 The accepted [Folio-inspired design](GUI-DESIGN-FOLIO.md) uses a category sidebar,
 searchable inventory and selected-item details. Font, spacing, focus, vector and
 scrollbar conventions follow the [source audit](../prototypes/qt/docs/FOLIO-STYLE-AUDIT.md).
-Categories are All, Logins, Passkeys and Codes. Ctrl+F/Ctrl+K focuses search;
-Escape hides/cancels. Narrow windows replace the sidebar with a compact filter
-strip and navigate between list and details. Icons are embedded paths; no
-favicons or website requests are made.
+Interaction follows the [overhaul plan](GUI-FOLIO-OVERHAUL-PLAN.md).
+- **Categories** are All, Logins, Passkeys and Codes, with counts.
+- **Opening and search:** the window opens in search. ↓, Enter or Tab go to the
+  results.
+- **Regions:** Tab moves between the categories, the accounts and the details.
+- **Accounts:** the arrows select an account, which reveals metadata only.
+  Enter runs the main action named at the bottom of the details. In
+  per-operation mode that action asks for a fingerprint when the record is
+  protected, and the button shows a fingerprint glyph.
+- **Escape**, one step at a time: stop, hide, dismiss, go back, then clear search.
+- **Account menu** (right-click, Alt+Enter or Menu): lists every action with its key.
+- **Narrow windows** keep the categories as a glyph rail and show either the
+  accounts or the details.
+
+Icons are embedded paths; no favicons are fetched. "Open website" passes a
+validated `https://host/` to the user's browser, and Keychain itself never
+requests the site. "Copy username" is the only clipboard write. The username
+is not a secret. Password and code copying waits for a written clipboard
+policy.
+
+The window already has the unlock-session states. It reads `auth.mode` from
+the controller (`per-operation` today). `locked` shows only an unlock view,
+with no sites, accounts or counts. `unlocked` adds a Lock button (Ctrl+L).
+The controller never reports either state yet. The unlock view forwards no
+password; how one reaches the broker belongs to that future contract.
 
 Details describe whether an item is synced or device-only separately from how
 its local key is protected. The app reads the shared `inventory::visible_index`

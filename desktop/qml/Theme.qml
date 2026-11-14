@@ -20,7 +20,9 @@ QtObject {
     readonly property color bright: tokens.bright || foreground
     readonly property color secondary: tokens.secondary || foreground
     readonly property color accent: tokens.accent || "#ffd60a"
-    readonly property color onAccent: tokens.onAccent || "#000000"
+    // Not "onAccent": QML reads on… names as signal handlers, and the binding
+    // would never update (Folio notes the same in its FileMenu).
+    readonly property color accentText: tokens.onAccent || "#000000"
     // The accent when it reads on the surface, otherwise the bright foreground.
     readonly property color selectionInk: tokens.selectionInk || accent
     // Theme colors are whatever the theme says; some make "red" teal. Never
@@ -57,4 +59,15 @@ QtObject {
     readonly property int credentialRow: 56 // Keychain: two lines, not a 32-pixel file row.
     readonly property int credentialPane: 340 // Keychain: room for long accounts.
     readonly property int tooltipDelay: 600
+    readonly property int rail: 52 // Keychain: the sidebar's glyph-only form.
+    readonly property int wideWindow: 960 // Below this, the rail and a list/details stack.
+    readonly property int fieldLabel: 104 // Keychain: the details' label column.
+    readonly property int smallControl: 28
+    // Work that ends within this never shows as progress, so nothing flashes.
+    readonly property int slowWork: 1000
+
+    // "Ctrl+Shift+U" reads as "Ctrl + Shift + U", as in Folio's menus and help.
+    function keys(text) {
+        return text.replace(/(\S)\+(?=\S)/g, "$1 + ")
+    }
 }

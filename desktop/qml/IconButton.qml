@@ -11,6 +11,7 @@ AbstractButton {
 
     property string glyph
     property bool active: false
+    property real glyphSize: Theme.icon
 
     implicitWidth: Theme.control
     implicitHeight: Theme.control
@@ -50,6 +51,7 @@ AbstractButton {
         Glyph {
             anchors.centerIn: parent
             name: button.glyph
+            size: button.glyphSize
             color: !button.enabled ? Qt.alpha(Theme.foreground, 0.35)
                  : button.active ? Theme.bright : Theme.foreground
         }

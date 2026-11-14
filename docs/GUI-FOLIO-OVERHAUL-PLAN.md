@@ -239,7 +239,17 @@ them.
 5. **Add the settle step** from Folio's `Main.qml`: contents disabled with
    opacity 0 until the first resize after the first frame, or after 150 ms.
 
-### Phase 1 — Interaction model
+### Phase 1 — Interaction model — done 2026-11-14
+
+Status: implemented, with these additions and differences:
+- A search glyph in the top bar gives mouse users a way into search.
+- Ctrl+R also refreshes.
+- The details pane keeps its own explicit Tab order (main action, then each
+  field's actions top to bottom), because Qt's focus chain wraps inside the
+  pane.
+- Alt+Enter is handled in the list's single key handler, so it can never also
+  run the plain-Enter action.
+
 
 1. **Regions:** sidebar → list → details, cycled with `Tab`/`Shift+Tab`
    through a window-level `moveKeyboard()`. Rows and sidebar entries become
@@ -289,7 +299,13 @@ Shortcut sheet after Phase 1:
 | ? | Shortcuts |
 | Q | Close (not while typing) |
 
-### Phase 2 — Visual tightening
+### Phase 2 — Visual tightening — done 2026-11-14
+
+Status: implemented, including the authorization-mode views (`UnlockView`,
+lock button), which are exercised only by the smoke test. The code countdown
+is text ("Changes in 21 s") rather than a ring glyph. The horizontal filter
+strip and `NavButton` are gone.
+
 
 1. **Top bar.** Remove the "Keychain" title. The left side starts at the
    window edge and shows the scope as a breadcrumb (`Keychain / Logins`,
@@ -357,6 +373,11 @@ Shortcut sheet after Phase 1:
 
 ### Phase 3 — Capabilities the layout now has room for
 
+Status: 1 (copy username, open website) and 3 (character-coloured
+passwords) are done. 2 (copying passwords and codes) waits for the written
+clipboard policy, as agreed.
+
+
 These need explicit agreement, because they touch secret-handling policy.
 
 1. **Copy username / Open website.** No secret is involved. Open website
@@ -371,6 +392,15 @@ These need explicit agreement, because they touch secret-handling policy.
    managers do. Monospace already distinguishes `0/O` and `l/1`.
 
 ### Phase 4 — Validation
+
+Status, 2026-11-14:
+- **Done:** the smoke test covers dark, light and narrow layouts, each in the
+  default, revealed and locked states, and runs the keyboard script below.
+- **Still to do:** RTL, very long strings, 200 % scale, a live Omarchy theme
+  switch, a theme with radius > 0, and assistive-technology checks.
+- **Not changed:** controller unit tests still cover stale results, focus loss
+  and the hide timer.
+
 
 - Extend `bin/check` screenshots to a matrix of {dark, light} × {wide, 960,
   narrow} × {nothing selected, selected, revealed, pending, error banner,

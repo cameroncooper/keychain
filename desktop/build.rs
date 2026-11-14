@@ -7,15 +7,18 @@ const COMPONENTS: &[&str] = &[
     "qml/Glyph.qml",
     "qml/PlainButton.qml",
     "qml/IconButton.qml",
-    "qml/NavButton.qml",
     "qml/PlainField.qml",
     "qml/QuietScrollBar.qml",
     "qml/TopBar.qml",
     "qml/Sidebar.qml",
-    "qml/FilterStrip.qml",
     "qml/AccountList.qml",
     "qml/DetailPane.qml",
     "qml/HelpOverlay.qml",
+    "qml/KeychainMenu.qml",
+    "qml/MenuEntry.qml",
+    "qml/MenuLine.qml",
+    "qml/Banner.qml",
+    "qml/UnlockView.qml",
 ];
 fn main() {
     let files = COMPONENTS

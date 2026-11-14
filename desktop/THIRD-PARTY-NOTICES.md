@@ -5,11 +5,17 @@ commit `61b7e20cf0325bae472514b80a8ffdb639e585f8`:
 
 - `qml/Main.qml`: window structure and the settle-before-showing step
 - `qml/Theme.qml`, `src/theme.rs`: palette reading and derivation, measurements, Hyprland rounding
-- `qml/PlainButton.qml`, `qml/IconButton.qml`, `qml/NavButton.qml`: button geometry, focus rings, row tints
+- `qml/PlainButton.qml`, `qml/IconButton.qml`: button geometry, focus rings, tints
 - `qml/PlainField.qml`: field treatment and placeholder handling
 - `qml/Glyph.qml`: vector glyph rendering
 - `qml/QuietScrollBar.qml`: the scrollbar
-- `qml/Sidebar.qml`, `qml/AccountList.qml`: section labels, row selection and in-place model updates
+- `qml/Sidebar.qml`, `qml/AccountList.qml`: section labels, keyboard cursor, row selection and in-place model updates
+- `qml/TopBar.qml`: breadcrumb path, in-place search with its scope, toolbar
+- `qml/DetailPane.qml`: hero, summary, fact grid and the pinned main action
+- `qml/Banner.qml`: problems and slow-work banner
+- `qml/HelpOverlay.qml`: the shortcut sheet
+- `qml/KeychainMenu.qml`, `qml/MenuEntry.qml`, `qml/MenuLine.qml`: menus that show their keys
+- `qml/UnlockView.qml`: dialog grammar and password-field lifetime
 
 Folio uses the following license.
 
