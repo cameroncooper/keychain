@@ -44,13 +44,19 @@ fn main() {
         child();
         return;
     }
-    for mode in ["dark", "light", "narrow"] {
+    // "stress": right-to-left, 200 % scale and very long names.
+    for mode in ["dark", "light", "narrow", "stress"] {
         let dir = TestProfile::new();
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(dir.path().join("runtime"))
             .unwrap();
-        let output = Command::new(std::env::current_exe().unwrap())
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        if mode == "stress" {
+            // Qt's own switches: mirror the whole window, draw at twice the size.
+            command.arg("-reverse").env("QT_SCALE_FACTOR", "2");
+        }
+        let output = command
             .arg("--child")
             .env("HOME", dir.path())
             .env("XDG_CONFIG_HOME", dir.path().join("config"))
@@ -105,6 +111,13 @@ fn child() {
     second.title = "Other".into();
     second.domain = "other.example".into();
     second.totp_uri.clear();
+    if mode == "stress" {
+        second.title = format!("Other {}", "very-long-subdomain.".repeat(6));
+        second.username = format!(
+            "{}@an-unusually-long-mail-domain.example",
+            "someone.with.a.long.name".repeat(3)
+        );
+    }
     store
         .save_vault(&VaultState {
             schema_version: 1,

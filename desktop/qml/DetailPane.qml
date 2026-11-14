@@ -28,6 +28,8 @@ FocusScope {
     readonly property bool asksFingerprint: authMode === "per-operation" && !!selected && selected.protected === true
     // The field the main action is about: the password if there is one.
     readonly property string primaryField: !selected ? "" : selected.password ? "password" : selected.totp ? "totp" : selected.notes ? "notes" : ""
+    // The password's row, for the smoke test's reading-order check.
+    readonly property Item passwordRow: secretRows.count ? secretRows.itemAt(0) : null
     readonly property bool canOpenWebsite: !!selected && /^[a-z0-9.-]+(:[0-9]{1,5})?$/i.test(selected.domain || "")
 
     // The controls Tab visits here, top to bottom after the main action. Qt's
@@ -128,6 +130,7 @@ FocusScope {
         property string glyphText: ""
         property bool glyphEnabled: true
         property string characters: ""
+        readonly property alias characterFlow: characterFlow
         signal triggered()
 
         Layout.fillWidth: true
@@ -143,8 +146,15 @@ FocusScope {
         ColumnLayout {
             Layout.fillWidth: true
             Layout.alignment: Qt.AlignTop
-            Layout.topMargin: 4
+            // The filler below adds one spacing above the value.
+            Layout.topMargin: 0
             spacing: 4
+            // Always fills, so the column keeps the row's width (and the
+            // action its place at the end) when only sized children show.
+            Item {
+                Layout.fillWidth: true
+                implicitHeight: 0
+            }
             Words {
                 id: valueText
                 Layout.fillWidth: true
@@ -156,8 +166,23 @@ FocusScope {
             // Letters, digits and symbols in different inks, so a password
             // can be read out or typed without mistakes. Each character is
             // its own plain-text item; nothing is interpreted as markup.
+            //
+            // A secret is a left-to-right string in every language: a mirrored
+            // Flow would place its characters in reverse order.
+            // Sized to its characters (the font is monospace) so the mirrored
+            // column places it at the value's starting edge, like the others.
+            FontMetrics {
+                id: secretMetrics
+                font.family: Theme.family
+                font.pixelSize: Theme.secretText
+            }
             Flow {
-                Layout.fillWidth: true
+                id: characterFlow
+                Layout.preferredWidth: Math.min(parent.width, Math.ceil(secretMetrics.advanceWidth("M") * fieldRow.characters.length) + 1)
+                Layout.alignment: Qt.AlignLeft
+                LayoutMirroring.enabled: false
+                LayoutMirroring.childrenInherit: true
+                layoutDirection: Qt.LeftToRight
                 visible: fieldRow.characters.length > 0
                 Repeater {
                     model: fieldRow.characters.length

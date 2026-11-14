@@ -394,10 +394,15 @@ These need explicit agreement, because they touch secret-handling policy.
 ### Phase 4 — Validation
 
 Status, 2026-11-14:
-- **Done:** the smoke test covers dark, light and narrow layouts, each in the
-  default, revealed and locked states, and runs the keyboard script below.
-- **Still to do:** RTL, very long strings, 200 % scale, a live Omarchy theme
-  switch, a theme with radius > 0, and assistive-technology checks.
+- **Done:** the smoke test covers dark, light and narrow layouts, plus a
+  fourth "stress" mode (right-to-left, 200 % scale, very long names). Each
+  runs in the default, revealed and locked states with the keyboard script
+  below.
+- **Stress mode found and fixed:** in right-to-left layout, the revealed
+  password's characters were drawn in reverse. The test now checks their
+  reading order.
+- **Still to do:** a live Omarchy theme switch, a theme with radius > 0, and
+  assistive-technology checks.
 - **Not changed:** controller unit tests still cover stale results, focus loss
   and the hide timer.
 

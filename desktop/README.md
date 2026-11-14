@@ -77,10 +77,11 @@ select an account, and its details show the main action that Enter runs.
 | Q | Close, outside text entry |
 
 `bin/check` tests the production adapter/QML against an isolated encrypted
-software vault in dark, light and narrow layouts. It drives launch focus,
+software vault in dark, light and narrow layouts, plus a right-to-left,
+200 %-scale run with very long names. It drives launch focus,
 search, arrow selection, the Tab regions, the Escape steps, reveals through the
 main action, the menu, help, copy username and the locked/unlocked modes.
-Screenshots in `/tmp/keychain-production-{dark,light,narrow}{,-revealed,-locked}.png`
+Screenshots in `/tmp/keychain-production-{dark,light,narrow,stress}{,-revealed,-locked}.png`
 contain synthetic content only.
 Controller unit tests separately cover stale results, field/identity/revision
 mismatch, focus handoff, timeouts, cancellation and destruction. Biometric

@@ -25,6 +25,13 @@
                 console.log("window active: " + win.active);
                 win.check(win.tokens.background === (win.testMode === "light" ? "#f4f3ef" : "#16161a"), "explicit palette");
                 win.check(win.font.pixelSize === 13 && search.font.pixelSize === 14, "typography");
+                if (win.testMode === "stress") {
+                    win.check(Qt.application.layoutDirection === Qt.RightToLeft, "right-to-left");
+                    // Mirrored: the categories are on the right, the details on the left.
+                    win.check(categoryPane.mapToItem(surface, 0, 0).x > credentialPane.mapToItem(surface, 0, 0).x
+                              && credentialPane.mapToItem(surface, 0, 0).x > detailPane.mapToItem(surface, 0, 0).x, "mirrored panes");
+                    win.check(credentialPane.width === 340, "long names don't widen the list");
+                }
                 win.check(categoryPane.width === (win.compact ? 52 : 190), "sidebar or rail");
                 win.check(Theme.radius === 0 && Theme.red.a === 1 && Theme.light === (win.testMode === "light"), "derived theme");
                 win.check(String(Theme.accentText) === (win.testMode === "light" ? "#ffffff" : "#000000"), "text on the accent");
@@ -130,6 +137,9 @@
             case 10:
                 if (win.state.busy) return;
                 win.check(backend.revealed === "synthetic-password", "second password reveal");
+                // Characters read left to right in every layout direction.
+                const drawn = detailPane.passwordRow.characterFlow.children.filter(c => c.character !== undefined).sort((a, b) => a.x - b.x).map(c => c.character).join("");
+                win.check(drawn === "synthetic-password", "password reading order: " + drawn.length + " characters");
                 win.check(win.compact ? detailPane.width >= win.width - Theme.rail - 4 : credentialPane.width === 340, "pane geometry");
                 stop();
                 win.grab(win.testMode + "-revealed", function() {
