@@ -159,8 +159,6 @@
                 if (win.state.busy) return;
                 // A click opened these details: nothing in them shows a focus ring.
                 win.check(!detailPane.keyboardStops().some(stop => stop.visualFocus), "a click leaves no focus ring");
-                // The screenshot shows a keyboard ring on the rightmost control (copy).
-                detailPane.keyboardStops()[1].forceActiveFocus(Qt.TabFocusReason);
                 win.check(backend.revealed === "synthetic-password", "second password reveal");
                 // Characters read left to right in every layout direction.
                 const drawn = detailPane.passwordRow.characterFlow.children.filter(c => c.character !== undefined).sort((a, b) => a.x - b.x).map(c => c.character).join("");
